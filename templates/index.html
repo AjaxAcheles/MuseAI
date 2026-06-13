@@ -13,10 +13,11 @@
   <header class="masthead">
     <div class="brand">Muse<span>AI</span></div>
     <p class="tagline">Describe an idea. Receive a story.</p>
+    <p class="providers" title="Configured in .env">{{ active_providers }}</p>
   </header>
 
-  {% if not has_api_key %}
-  <div class="banner warn">No <code>ANTHROPIC_API_KEY</code> detected — set it in <code>.env</code> before generating.</div>
+  {% if not ready %}
+  <div class="banner warn">{{ readiness_message }}</div>
   {% endif %}
 
   <main>

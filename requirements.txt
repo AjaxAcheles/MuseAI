@@ -1,5 +1,6 @@
 quart>=0.19
 anthropic>=0.40
+openai>=1.40
 aiosqlite>=0.20
 python-dotenv>=1.0
 python-docx>=1.1

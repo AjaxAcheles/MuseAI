@@ -28,10 +28,13 @@ async def _startup() -> None:
 
 @app.get("/")
 async def index():
+    ready, message = settings.config_ready()
     return await render_template(
         "index.html",
         length_presets=LENGTH_PRESETS,
-        has_api_key=settings.has_api_key,
+        ready=ready,
+        readiness_message=message,
+        active_providers=settings.active_providers(),
     )
 
 
@@ -95,8 +98,9 @@ async def stream(pid: str):
     brief = Brief(**project["brief"])
 
     async def event_source():
-        if not settings.has_api_key:
-            yield _sse("error", {"stage": "config", "message": "ANTHROPIC_API_KEY is not set."})
+        ready, message = settings.config_ready()
+        if not ready:
+            yield _sse("error", {"stage": "config", "message": message})
             return
         async for event, data in run_pipeline(pid, brief):
             yield _sse(event, data)

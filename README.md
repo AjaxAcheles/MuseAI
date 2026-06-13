@@ -6,7 +6,8 @@ generation pipeline** so that long-form output keeps consistent characters,
 voice, and a real narrative arc, rather than one-shotting a story.
 
 Built with **Quart** (async Python) and **Claude** (`claude-opus-4-8`) via the
-official `anthropic` SDK, with live streaming over Server-Sent Events.
+official `anthropic` SDK, with live streaming over Server-Sent Events. Each stage
+can also run on a **local model** — see [Local models](#local-models).
 
 ## How it works
 
@@ -33,7 +34,7 @@ flowchart TD
         S6["6 · Revision<br/>(stream)"]
     end
 
-    Claude{{"Claude<br/>claude-opus-4-8"}}
+    Claude{{"Model provider<br/>Claude or local (OpenAI-compatible)"}}
 
     Form -->|"POST /api/projects + upload"| API
     API --> Ingest --> DB
@@ -90,20 +91,64 @@ and a scene streams.
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `ANTHROPIC_API_KEY` | — | required |
-| `MUSEAI_PLANNING_MODEL` | `claude-opus-4-8` | premise/bible/outline/summary |
-| `MUSEAI_DRAFTING_MODEL` | `claude-opus-4-8` | scene drafting + revision (set to `claude-sonnet-4-6` to cut cost on long stories) |
+| `ANTHROPIC_API_KEY` | — | required only if a stage uses Claude |
+| `MUSEAI_PLANNING_PROVIDER` | `anthropic` | `anthropic` or `local` — premise/bible/outline/summary |
+| `MUSEAI_DRAFTING_PROVIDER` | `anthropic` | `anthropic` or `local` — scene drafting + revision |
+| `MUSEAI_PLANNING_MODEL` | `claude-opus-4-8` | planning model id |
+| `MUSEAI_DRAFTING_MODEL` | `claude-opus-4-8` | drafting model id (e.g. `claude-sonnet-4-6` to cut cost) |
+| `MUSEAI_LOCAL_BASE_URL` | `http://localhost:11434/v1` | OpenAI-compatible endpoint (Ollama default) |
+| `MUSEAI_LOCAL_API_KEY` | `ollama` | placeholder key the SDK requires (most local servers ignore it) |
 | `MUSEAI_DB_PATH` | `museai.db` | SQLite file |
 | `MUSEAI_HOST` / `MUSEAI_PORT` | `localhost` / `8000` | bind address |
 
 Length presets (scene count + per-scene token budget) live in `config.py`.
+
+## Local models
+
+MuseAI can run any stage against a local **OpenAI-compatible** server — Ollama,
+LM Studio, vLLM, or `llama.cpp --server`. Providers are chosen **per stage group**
+(planning vs drafting), so you can go fully local or mix Claude and local.
+
+**Fully local with Ollama:**
+
+```bash
+ollama pull llama3.1
+# in .env:
+#   MUSEAI_PLANNING_PROVIDER=local
+#   MUSEAI_DRAFTING_PROVIDER=local
+#   MUSEAI_PLANNING_MODEL=llama3.1
+#   MUSEAI_DRAFTING_MODEL=llama3.1
+hypercorn app:app --bind localhost:8000   # no ANTHROPIC_API_KEY needed
+```
+
+**Mixed — Claude plans, local model writes prose** (a good balance: the
+structured planning stages stay reliable, drafting runs free/offline):
+
+```bash
+#   MUSEAI_PLANNING_PROVIDER=anthropic
+#   MUSEAI_DRAFTING_PROVIDER=local
+#   MUSEAI_DRAFTING_MODEL=llama3.1
+```
+
+Point at a different runtime by changing `MUSEAI_LOCAL_BASE_URL` (e.g. LM Studio
+`http://localhost:1234/v1`, vLLM `http://localhost:8000/v1`). The active providers
+are shown as a badge in the app header.
+
+**Notes**
+- The structured planning stages (premise / bible / outline) need valid JSON.
+  MuseAI requests schema-constrained output and falls back to JSON-mode +
+  prompt + a repair retry, but small models can still struggle — prefer a capable
+  instruct model (e.g. `llama3.1`, `qwen2.5`, `mistral-nemo`) for planning, or
+  keep planning on Claude.
+- Prefer a non-reasoning instruct model for **drafting**: models that emit
+  `<think>…</think>` will stream that reasoning into the prose.
 
 ## Layout
 
 ```
 app.py            Quart routes (SPA + JSON API + SSE)
 config.py         settings + length presets
-pipeline/         schemas, prompts, per-stage Claude calls, generator
+pipeline/         schemas, prompts, llm (provider backends), per-stage calls, generator
 ingest/           document text extraction + brief normalization
 storage/          aiosqlite persistence
 export/           md / txt / docx / pdf rendering

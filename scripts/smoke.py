@@ -13,14 +13,17 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from config import settings  # noqa: E402
 from pipeline import stages  # noqa: E402
 from pipeline.schemas import Brief  # noqa: E402
 
 
 async def main() -> int:
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        print("ANTHROPIC_API_KEY not set — skipping live smoke test.")
+    ready, message = settings.config_ready()
+    if not ready:
+        print(f"Skipping live smoke test — {message}")
         return 0
+    print(f"Providers — {settings.active_providers()}\n")
 
     brief = Brief(
         idea="A retired cartographer is asked to map a town that does not appear on any record.",
