@@ -13,6 +13,7 @@ drafting) or run fully local.
 """
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass, field
 
@@ -53,6 +54,7 @@ class Settings:
     db_path: str = os.environ.get("MUSEAI_DB_PATH", "museai.db")
     host: str = os.environ.get("MUSEAI_HOST", "localhost")
     port: int = int(os.environ.get("MUSEAI_PORT", "8000"))
+    log_level: str = os.environ.get("MUSEAI_LOG_LEVEL", "INFO").upper()
     # Planning stages think hard; keep their output cap modest.
     planning_max_tokens: int = 16000
     # Upload guardrails.
@@ -95,6 +97,25 @@ class Settings:
 
 def length_preset(name: str | None) -> dict[str, int]:
     return LENGTH_PRESETS.get((name or DEFAULT_LENGTH).lower(), LENGTH_PRESETS[DEFAULT_LENGTH])
+
+
+_logging_configured = False
+
+
+def configure_logging() -> None:
+    """Set up MuseAI logging once. Safe to call repeatedly."""
+    global _logging_configured
+    if _logging_configured:
+        return
+    logging.basicConfig(
+        level=getattr(logging, settings.log_level, logging.INFO),
+        format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
+        datefmt="%H:%M:%S",
+    )
+    # The HTTP/SDK layers are chatty at DEBUG; keep them at WARNING.
+    for noisy in ("httpx", "httpcore", "openai", "anthropic"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+    _logging_configured = True
 
 
 settings = Settings()

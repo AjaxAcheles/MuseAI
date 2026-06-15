@@ -13,12 +13,13 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from config import settings  # noqa: E402
+from config import configure_logging, settings  # noqa: E402
 from pipeline import stages  # noqa: E402
 from pipeline.schemas import Brief  # noqa: E402
 
 
 async def main() -> int:
+    configure_logging()
     ready, message = settings.config_ready()
     if not ready:
         print(f"Skipping live smoke test — {message}")

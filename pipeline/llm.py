@@ -16,12 +16,15 @@ story-bible prefix; the OpenAI-compatible backend just joins them.
 from __future__ import annotations
 
 import json
+import logging
 import re
 from typing import AsyncIterator, Protocol, Type, TypeVar
 
 from pydantic import BaseModel, ValidationError
 
 from config import ANTHROPIC, LOCAL, settings
+
+log = logging.getLogger("museai.llm")
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -88,8 +91,27 @@ class OpenAICompatBackend:
         from openai import AsyncOpenAI
 
         self._client = AsyncOpenAI(base_url=settings.local_base_url, api_key=settings.local_api_key)
+        log.info("local (OpenAI-compatible) backend → %s", settings.local_base_url)
+
+    def _friendly(self, exc: Exception, model: str) -> RuntimeError:
+        """Turn the common local-server failures into actionable messages."""
+        import openai
+
+        if isinstance(exc, openai.APIConnectionError):
+            return RuntimeError(
+                f"Could not reach the local model server at {settings.local_base_url} — "
+                "is it running? (e.g. start Ollama, or check MUSEAI_LOCAL_BASE_URL)."
+            )
+        if isinstance(exc, openai.NotFoundError):
+            return RuntimeError(
+                f"Model '{model}' was not found on the local server at "
+                f"{settings.local_base_url} — pull it first (e.g. `ollama pull {model}`)."
+            )
+        return RuntimeError(f"Local model request failed ({type(exc).__name__}): {exc}")
 
     async def _chat(self, model, system, user, max_tokens, response_format=None) -> str:
+        import openai
+
         kwargs: dict = {
             "model": model,
             "max_tokens": max_tokens,
@@ -100,7 +122,11 @@ class OpenAICompatBackend:
         }
         if response_format is not None:
             kwargs["response_format"] = response_format
-        resp = await self._client.chat.completions.create(**kwargs)
+        try:
+            resp = await self._client.chat.completions.create(**kwargs)
+        except (openai.APIConnectionError, openai.NotFoundError) as exc:
+            # Terminal misconfigurations — don't let the parse() fallback loop mask them.
+            raise self._friendly(exc, model) from exc
         return resp.choices[0].message.content or ""
 
     async def parse(self, model: str, system: str, user: str, schema: Type[T], max_tokens: int) -> T:
@@ -120,16 +146,23 @@ class OpenAICompatBackend:
         ]
         last_content: str | None = None
         for rf in attempts:
+            mode = rf.get("type") if rf else "plain"
             is_schema_mode = bool(rf) and rf.get("type") == "json_schema"
             prompt = user if is_schema_mode else user + schema_hint
+            log.debug("parse %s on %s: response_format=%s", schema.__name__, model, mode)
             try:
                 content = await self._chat(model, system, prompt, max_tokens, response_format=rf)
-            except openai.BadRequestError:
+            except openai.BadRequestError as exc:
+                log.debug("server rejected response_format=%s (%s) — trying next", mode, exc)
                 continue  # this server doesn't accept this response_format — try the next
             last_content = content
             try:
                 return schema.model_validate_json(_extract_json(content))
-            except (ValueError, ValidationError):
+            except (ValueError, ValidationError) as exc:
+                log.warning(
+                    "parse %s: %s reply did not validate (%s) — attempting one repair pass",
+                    schema.__name__, mode, exc.__class__.__name__,
+                )
                 break  # got a reply, but it didn't validate — go to the repair pass
 
         if last_content is not None:
@@ -137,7 +170,7 @@ class OpenAICompatBackend:
             return schema.model_validate_json(_extract_json(repaired))
 
         raise RuntimeError(
-            f"Local model '{model}' did not return JSON for {schema.__name__}. "
+            f"Local model '{model}' did not return usable JSON for {schema.__name__}. "
             "Try a more capable instruct model for the planning stages, or run them on Claude."
         )
 
@@ -159,21 +192,26 @@ class OpenAICompatBackend:
     async def stream(
         self, model: str, system_segments: list[str], user: str, max_tokens: int
     ) -> AsyncIterator[str]:
+        import openai
+
         system = "\n\n".join(system_segments)
-        stream = await self._client.chat.completions.create(
-            model=model,
-            max_tokens=max_tokens,
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            stream=True,
-        )
-        async for chunk in stream:
-            if chunk.choices:
-                delta = chunk.choices[0].delta.content
-                if delta:
-                    yield delta
+        try:
+            stream = await self._client.chat.completions.create(
+                model=model,
+                max_tokens=max_tokens,
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                stream=True,
+            )
+            async for chunk in stream:
+                if chunk.choices:
+                    delta = chunk.choices[0].delta.content
+                    if delta:
+                        yield delta
+        except (openai.APIConnectionError, openai.NotFoundError) as exc:
+            raise self._friendly(exc, model) from exc
 
 
 # --------------------------------------------------------------------------- #

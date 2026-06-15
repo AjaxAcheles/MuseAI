@@ -7,6 +7,7 @@ revision `stream`; the rolling summary uses `complete`.
 """
 from __future__ import annotations
 
+import logging
 from typing import AsyncIterator, Tuple
 
 from config import settings
@@ -22,12 +23,16 @@ from pipeline.schemas import (
     scene_to_prompt_block,
 )
 
+log = logging.getLogger("museai.stages")
+
 
 def _planning() -> Tuple[LLMBackend, str]:
+    log.debug("planning call: provider=%s model=%s", settings.planning_provider, settings.planning_model)
     return get_backend(settings.planning_provider), settings.planning_model
 
 
 def _drafting() -> Tuple[LLMBackend, str]:
+    log.debug("drafting call: provider=%s model=%s", settings.drafting_provider, settings.drafting_model)
     return get_backend(settings.drafting_provider), settings.drafting_model
 
 

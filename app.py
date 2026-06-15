@@ -6,11 +6,12 @@ pipeline.
 from __future__ import annotations
 
 import json
+import logging
 import os
 
 from quart import Quart, Response, jsonify, render_template, request
 
-from config import LENGTH_PRESETS, settings
+from config import LENGTH_PRESETS, configure_logging, settings
 from ingest.brief import build_brief
 from ingest.extract import extract_text
 from export.render import render as render_export
@@ -18,12 +19,16 @@ from pipeline.generator import run as run_pipeline
 from pipeline.schemas import Brief
 from storage import db
 
+configure_logging()
+log = logging.getLogger("museai.app")
 app = Quart(__name__)
 
 
 @app.before_serving
 async def _startup() -> None:
+    configure_logging()
     await db.init_db()
+    log.info("MuseAI ready | %s", settings.active_providers())
 
 
 @app.get("/")
@@ -45,6 +50,7 @@ async def create_project():
         return jsonify({"error": "Please describe your idea."}), 400
     brief = build_brief(form)
     pid = await db.create_project(brief.model_dump())
+    log.info("project created pid=%s length=%s", pid, brief.length)
     return jsonify({"id": pid, "brief": brief.model_dump()})
 
 
@@ -100,8 +106,10 @@ async def stream(pid: str):
     async def event_source():
         ready, message = settings.config_ready()
         if not ready:
+            log.warning("stream blocked pid=%s — %s", pid, message)
             yield _sse("error", {"stage": "config", "message": message})
             return
+        log.info("stream start pid=%s | %s", pid, settings.active_providers())
         async for event, data in run_pipeline(pid, brief):
             yield _sse(event, data)
 

@@ -164,7 +164,14 @@ function startGeneration() {
 
   evtSource.addEventListener("error", (e) => {
     let msg = "Generation failed. Check the server logs.";
-    try { if (e.data) msg = JSON.parse(e.data).message || msg; } catch (_) {}
+    // EventSource also fires "error" with no data on a dropped connection.
+    if (e.data) {
+      try {
+        const d = JSON.parse(e.data);
+        msg = d.stage ? `[${d.stage}] ${d.message || msg}` : (d.message || msg);
+        console.error("MuseAI generation error:", d.error_type || "", d.message || "", "\n", d.trace || "");
+      } catch (_) {}
+    }
     $("#generate-error").textContent = msg;
     if (evtSource) evtSource.close();
   });
