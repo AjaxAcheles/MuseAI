@@ -1,3 +1,17 @@
 _design/
 .claude
 .codex
+data/*
+!data/.gitkeep
+!data/styles/
+data/styles/*
+!data/styles/.gitkeep
+!data/snapshots/
+data/snapshots/*
+!data/snapshots/.gitkeep
+logs/*
+!logs/.gitkeep
+.env
+__pycache__/
+.venv/
+*.pyc

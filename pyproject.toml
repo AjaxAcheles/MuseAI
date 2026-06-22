@@ -1,0 +1,28 @@
+[project]
+name = "museai"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "quart",
+    "langgraph",
+    "pydantic>=2.0",
+    "pydantic-settings",
+    "jinja2",
+    "pyyaml",
+    "chromadb",
+    "tiktoken",
+    "graphiti-core",
+    "falkordblite; sys_platform != 'win32'",
+    "numpy",
+    "httpx",
+    "typing-extensions",
+]
+
+[project.optional-dependencies]
+hf-tokenizer = [
+    "transformers",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
