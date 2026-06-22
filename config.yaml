@@ -1,0 +1,55 @@
+# Raw runtime configuration.
+# All values are proposed defaults and are not validated until the config loader is built.
+
+endpoints:
+  planner:
+    base_url: "${PLANNER_BASE_URL}"
+    model_name: "planner-model-placeholder"
+    tokenizer_family: "tiktoken"
+    supports_concurrent_critics: false
+    grammar_constraint_strategy: "json_schema"
+
+  drafter:
+    base_url: "${DRAFTER_BASE_URL}"
+    model_name: "drafter-model-placeholder"
+    tokenizer_family: "tiktoken"
+    supports_concurrent_critics: false
+    grammar_constraint_strategy: "none"
+
+  critic:
+    base_url: "${CRITIC_BASE_URL}"
+    model_name: "critic-model-placeholder"
+    tokenizer_family: "tiktoken"
+    supports_concurrent_critics: true
+    grammar_constraint_strategy: "json_schema"
+
+  pad_translator:
+    base_url: "${PAD_TRANSLATOR_BASE_URL}"
+    model_name: "pad-translator-model-placeholder"
+    tokenizer_family: "tiktoken"
+    supports_concurrent_critics: false
+    grammar_constraint_strategy: "json_schema"
+
+  craft_consultant:
+    base_url: "${CRAFT_CONSULTANT_BASE_URL}"
+    model_name: "craft-consultant-model-placeholder"
+    tokenizer_family: "tiktoken"
+    supports_concurrent_critics: false
+    grammar_constraint_strategy: "json_schema"
+
+thresholds:
+  stylometric_drift_threshold: 0.12 # proposed default to be calibrated
+  pad_ewma_alpha: 0.35 # proposed default to be calibrated
+  coreference_confidence_floor: 0.65 # proposed default to be calibrated
+  cluster_similarity_threshold: 0.65 # proposed default to be calibrated
+  passive_voice_density: 0.25 # proposed default to be calibrated
+  voice_evolution_l2_cap: 0.30 # proposed default to be calibrated
+
+runtime:
+  model_validate_retry_cap: 3 # proposed default to be calibrated
+  headless_mode: false
+  beats_per_scene_min: 3 # proposed default to be calibrated
+  word_count_target: 80000 # proposed default to be calibrated
+
+logging:
+  log_level: "INFO"
