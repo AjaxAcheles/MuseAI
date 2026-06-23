@@ -3,8 +3,8 @@
 The living record of what is real, what is a stub, and what a session left half-done. The agent updates this in-repo copy at the end of every session, and it is read at the start of every session.
 
 ## Current position
-- **Last completed:** `03.01`
-- **Next up:** `03.02`
+- **Last completed:** `03.02`
+- **Next up:** `03.T1`
 - **Current session block:** S4
 
 ## Status key
@@ -24,6 +24,7 @@ The living record of what is real, what is a stub, and what a session left half-
 | 02.T1 | Config/Startup (test) | Synthetic config-loader tests for valid typed load, unknown key, type mismatch, and missing endpoint secrets; loader now rejects missing or empty endpoint API secrets | done | Endpoint `api_key` is required and populated from `{ENDPOINT}_API_KEY`; absent or empty secrets fail config validation instead of silently becoming `""`. | `python -m pytest tests/test_config.py -q --basetemp .pytest_tmp` passed: 4 passed. Local Codex Windows sandbox could not complete exact `uv run pytest tests/test_config.py -q` because uv cannot access/remove the WSL-style `.venv\lib64`; rerun in WSL should use the fixed loader. |
 | 02.T2 | Config/Startup (test) | Synthetic observability/lifecycle tests for node logging, inference-I/O logging, resource init/reset, and crash-sentinel no-op behavior | done | Module A (Config/Startup/Observability) is complete: strict config, both durable loggers, resource lifecycle/reset, and focused synthetic tests are present. Store init signatures and crash-sentinel scan remain honest no-op stubs for later modules. | `python -m pytest tests/test_observability.py -q --basetemp .pytest_tmp_obs` passed: 3 passed. `python -m pytest -q --basetemp .pytest_tmp_all` passed: 7 passed. Local Codex Windows sandbox could not complete exact `uv run pytest ...` because uv cannot rebuild the locked WSL-style `.venv`; rerun in WSL should exercise the same tests. |
 | 03.01 | Coordinator/State Machine | Strict Pydantic v2 `FSM_Pointer` schema with `arc_id`, `chapter_id`, `scene_id`, `beat_index`; strict Pydantic v2 `FailureObject` schema with `error_code`, `offending_text`, `suggested_fix`, `critic_source`; `failure_object_json_schema()` helper | done | `OrchestratorState` remains an honest stub for 03.02. `FailureObject` keeps open string fields because the design gives examples, not exhaustive enums. | `python -c "from fsm.state import FSM_Pointer, FailureObject, failure_object_json_schema; print(FSM_Pointer(arc_id='a1', chapter_id='c1', scene_id='s1', beat_index=0)); print(FailureObject(error_code='PACING_ISSUE', offending_text='too fast', suggested_fix='slow down', critic_source='pacing')); print(bool(failure_object_json_schema()))"` passed and printed both model instances plus `True`. Local Codex Windows sandbox could not complete the exact `uv run python -c ...` done-check because uv cannot remove the WSL-style `.venv\lib64`; rerun in WSL should exercise the same schema. |
+| 03.02 | Coordinator/State Machine | `OrchestratorState` TypedDict with documented fields and annotated list reducers; `accumulate_or_reset()`; `make_initial_state()` with fresh mutable defaults and validated overrides | done | No graph wiring, resource initialization, node execution, routing, or commit-reset behavior is implemented here. | `python -c "from fsm.state import FSM_Pointer, make_initial_state, accumulate_or_reset; s = make_initial_state('proj_1', FSM_Pointer(arc_id='a1', chapter_id='c1', scene_id='s1', beat_index=0)); print(sorted(s.keys())); print(accumulate_or_reset([1], [2])); print(accumulate_or_reset([1], []))"` passed and reset printed `[]`; additional checks confirmed fresh mutable defaults and clear unknown-override rejection. Local Codex Windows sandbox could not complete the exact `uv run python -c ...` done-check because uv rebuilt `.venv` but failed to spawn `python`; rerun in WSL should exercise the same code. |
 
 *(Append a row per increment. Keep "Current position" accurate - it is read first each session.)*
 
@@ -32,4 +33,3 @@ The living record of what is real, what is a stub, and what a session left half-
 - `scan_startup_crash_sentinel()` - no-op until CommitIntent records and crash recovery land (13).
 - `core.antislop.detect_slop()` and `core.antislop.resolve_slop()` - no-op passthroughs until anti-slop implementation.
 - `memory.graphiti_client._apply_event()` - intentional early no-op for graph writes during crash-recovery scaffolding.
-- `fsm.state.OrchestratorState` - typed stub until 03.02.
