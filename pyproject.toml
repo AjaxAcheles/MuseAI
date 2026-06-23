@@ -26,6 +26,10 @@ hf-tokenizer = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 python_files = ["test_*.py"]
+addopts = ["-p", "no:cacheprovider"]
+markers = [
+    "integration: live model-server checks driven by config.yaml",
+]
 
 [dependency-groups]
 dev = [
