@@ -3,9 +3,9 @@
 The living record of what is real, what is a stub, and what a session left half-done. The agent updates this in-repo copy at the end of every session, and it is read at the start of every session.
 
 ## Current position
-- **Last completed:** `02.05`
-- **Next up:** `02.T1`
-- **Current session block:** S2
+- **Last completed:** `02.T2`
+- **Next up:** `03.01`
+- **Current session block:** S4
 
 ## Status key
 `done` - built, done-check passes | `stub` - placeholder with docstring, no real logic | `half-done` - started, not passing (see notes)
@@ -21,8 +21,8 @@ The living record of what is real, what is a stub, and what a session left half-
 | 02.03 | Config/Startup | Shared node-event logger: `get_logger(node_name)` writes JSON lines to a rotating `logs/fsm.log`; `log_node_event()` emits node, pointer, duration, outcome, and optional error fields | done | Handler attaches once per logger name, `propagate=False`, and level resolves from strict `config.yaml` logging config. Rotation envelope remains the section 3.1 file-size housekeeping default. | Strict config load verified; three events append as three valid JSON lines; a tiny-cap done-check rotates to `fsm.log.1`/`fsm.log.2` while every retained line parses as one JSON object. |
 | 02.04 | Config/Startup | Dedicated inference-boundary logger: `get_llm_io_logger()` writes JSON lines to rotating `logs/llm_io.log`; `log_llm_call()` records full request payload, final response text, and duration | done | Separate from the FSM node-event logger and not wired into `call_llm()` yet. Records only the final assembled response, not streaming chunks. | Simulated call wrote exactly one valid JSON line with request, response, and duration; temp check confirmed no `fsm.log` was created. |
 | 02.05 | Config/Startup | Resource lifecycle: `init_resources(config)` creates runtime directories and placeholder store artifacts; `reset_resources(config)` wipes documented file-based artifacts and reinitializes them | done | Store initializers and `scan_startup_crash_sentinel()` are labelled no-op stubs pending their owning store/crash modules. Reset is not wired to an HTTP route. | Temp-root done-check: init created data/log directories and store artifacts; reset removed SQLite, Graphiti, Chroma, event-log, style JSON, and snapshot ZIP artifacts; init and reset each ran twice cleanly. |
-| 02.T1 | Config/Startup (test) | Synthetic config-loader tests for valid typed load, unknown key, type mismatch, and missing endpoint secrets | half-done | Test file exists, but the missing-secret case exposes a real loader gap: absent endpoint secret env vars currently become `api_key=""` instead of raising a clear validation error. Core loader was not changed because this increment says to touch only the test file and report gaps. | Requested `uv run pytest tests/test_config.py -q` could not run due uv cache/.venv permission errors. `python -m pytest tests/test_config.py -q --basetemp .pytest_tmp` ran: 3 passed, 1 failed (`test_missing_endpoint_secret_raises_clear_error`). |
-| 02.T2 | Config/Startup (test) | _pending_ | - | - | - |
+| 02.T1 | Config/Startup (test) | Synthetic config-loader tests for valid typed load, unknown key, type mismatch, and missing endpoint secrets; loader now rejects missing or empty endpoint API secrets | done | Endpoint `api_key` is required and populated from `{ENDPOINT}_API_KEY`; absent or empty secrets fail config validation instead of silently becoming `""`. | `python -m pytest tests/test_config.py -q --basetemp .pytest_tmp` passed: 4 passed. Local Codex Windows sandbox could not complete exact `uv run pytest tests/test_config.py -q` because uv cannot access/remove the WSL-style `.venv\lib64`; rerun in WSL should use the fixed loader. |
+| 02.T2 | Config/Startup (test) | Synthetic observability/lifecycle tests for node logging, inference-I/O logging, resource init/reset, and crash-sentinel no-op behavior | done | Module A (Config/Startup/Observability) is complete: strict config, both durable loggers, resource lifecycle/reset, and focused synthetic tests are present. Store init signatures and crash-sentinel scan remain honest no-op stubs for later modules. | `python -m pytest tests/test_observability.py -q --basetemp .pytest_tmp_obs` passed: 3 passed. `python -m pytest -q --basetemp .pytest_tmp_all` passed: 7 passed. Local Codex Windows sandbox could not complete exact `uv run pytest ...` because uv cannot rebuild the locked WSL-style `.venv`; rerun in WSL should exercise the same tests. |
 
 *(Append a row per increment. Keep "Current position" accurate - it is read first each session.)*
 

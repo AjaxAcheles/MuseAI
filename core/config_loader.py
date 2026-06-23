@@ -1,17 +1,17 @@
 """Module: M14 (Configuration, Startup & Observability)
-Parse config.yaml into a validated, strongly-typed AppConfig, applying env
-overrides for per-endpoint secrets.
+Parse config.yaml into a validated, strongly-typed AppConfig, applying
+environment-sourced per-endpoint secrets.
 
-Permissive parse (happy path): unknown keys are tolerated for now; fail-fast
-rejection of unknown/mistyped keys lands in increment 02.02. Every numeric
-threshold is a calibratable proposed default read from config — never hardcoded.
+Unknown keys and missing or empty endpoint secrets fail at load time. Every
+numeric threshold is a calibratable proposed default read from config, never
+hardcoded.
 """
 
 import os
 from pathlib import Path
 
 import yaml
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, field_validator
 
 # Per-endpoint secrets are never stored in config.yaml. Each endpoint's API key
 # is read from "{ENDPOINT_NAME_UPPER}_API_KEY" (mirrors .env.example).
@@ -28,7 +28,15 @@ class EndpointConfig(BaseModel):
     tokenizer_family: str
     supports_concurrent_critics: bool
     grammar_constraint_strategy: str
-    api_key: str = ""  # populated from env at load time, not from config.yaml
+    api_key: str  # populated from env at load time, not from config.yaml
+
+    @field_validator("api_key")
+    @classmethod
+    def require_api_key(cls, value: str) -> str:
+        """Reject missing or empty endpoint secrets at config-load time."""
+        if not value:
+            raise ValueError("endpoint api_key secret is required")
+        return value
 
 
 class EndpointsConfig(BaseModel):
@@ -98,6 +106,8 @@ def load_config(path: str | os.PathLike) -> AppConfig:
         if not isinstance(endpoint, dict):
             continue
         env_key = f"{name.upper()}{_API_KEY_ENV_SUFFIX}"
-        endpoint["api_key"] = os.environ.get(env_key, endpoint.get("api_key", ""))
+        env_value = os.environ.get(env_key)
+        if env_value is not None:
+            endpoint["api_key"] = env_value
 
     return AppConfig.model_validate(raw)
