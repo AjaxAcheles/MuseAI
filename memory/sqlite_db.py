@@ -349,3 +349,187 @@ def upsert_beat_commit(
         raise
     finally:
         conn.close()
+
+
+# --- Deterministic read helpers -------------------------------------------------
+# Exact relational reads for the planning and commit-router paths. Each returns plain
+# dicts (never raw sqlite3.Row) so callers stay decoupled from the cursor. "Remaining"
+# means any row not yet 'completed'. Ordered reads honour the design's sort keys:
+# scenes by `ordering ASC` (not creation time), beats by `beat_index ASC`.
+_REMAINING_STATUSES = ("planned", "active")  # everything that is not 'completed'
+
+
+def _read_one(db_path: str | Path, query: str, params: tuple) -> dict | None:
+    """Run a single-row exact read, returning a plain dict or None."""
+    init_db(db_path)
+    conn = connect_db(db_path)
+    try:
+        row = conn.execute(query, params).fetchone()
+        return dict(row) if row is not None else None
+    finally:
+        conn.close()
+
+
+def _read_all(db_path: str | Path, query: str, params: tuple) -> list[dict]:
+    """Run a multi-row exact read, returning a list of plain dicts."""
+    init_db(db_path)
+    conn = connect_db(db_path)
+    try:
+        return [dict(row) for row in conn.execute(query, params).fetchall()]
+    finally:
+        conn.close()
+
+
+def get_arc(db_path: str | Path, arc_id: str) -> dict | None:
+    """Return the Arc row for ``arc_id`` as a dict, or None if absent."""
+    return _read_one(db_path, "SELECT * FROM Arcs WHERE id = ?", (arc_id,))
+
+
+def get_chapters_for_arc(db_path: str | Path, arc_id: str) -> list[dict]:
+    """Return all chapters under ``arc_id`` (foreign-key exact lookup)."""
+    return _read_all(db_path, "SELECT * FROM Chapters WHERE arc_id = ?", (arc_id,))
+
+
+def get_scenes_for_chapter_ordered(db_path: str | Path, chapter_id: str) -> list[dict]:
+    """Return scenes under ``chapter_id`` sorted by ``ordering ASC``.
+
+    Sorts by the explicit `ordering` key, not creation time, so scenes generated
+    simultaneously keep their planned narrative order.
+    """
+    return _read_all(
+        db_path,
+        "SELECT * FROM Scenes WHERE chapter_id = ? ORDER BY ordering ASC",
+        (chapter_id,),
+    )
+
+
+def get_beats_for_scene_ordered(db_path: str | Path, scene_id: str) -> list[dict]:
+    """Return beats under ``scene_id`` sorted by ``beat_index ASC``."""
+    return _read_all(
+        db_path,
+        "SELECT * FROM Beats WHERE scene_id = ? ORDER BY beat_index ASC",
+        (scene_id,),
+    )
+
+
+def get_remaining_beats_for_scene(db_path: str | Path, scene_id: str) -> list[dict]:
+    """Return not-yet-completed beats under ``scene_id``, ordered by ``beat_index``."""
+    return _read_all(
+        db_path,
+        "SELECT * FROM Beats WHERE scene_id = ? AND status IN (?, ?) "
+        "ORDER BY beat_index ASC",
+        (scene_id, *_REMAINING_STATUSES),
+    )
+
+
+def get_remaining_scenes_for_chapter(db_path: str | Path, chapter_id: str) -> list[dict]:
+    """Return not-yet-completed scenes under ``chapter_id``, ordered by ``ordering``."""
+    return _read_all(
+        db_path,
+        "SELECT * FROM Scenes WHERE chapter_id = ? AND status IN (?, ?) "
+        "ORDER BY ordering ASC",
+        (chapter_id, *_REMAINING_STATUSES),
+    )
+
+
+def get_remaining_chapters_for_arc(db_path: str | Path, arc_id: str) -> list[dict]:
+    """Return not-yet-completed chapters under ``arc_id``."""
+    return _read_all(
+        db_path,
+        "SELECT * FROM Chapters WHERE arc_id = ? AND status IN (?, ?)",
+        (arc_id, *_REMAINING_STATUSES),
+    )
+
+
+def get_open_threads(db_path: str | Path) -> list[dict]:
+    """Return open Threads — canonical relational truth for planner/critic consumers."""
+    return _read_all(
+        db_path,
+        "SELECT * FROM Threads WHERE status = ? ORDER BY priority_score DESC",
+        ("open",),
+    )
+
+
+def get_beat(db_path: str | Path, beat_id: str, *, strict: bool = False) -> dict | None:
+    """Return the committed Beat row for ``beat_id`` as a dict.
+
+    Returns None when the beat is absent. Pass ``strict=True`` to raise ``KeyError``
+    instead — for callers that treat a missing committed beat as a hard error.
+    """
+    beat = _read_one(db_path, "SELECT * FROM Beats WHERE id = ?", (beat_id,))
+    if beat is None and strict:
+        raise KeyError(f"No Beats row for beat_id={beat_id!r}")
+    return beat
+
+
+def get_latest_pad_for_character(db_path: str | Path, character_id: str) -> dict | None:
+    """Return the most recent committed PAD snapshot for ``character_id``, or None.
+
+    "Most recent" is the character's PAD from the latest committed beat, ordered by
+    the beat's ``committed_at`` then ``beat_index`` (both descending). Returns None
+    when the character has no committed PAD rows yet.
+    """
+    return _read_one(
+        db_path,
+        "SELECT ce.* FROM CharacterEmotions ce "
+        "JOIN Beats b ON b.id = ce.beat_id "
+        "WHERE ce.character_id = ? "
+        "ORDER BY b.committed_at DESC, b.beat_index DESC LIMIT 1",
+        (character_id,),
+    )
+
+
+def get_latest_pad_for_scene(db_path: str | Path, scene_id: str) -> list[dict]:
+    """Return the latest PAD snapshot per character within ``scene_id``.
+
+    For each character appearing in the scene's beats, returns the PAD row from the
+    highest ``beat_index`` in that scene (the scene's most recent emotional state for
+    that character). Ordered by ``character_id`` for deterministic output; ``[]`` when
+    the scene has no committed PAD rows.
+    """
+    return _read_all(
+        db_path,
+        "SELECT ce.* FROM CharacterEmotions ce "
+        "JOIN Beats b ON b.id = ce.beat_id "
+        "WHERE b.scene_id = ? AND b.beat_index = ("
+        "    SELECT MAX(b2.beat_index) FROM CharacterEmotions ce2 "
+        "    JOIN Beats b2 ON b2.id = ce2.beat_id "
+        "    WHERE b2.scene_id = b.scene_id AND ce2.character_id = ce.character_id"
+        ") ORDER BY ce.character_id ASC",
+        (scene_id,),
+    )
+
+
+def get_pending_commit_intents(db_path: str | Path) -> list[dict]:
+    """Return pending CommitIntent rows (observational only), oldest first.
+
+    A read-only window onto in-flight commits. Replay, human-review, and recovery
+    decisions belong to the later commit/crash increments — never made here.
+    """
+    return _read_all(
+        db_path,
+        "SELECT * FROM CommitIntent WHERE status = ? ORDER BY id ASC",
+        ("pending",),
+    )
+
+
+def get_raptor_nodes_by_level(db_path: str | Path, level: str) -> list[dict]:
+    """Return RaptorNodes at ``level``, ordered by id for deterministic output."""
+    return _read_all(
+        db_path,
+        "SELECT * FROM RaptorNodes WHERE level = ? ORDER BY id ASC",
+        (level,),
+    )
+
+
+def get_raptor_nodes_by_parent(db_path: str | Path, parent_id: str | None) -> list[dict]:
+    """Return RaptorNodes whose parent is ``parent_id``, ordered by id.
+
+    ``parent_id=None`` selects root nodes (``parent_id IS NULL``); ``IS ?`` binds NULL
+    correctly so the same helper serves both root and child lookups.
+    """
+    return _read_all(
+        db_path,
+        "SELECT * FROM RaptorNodes WHERE parent_id IS ? ORDER BY id ASC",
+        (parent_id,),
+    )
