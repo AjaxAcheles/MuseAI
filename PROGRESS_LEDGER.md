@@ -3,8 +3,8 @@
 The living record of what is real, what is a stub, and what a session left half-done. The agent updates this in-repo copy at the end of every session, and it is read at the start of every session.
 
 ## Current position
-- **Last completed:** `02.04`
-- **Next up:** `02.05`
+- **Last completed:** `02.05`
+- **Next up:** `02.T1`
 - **Current session block:** S2
 
 ## Status key
@@ -20,14 +20,14 @@ The living record of what is real, what is a stub, and what a session left half-
 | 02.02 | Config/Startup | `extra="forbid"` on all six config models — fail-fast on unknown/mistyped keys at parse time | done | Pydantic `ValidationError` reports the offending key's `loc` (e.g. `('bogus_top_level_key',)`, `('endpoints','planner','base_url')`). `RuntimeConfig` keeps `protected_namespaces=()` alongside forbid. | Temp config with a bogus top-level key and a nested `base_url`→`base_uri` typo each raise `ValidationError` locating the key; real `config.yaml` still loads. |
 | 02.03 | Config/Startup | Shared node-event logger: `get_logger(node_name)` writes JSON lines to a rotating `logs/fsm.log`; `log_node_event()` emits node, pointer, duration, outcome, and optional error fields | done | Handler attaches once per logger name, `propagate=False`, and level resolves from strict `config.yaml` logging config. Rotation envelope remains the section 3.1 file-size housekeeping default. | Strict config load verified; three events append as three valid JSON lines; a tiny-cap done-check rotates to `fsm.log.1`/`fsm.log.2` while every retained line parses as one JSON object. |
 | 02.04 | Config/Startup | Dedicated inference-boundary logger: `get_llm_io_logger()` writes JSON lines to rotating `logs/llm_io.log`; `log_llm_call()` records full request payload, final response text, and duration | done | Separate from the FSM node-event logger and not wired into `call_llm()` yet. Records only the final assembled response, not streaming chunks. | Simulated call wrote exactly one valid JSON line with request, response, and duration; temp check confirmed no `fsm.log` was created. |
-| 02.05 | Config/Startup | _pending_ | - | - | - |
+| 02.05 | Config/Startup | Resource lifecycle: `init_resources(config)` creates runtime directories and placeholder store artifacts; `reset_resources(config)` wipes documented file-based artifacts and reinitializes them | done | Store initializers and `scan_startup_crash_sentinel()` are labelled no-op stubs pending their owning store/crash modules. Reset is not wired to an HTTP route. | Temp-root done-check: init created data/log directories and store artifacts; reset removed SQLite, Graphiti, Chroma, event-log, style JSON, and snapshot ZIP artifacts; init and reset each ran twice cleanly. |
 | 02.T1 | Config/Startup (test) | _pending_ | - | - | - |
 | 02.T2 | Config/Startup (test) | _pending_ | - | - | - |
 
 *(Append a row per increment. Keep "Current position" accurate - it is read first each session.)*
 
 ## Stub inventory (deliberate no-ops, wired later)
-- `init_resources()` store inits - no-op until the relational store lands (04).
-- Startup crash-sentinel scan - no-op until intent records exist (13).
+- Store init signatures called by `init_resources()` - no-op/placeholders until the memory-store modules land (04).
+- `scan_startup_crash_sentinel()` - no-op until CommitIntent records and crash recovery land (13).
 - `core.antislop.detect_slop()` and `core.antislop.resolve_slop()` - no-op passthroughs until anti-slop implementation.
 - `memory.graphiti_client._apply_event()` - intentional early no-op for graph writes during crash-recovery scaffolding.
