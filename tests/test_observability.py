@@ -147,7 +147,10 @@ def test_lifecycle_init_reset_and_crash_sentinel_are_temp_only(
 
     runtime.reset_resources(config)
     assert runtime.SQLITE_DB_PATH.is_file()
-    assert runtime.SQLITE_DB_PATH.read_text(encoding="utf-8") == ""
+    # init_db now builds a real relational schema (not the empty placeholder of the
+    # stub era), so the reset-then-reinit artifact is a freshly initialized SQLite
+    # database — proving the stale "database payload" text written above was wiped.
+    assert runtime.SQLITE_DB_PATH.read_bytes().startswith(b"SQLite format 3\x00")
     assert runtime.GRAPHITI_DB_PATH.is_dir()
     assert not (runtime.GRAPHITI_DB_PATH / "graph-artifact").exists()
     assert runtime.CHROMA_STORE_DIR.is_dir()

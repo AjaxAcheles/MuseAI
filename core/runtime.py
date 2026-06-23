@@ -31,7 +31,7 @@ def init_resources(config) -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     LOG_DIR.mkdir(parents=True, exist_ok=True)
 
-    init_db(config, SQLITE_DB_PATH)
+    init_db(SQLITE_DB_PATH)
     init_graphiti_store(config, GRAPHITI_DB_PATH)
     init_chroma_store(config, CHROMA_STORE_DIR)
     init_style_stores(config, STYLE_STORE_DIR)
