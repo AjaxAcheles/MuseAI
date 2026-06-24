@@ -108,3 +108,37 @@ def test_unsupported_schema_feature_raises_value_error() -> None:
 
     with pytest.raises(ValueError, match="pattern"):
         json_schema_to_gbnf(schema)
+
+
+@pytest.mark.parametrize(
+    ("schema", "match"),
+    [
+        # Combinators the compiler deliberately refuses (fail closed, never loose).
+        ({"allOf": [{"type": "string"}]}, "allOf"),
+        ({"not": {"type": "string"}}, "not"),
+        # Tuple/positional arrays are not the homogeneous-array subset we support.
+        (
+            {"type": "array", "prefixItems": [{"type": "string"}]},
+            "prefixItems",
+        ),
+        # Open-ended key shapes the sampler grammar cannot bound.
+        (
+            {"type": "object", "patternProperties": {"^x": {"type": "string"}}},
+            "patternProperties",
+        ),
+        # An object that allows arbitrary extra keys cannot be constrained.
+        (
+            {"type": "object", "properties": {}, "additionalProperties": True},
+            "additionalProperties",
+        ),
+        # A homogeneous array must declare its item schema.
+        ({"type": "array"}, "items"),
+        # Only in-document refs are resolvable; an external pointer is rejected.
+        ({"$ref": "https://example.test/schema.json"}, "external"),
+    ],
+)
+def test_unsupported_schema_features_fail_closed(schema: dict, match: str) -> None:
+    # Every unsupported feature raises a clear ValueError naming it, rather than
+    # silently emitting a loose grammar that would let invalid output through.
+    with pytest.raises(ValueError, match=match):
+        json_schema_to_gbnf(schema)
