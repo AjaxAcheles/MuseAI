@@ -18,8 +18,10 @@ from typing import Any, Protocol
 from urllib.parse import urlsplit, urlunsplit
 
 import httpx
+from pydantic import BaseModel, ValidationError
 
 import core.llm_io_logger as llm_io_logger
+from llm.gbnf_compiler import json_schema_to_gbnf
 from llm.tokenizer import count_payload_tokens, count_tokens
 
 Message = dict[str, str]
@@ -46,6 +48,118 @@ class LLMCallError(RuntimeError):
     def __init__(self, message: str, attempt_count: int = 0) -> None:
         super().__init__(message)
         self.attempt_count = attempt_count
+
+
+class StructuredOutputError(ValueError):
+    """Raised when model text cannot be turned into a schema-valid object.
+
+    Surfaced to the caller (e.g. the critic loop) so a bounded
+    ``model_validate_retry_cap`` ladder can decide whether to retry or hand a
+    hard error to the FSM escalation path. These helpers never loop themselves.
+    """
+
+
+def extract_first_json_object(text: str) -> str | None:
+    """Return the first balanced ``{...}`` object found in ``text``.
+
+    Markdown code fences are stripped first, then the text is scanned for the
+    first top-level brace and walked to its matching close. Braces that appear
+    inside quoted strings (and escaped quotes within them) are ignored, so an
+    object whose string values contain ``{``/``}``/``"`` is returned intact.
+    Returns ``None`` when no balanced object is present.
+    """
+    if not text:
+        return None
+
+    scanned = _strip_markdown_fences(text)
+    start: int | None = None
+    depth = 0
+    in_string = False
+    escaped = False
+
+    for index, char in enumerate(scanned):
+        if start is None:
+            if char == "{":
+                start = index
+                depth = 1
+            continue
+
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return scanned[start : index + 1]
+
+    return None
+
+
+def validate_structured_text(text: str, schema_model: type[BaseModel]) -> BaseModel:
+    """Parse ``text`` as JSON and validate it against ``schema_model``.
+
+    Strict: the text must already be a single JSON document. Raises
+    :class:`StructuredOutputError` with a clear message on either a JSON parse
+    failure or a schema-validation failure.
+    """
+    try:
+        parsed = json.loads(text)
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise StructuredOutputError(
+            f"structured output was not valid JSON: {exc}"
+        ) from exc
+
+    try:
+        return schema_model.model_validate(parsed)
+    except ValidationError as exc:
+        raise StructuredOutputError(
+            f"structured output failed {schema_model.__name__} schema validation: {exc}"
+        ) from exc
+
+
+def validate_with_salvage(text: str, schema_model: type[BaseModel]) -> BaseModel:
+    """Validate ``text`` against ``schema_model`` with one lenient salvage pass.
+
+    Order: (1) strict validation of the text as given; (2) on failure, strip
+    wrappers and extract the first balanced JSON object; (3) one final strict
+    validation of the extracted object. There is no retry loop here — at most
+    two validation attempts run, so the call provably terminates. Persistent
+    failure raises :class:`StructuredOutputError` for the caller's bounded
+    retry/escalation ladder to handle.
+    """
+    try:
+        return validate_structured_text(text, schema_model)
+    except StructuredOutputError as first_error:
+        candidate = extract_first_json_object(text)
+        if candidate is None:
+            raise StructuredOutputError(
+                "structured output failed validation and no JSON object "
+                "could be salvaged from the text"
+            ) from first_error
+        return validate_structured_text(candidate, schema_model)
+
+
+def _strip_markdown_fences(text: str) -> str:
+    """Strip a single wrapping triple-backtick fence (e.g. ```json ... ```)."""
+    stripped = text.strip()
+    if not stripped.startswith("```"):
+        return stripped
+
+    newline = stripped.find("\n")
+    stripped = stripped[newline + 1 :] if newline != -1 else stripped[3:]
+    if stripped.rstrip().endswith("```"):
+        stripped = stripped.rstrip()[:-3]
+    return stripped
 
 
 @dataclass(frozen=True)
@@ -291,6 +405,136 @@ async def call_llm(
             response_text,
             duration_ms,
         )
+
+
+class UnsupportedGrammarStrategyError(ValueError):
+    """Raised when an endpoint declares a grammar strategy the boundary cannot honor."""
+
+
+async def call_llm_structured(
+    messages: list[Message],
+    endpoint: Any,
+    *,
+    schema_model: type[BaseModel],
+    validate_retry_cap: int,
+    stream: bool | None = None,
+    on_token: TokenCallback | None = None,
+    temperature: float | None = None,
+    max_tokens: int | None = None,
+    extra_body: Mapping[str, Any] | None = None,
+    extra_headers: Mapping[str, str] | None = None,
+    adapter: EndpointAdapter | None = None,
+    model_name: str | None = None,
+    client: httpx.AsyncClient | None = None,
+    max_attempts: int = _DEFAULT_MAX_ATTEMPTS,
+    retry_delays: tuple[float, ...] = _DEFAULT_RETRY_DELAYS_SECONDS,
+    sleep: SleepCallback = asyncio.sleep,
+    call: Callable[..., Awaitable[LLMResponse]] = call_llm,
+) -> BaseModel:
+    """Call the configured endpoint and return a schema-validated Pydantic object.
+
+    The structured-output contract (Data_Structures §1.3, node 8):
+
+    1. Build the structured request option from the endpoint's
+       ``grammar_constraint_strategy`` only — GBNF grammar in a generic request
+       field, or chat-completions JSON mode — never a provider-named branch.
+    2. Validate each response with ``schema_model.model_validate()``.
+    3. Retry up to ``validate_retry_cap`` (sourced from
+       ``config.runtime.model_validate_retry_cap`` — never a hidden constant).
+    4. On cap exhaustion run :func:`validate_with_salvage` exactly once; if it
+       recovers, return the object and log that salvage was used.
+    5. Otherwise raise :class:`LLMCallError` so the FSM routes a hard failure.
+
+    The loop is bounded by ``validate_retry_cap`` and every endpoint call is
+    itself bounded by the transient-retry ladder, so the path always terminates.
+    Validation failures are never swallowed — this never returns ``None``.
+    """
+    if validate_retry_cap < 1:
+        raise ValueError("validate_retry_cap must be at least 1")
+
+    strategy = getattr(endpoint, "grammar_constraint_strategy")
+    response_format, structured_extra_body = _build_structured_options(
+        strategy, schema_model, extra_body
+    )
+
+    last_text = ""
+    for attempt in range(1, validate_retry_cap + 1):
+        response = await call(
+            messages,
+            endpoint,
+            stream=stream,
+            on_token=on_token,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            response_format=response_format,
+            extra_body=structured_extra_body,
+            extra_headers=extra_headers,
+            adapter=adapter,
+            model_name=model_name,
+            client=client,
+            max_attempts=max_attempts,
+            retry_delays=retry_delays,
+            sleep=sleep,
+        )
+        last_text = response.text
+        try:
+            return validate_structured_text(response.text, schema_model)
+        except StructuredOutputError:
+            if attempt < validate_retry_cap:
+                continue
+
+    # Cap exhausted: one lenient salvage pass over the final response text.
+    try:
+        salvaged = validate_with_salvage(last_text, schema_model)
+    except StructuredOutputError as exc:
+        raise LLMCallError(
+            f"structured output failed {schema_model.__name__} validation after "
+            f"{validate_retry_cap} attempts and salvage: {exc}",
+            attempt_count=validate_retry_cap,
+        ) from exc
+
+    _log_structured_salvage(endpoint, schema_model, validate_retry_cap)
+    return salvaged
+
+
+def _build_structured_options(
+    strategy: str,
+    schema_model: type[BaseModel],
+    extra_body: Mapping[str, Any] | None,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """Translate an endpoint grammar strategy into generic request options.
+
+    Returns ``(response_format, extra_body)`` for :func:`call_llm`. GBNF puts a
+    compiled grammar string into a provider-neutral ``grammar`` request field;
+    JSON mode uses the chat-completions ``response_format`` envelope. Pydantic
+    validation guards the FSM even if an endpoint ignores the hint.
+    """
+    merged = dict(extra_body) if extra_body else {}
+    if strategy == "gbnf":
+        grammar = json_schema_to_gbnf(schema_model.model_json_schema())
+        merged["grammar"] = grammar
+        return None, merged
+    if strategy == "json_mode":
+        return {"type": "json_object"}, (merged or None)
+    raise UnsupportedGrammarStrategyError(
+        f"unsupported grammar_constraint_strategy: {strategy!r}"
+    )
+
+
+def _log_structured_salvage(
+    endpoint: Any, schema_model: type[BaseModel], validate_retry_cap: int
+) -> None:
+    logger = llm_io_logger.get_llm_io_logger()
+    logger.info(
+        json.dumps(
+            {
+                "event": "structured_output_salvage_used",
+                "endpoint_base_url": _sanitize_url(getattr(endpoint, "base_url", "")),
+                "schema_model": schema_model.__name__,
+                "validate_retry_cap": validate_retry_cap,
+            }
+        )
+    )
 
 
 async def _call_with_retries(
