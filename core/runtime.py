@@ -1,8 +1,12 @@
 """Module: M14 (Configuration, Startup & Observability)
 Manage application resource lifecycle and development reset behavior.
 
-Store initializers are labelled no-op placeholders until their owning modules
-implement real schemas, clients, indexes, and replay behavior.
+The relational hub is initialized for real: ``init_resources`` builds the SQLite
+schema via ``memory.sqlite_db.init_db`` at the documented ``data/fictionwriter.db``
+path, and ``reset_resources`` deletes and recreates that artifact. The remaining
+store initializers (Graphiti, RAPTOR, Chroma, style stores, snapshot archive) stay
+honest no-op placeholders until their owning modules land; the event-log
+initializer only ensures its append-only ``.jsonl`` artifact exists.
 """
 
 from pathlib import Path
@@ -31,6 +35,10 @@ def init_resources(config) -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     LOG_DIR.mkdir(parents=True, exist_ok=True)
 
+    # Relational hub: real M02 schema initialization (Arcs/Chapters/Scenes/Beats/
+    # Threads/Characters/CharacterEmotions/CommitIntent/RaptorNodes) at the
+    # documented data/fictionwriter.db path. The store initializers below remain
+    # honest no-op stubs until their owning modules are built.
     init_db(SQLITE_DB_PATH)
     init_graphiti_store(config, GRAPHITI_DB_PATH)
     init_chroma_store(config, CHROMA_STORE_DIR)
