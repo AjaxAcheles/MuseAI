@@ -45,6 +45,9 @@ thresholds:
   passive_voice_density: 0.25 # proposed default to be calibrated
   voice_evolution_l2_cap: 0.30 # proposed default to be calibrated
 
+context:
+  token_budget: 8000 # provisional, uncalibrated assembled-package ceiling
+
 runtime:
   model_validate_retry_cap: 3 # proposed default to be calibrated
   headless_mode: false

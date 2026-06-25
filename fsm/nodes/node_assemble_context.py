@@ -2,15 +2,17 @@
 Assemble layered, unpruned context packages from the available memory stores.
 """
 
+import json
 from collections.abc import Callable
 from copy import deepcopy
-from typing import Any, TypeVar
+from pathlib import Path
+from typing import Any, TypeVar, TypedDict
 
 import core.runtime as runtime
+from llm.tokenizer import count_tokens
 from memory import provisional_store, sqlite_db
 from memory.chroma_client import ChromaClient
 from memory.graphiti_client import GraphitiClient
-from typing_extensions import TypedDict
 
 
 LayerResult = TypeVar("LayerResult")
@@ -25,6 +27,16 @@ DROP_ORDER: list[str] = [
     "macro_constraints",
     "relational",
 ]
+CONFIG_PATH = Path(__file__).resolve().parents[2] / "config.yaml"
+CONTEXT_LAYER_NAMES = (
+    "relational",
+    "summaries",
+    "temporal",
+    "flavour",
+    "coreference_candidates",
+    "macro_constraints",
+)
+SUMMARY_DROP_LEVEL_ORDER = ("beat", "scene", "chapter", "arc")
 
 
 class LayerMeta(TypedDict):
@@ -50,6 +62,7 @@ def build_context_package(state: dict[str, Any]) -> ContextPackage:
     """Build the layered context package for the state's active pointer."""
 
     pointer = state["fsm_pointer"]
+    config = _resolve_config(state)
     db_path = state.get("sqlite_db_path", runtime.SQLITE_DB_PATH)
     provisional_path = state.get(
         "provisional_store_path", provisional_store.DEFAULT_PROVISIONAL_PATH
@@ -92,7 +105,7 @@ def build_context_package(state: dict[str, Any]) -> ContextPackage:
         "reason": "planning subsystem not yet implemented",
     }
 
-    return {
+    package: ContextPackage = {
         "relational": relational,
         "summaries": summaries,
         "temporal": temporal,
@@ -101,6 +114,9 @@ def build_context_package(state: dict[str, Any]) -> ContextPackage:
         "macro_constraints": macro_constraints,
         "meta": meta,
     }
+    _record_token_sizing(package, config)
+    _prune_to_budget(package, config)
+    return package
 
 
 async def node_assemble_context(state: dict[str, Any]) -> dict[str, Any]:
@@ -252,3 +268,106 @@ def _first_matching(
         if row.get(key) == value:
             return row
     return None
+
+
+def _resolve_config(state: dict[str, Any]) -> Any:
+    """Return the active typed config object for this node invocation."""
+
+    config = state.get("app_config") or state.get("config")
+    if config is not None:
+        return config
+    from core.config_loader import load_config
+
+    return load_config(state.get("config_path", CONFIG_PATH))
+
+
+def _record_token_sizing(package: ContextPackage, config: Any) -> None:
+    """Record deterministic per-layer token sizes for the drafter endpoint."""
+
+    layer_counts = _calculate_layer_token_counts(package, config)
+    total_tokens = sum(layer_counts.values())
+    token_sizing = {
+        "endpoint_role": "drafter",
+        "tokenizer_family": config.endpoints.drafter.tokenizer_family,
+        "model_name": config.endpoints.drafter.model_name,
+        "context_token_budget": config.context.token_budget,
+        "layers": layer_counts,
+        "total_tokens": total_tokens,
+    }
+    package["meta"]["token_sizing"] = token_sizing
+    package["meta"]["final_token_total"] = total_tokens
+    package["meta"].setdefault("initial_token_total", total_tokens)
+    package["meta"].setdefault("pruned_layers", [])
+    package["meta"].setdefault("over_budget", total_tokens > config.context.token_budget)
+
+
+def _calculate_layer_token_counts(
+    package: ContextPackage, config: Any
+) -> dict[str, int]:
+    """Count each serialized context layer using the drafter endpoint tokenizer."""
+
+    drafting_endpoint = config.endpoints.drafter
+    return {
+        layer_name: count_tokens(
+            _serialize_layer(package[layer_name]),
+            drafting_endpoint.tokenizer_family,
+            drafting_endpoint.model_name,
+        )
+        for layer_name in CONTEXT_LAYER_NAMES
+    }
+
+
+def _prune_to_budget(package: ContextPackage, config: Any) -> None:
+    """Drop only flavour and summary tiers until the package fits or facts remain."""
+
+    budget = config.context.token_budget
+    initial_total = package["meta"]["token_sizing"]["total_tokens"]
+    pruned_layers: list[str] = []
+    package["meta"]["initial_token_total"] = initial_total
+
+    if initial_total > budget and package["flavour"]:
+        package["flavour"] = []
+        pruned_layers.append("flavour")
+        _record_token_sizing(package, config)
+
+    if package["meta"]["token_sizing"]["total_tokens"] > budget:
+        pruned_layers.extend(_drop_summary_tiers_to_budget(package, config))
+
+    final_total = package["meta"]["token_sizing"]["total_tokens"]
+    package["meta"]["pruned_layers"] = pruned_layers
+    package["meta"]["final_token_total"] = final_total
+    package["meta"]["over_budget"] = final_total > budget
+    package["meta"]["token_sizing"]["initial_total_tokens"] = initial_total
+    package["meta"]["token_sizing"]["final_token_total"] = final_total
+    package["meta"]["token_sizing"]["pruned_layers"] = list(pruned_layers)
+    package["meta"]["token_sizing"]["over_budget"] = final_total > budget
+
+
+def _drop_summary_tiers_to_budget(
+    package: ContextPackage, config: Any
+) -> list[str]:
+    """Drop summary tiers from least critical to most critical."""
+
+    pruned_layers: list[str] = []
+    summaries = package["summaries"]
+    by_level = summaries.get("by_level")
+    if isinstance(by_level, dict):
+        for level in SUMMARY_DROP_LEVEL_ORDER:
+            if not by_level.get(level):
+                continue
+            by_level[level] = []
+            pruned_layers.append(f"summaries.by_level.{level}")
+            _record_token_sizing(package, config)
+            if package["meta"]["token_sizing"]["total_tokens"] <= config.context.token_budget:
+                break
+    elif summaries:
+        package["summaries"] = {}
+        pruned_layers.append("summaries")
+        _record_token_sizing(package, config)
+    return pruned_layers
+
+
+def _serialize_layer(layer: Any) -> str:
+    """Serialize one layer deterministically before tokenizer counting."""
+
+    return json.dumps(layer, sort_keys=True, separators=(",", ":"), default=str)

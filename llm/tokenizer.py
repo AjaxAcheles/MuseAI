@@ -23,6 +23,15 @@ _MESSAGE_STRUCTURAL_OVERHEAD_TOKENS = 4
 _TOKENIZER_CACHE: dict[tuple[str, str | None], Any] = {}
 
 
+class _CharHeuristicTokenizer:
+    """Minimal tokenizer-shaped fallback when exact encoders are unavailable."""
+
+    def encode(self, text: str) -> list[None]:
+        if not text:
+            return []
+        return [None] * ceil(len(text) / _CHAR_HEURISTIC_CHARS_PER_TOKEN)
+
+
 def count_tokens(
     text: str, tokenizer_family: str, model_name: str | None = None
 ) -> int:
@@ -93,7 +102,10 @@ def _get_tokenizer(tokenizer_family: str, model_name: str | None) -> Any:
 
 
 def _load_tiktoken_encoding(model_name: str | None) -> Any:
-    import tiktoken
+    try:
+        import tiktoken
+    except ImportError:
+        return _CharHeuristicTokenizer()
 
     if model_name:
         try:

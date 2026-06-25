@@ -64,6 +64,22 @@ class ThresholdsConfig(BaseModel):
     voice_evolution_l2_cap: float
 
 
+class ContextConfig(BaseModel):
+    """Context assembly sizing keys; defaults are provisional until calibrated."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    token_budget: int
+
+    @field_validator("token_budget")
+    @classmethod
+    def require_positive_token_budget(cls, value: int) -> int:
+        """Reject non-positive context package ceilings."""
+        if value <= 0:
+            raise ValueError("context token_budget must be positive")
+        return value
+
+
 class RuntimeConfig(BaseModel):
     """Global generation keys (not per-endpoint)."""
 
@@ -92,6 +108,7 @@ class AppConfig(BaseModel):
 
     endpoints: EndpointsConfig
     thresholds: ThresholdsConfig
+    context: ContextConfig
     runtime: RuntimeConfig
     logging: LoggingConfig
 

@@ -65,6 +65,8 @@ thresholds:
   cluster_similarity_threshold: 0.65
   passive_voice_density: 0.25
   voice_evolution_l2_cap: 0.30
+context:
+  token_budget: 8000
 runtime:
   model_validate_retry_cap: 3
   headless_mode: false
@@ -94,6 +96,7 @@ def test_valid_synthetic_config_loads_typed_values(
     assert config.endpoints.critic.supports_concurrent_critics is True
     assert config.thresholds.stylometric_drift_threshold == 0.12
     assert config.thresholds.voice_evolution_l2_cap == 0.30
+    assert config.context.token_budget == 8000
     assert config.runtime.model_validate_retry_cap == 3
     assert config.logging.log_level == "INFO"
 
