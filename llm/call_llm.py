@@ -311,6 +311,7 @@ async def call_llm(
     adapter: EndpointAdapter | None = None,
     model_name: str | None = None,
     client: httpx.AsyncClient | None = None,
+    timeout_seconds: float | None = None,
     max_attempts: int = _DEFAULT_MAX_ATTEMPTS,
     retry_delays: tuple[float, ...] = _DEFAULT_RETRY_DELAYS_SECONDS,
     sleep: SleepCallback = asyncio.sleep,
@@ -338,7 +339,8 @@ async def call_llm(
 
     logger = llm_io_logger.get_llm_io_logger()
     owns_client = client is None
-    async_client = client or httpx.AsyncClient()
+    _timeout = httpx.Timeout(timeout_seconds or 120.0, connect=10.0)
+    async_client = client or httpx.AsyncClient(timeout=_timeout)
     tokenizer_family = getattr(endpoint, "tokenizer_family")
     tokens_in: int | None = None
     tokens_out: int | None = None
@@ -426,6 +428,7 @@ async def call_llm_structured(
     adapter: EndpointAdapter | None = None,
     model_name: str | None = None,
     client: httpx.AsyncClient | None = None,
+    timeout_seconds: float | None = None,
     max_attempts: int = _DEFAULT_MAX_ATTEMPTS,
     retry_delays: tuple[float, ...] = _DEFAULT_RETRY_DELAYS_SECONDS,
     sleep: SleepCallback = asyncio.sleep,
@@ -472,6 +475,7 @@ async def call_llm_structured(
             adapter=adapter,
             model_name=model_name,
             client=client,
+            timeout_seconds=timeout_seconds,
             max_attempts=max_attempts,
             retry_delays=retry_delays,
             sleep=sleep,

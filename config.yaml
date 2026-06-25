@@ -55,6 +55,7 @@ runtime:
   headless_mode: false
   beats_per_scene_min: 3 # proposed default to be calibrated
   word_count_target: 80000 # proposed default to be calibrated
+  inference_timeout_seconds: 120 # seconds; covers cold model-load on local servers
 
 logging:
   log_level: "INFO"

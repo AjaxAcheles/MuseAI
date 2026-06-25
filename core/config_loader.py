@@ -109,6 +109,7 @@ class RuntimeConfig(BaseModel):
     headless_mode: bool
     beats_per_scene_min: int
     word_count_target: int
+    inference_timeout_seconds: int
 
 
 class LoggingConfig(BaseModel):

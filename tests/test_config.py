@@ -74,6 +74,7 @@ runtime:
   headless_mode: false
   beats_per_scene_min: 3
   word_count_target: 80000
+  inference_timeout_seconds: 120
 logging:
   log_level: "INFO"
 """

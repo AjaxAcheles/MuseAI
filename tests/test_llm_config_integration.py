@@ -55,6 +55,7 @@ class SelectedEndpoint:
     name: str
     endpoint: EndpointConfig
     has_real_api_key: bool
+    timeout_seconds: int  # from config.runtime.inference_timeout_seconds
 
 
 @pytest.fixture
@@ -94,6 +95,7 @@ def live_endpoint(monkeypatch: pytest.MonkeyPatch) -> SelectedEndpoint:
         name=chosen,
         endpoint=available[chosen],
         has_real_api_key=has_real[chosen],
+        timeout_seconds=config.runtime.inference_timeout_seconds,
     )
 
 
@@ -149,7 +151,8 @@ def test_config_loader_routes_call_and_logs_without_leak(
             live_endpoint.endpoint,
             stream=False,
             temperature=0.0,
-            max_tokens=64,
+            max_tokens=512,
+            timeout_seconds=live_endpoint.timeout_seconds,
         ),
         live_endpoint,
     )

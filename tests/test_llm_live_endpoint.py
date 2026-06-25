@@ -53,6 +53,7 @@ class SelectedEndpoint:
     endpoint: EndpointConfig
     has_real_api_key: bool
     validate_retry_cap: int  # from config.runtime.model_validate_retry_cap
+    timeout_seconds: int  # from config.runtime.inference_timeout_seconds
 
 
 @pytest.fixture
@@ -88,6 +89,7 @@ def live_endpoint(monkeypatch: pytest.MonkeyPatch) -> SelectedEndpoint:
         endpoint=available[chosen],
         has_real_api_key=has_real[chosen],
         validate_retry_cap=config.runtime.model_validate_retry_cap,
+        timeout_seconds=config.runtime.inference_timeout_seconds,
     )
 
 
@@ -115,7 +117,8 @@ def test_live_plaintext_smoke(live_endpoint: SelectedEndpoint) -> None:
             live_endpoint.endpoint,
             stream=False,
             temperature=0.0,
-            max_tokens=64,
+            max_tokens=512,
+            timeout_seconds=live_endpoint.timeout_seconds,
         ),
         live_endpoint,
     )
@@ -137,7 +140,8 @@ def test_live_streaming_callback(live_endpoint: SelectedEndpoint) -> None:
             stream=True,
             on_token=chunks.append,
             temperature=0.0,
-            max_tokens=64,
+            max_tokens=512,
+            timeout_seconds=live_endpoint.timeout_seconds,
         ),
         live_endpoint,
     )
@@ -190,7 +194,8 @@ def test_live_structured_output_smoke(live_endpoint: SelectedEndpoint) -> None:
                 validate_retry_cap=live_endpoint.validate_retry_cap,
                 stream=False,
                 temperature=0.0,
-                max_tokens=128,
+                max_tokens=512,
+                timeout_seconds=live_endpoint.timeout_seconds,
             ),
             live_endpoint,
         )
