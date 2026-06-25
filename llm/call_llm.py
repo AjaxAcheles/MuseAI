@@ -682,7 +682,13 @@ def _is_transient_status(status_code: int) -> bool:
 
 
 def _http_status_summary(response: httpx.Response) -> str:
-    text = response.text[:200].replace("\n", " ")
+    try:
+        text = response.text[:200].replace("\n", " ")
+    except httpx.ResponseNotRead:
+        # Streaming response body was never consumed before raise_for_status()
+        # fired; accessing .text would require an awaited .aread() call which
+        # is not available here. Return the status line without a body excerpt.
+        text = ""
     suffix = f": {text}" if text else ""
     return f"HTTP {response.status_code} from inference endpoint{suffix}"
 

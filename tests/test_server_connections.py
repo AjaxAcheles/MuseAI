@@ -32,6 +32,16 @@ HELLO_MESSAGES = [{"role": "user", "content": 'Reply with only the word "ok".'}]
 DIALECT_CACHE: dict[tuple[str, str], "ServerDialect"] = {}
 
 
+def _server_root(base_url: str) -> str:
+    """Return the bare server root by stripping a trailing /v1 API prefix.
+
+    ``base_url`` in config is the OpenAI-compat API root (e.g.
+    ``http://localhost:11434/v1``). Ollama-native routes (/api/chat,
+    /api/generate, /api/tags) live at the server root one level up.
+    """
+    return base_url.removesuffix("/v1")
+
+
 @dataclass(frozen=True)
 class EndpointCase:
     endpoint_name: str
@@ -133,7 +143,7 @@ async def detect_dialect(
         "max_tokens": 10,
         "temperature": 0.0,
     }
-    openai_url = f"{endpoint_case.base_url}/v1/chat/completions"
+    openai_url = f"{endpoint_case.base_url}/chat/completions"
     openai_response = await post_or_none(
         client, openai_url, openai_body, endpoint_case.auth_headers
     )
@@ -152,7 +162,7 @@ async def detect_dialect(
         "messages": HELLO_MESSAGES,
         "stream": False,
     }
-    ollama_chat_url = f"{endpoint_case.base_url}/api/chat"
+    ollama_chat_url = f"{_server_root(endpoint_case.base_url)}/api/chat"
     ollama_chat_response = await post_or_none(
         client, ollama_chat_url, ollama_chat_body, {}
     )
@@ -169,7 +179,7 @@ async def detect_dialect(
         "prompt": 'Reply with only the word "ok".',
         "stream": False,
     }
-    ollama_generate_url = f"{endpoint_case.base_url}/api/generate"
+    ollama_generate_url = f"{_server_root(endpoint_case.base_url)}/api/generate"
     ollama_generate_response = await post_or_none(
         client, ollama_generate_url, ollama_generate_body, {}
     )
@@ -206,8 +216,8 @@ def is_missing_auth(response: httpx.Response, endpoint_case: EndpointCase) -> bo
 
 async def reachable(client: httpx.AsyncClient, endpoint_case: EndpointCase) -> bool:
     probes = (
-        (f"{endpoint_case.base_url}/v1/models", endpoint_case.auth_headers),
-        (f"{endpoint_case.base_url}/api/tags", {}),
+        (f"{endpoint_case.base_url}/models", endpoint_case.auth_headers),
+        (f"{_server_root(endpoint_case.base_url)}/api/tags", {}),
         (endpoint_case.base_url, {}),
     )
     auth_blocked = False
@@ -229,13 +239,13 @@ async def reachable(client: httpx.AsyncClient, endpoint_case: EndpointCase) -> b
 async def model_list_contains(
     client: httpx.AsyncClient, endpoint_case: EndpointCase
 ) -> bool | None:
-    ollama_response = await get_or_none(client, f"{endpoint_case.base_url}/api/tags", {})
+    ollama_response = await get_or_none(client, f"{_server_root(endpoint_case.base_url)}/api/tags", {})
     if ollama_response is not None and ollama_response.status_code == 200:
         models = ollama_response.json().get("models", [])
         return endpoint_case.model_name in {model.get("name") for model in models}
 
     openai_response = await get_or_none(
-        client, f"{endpoint_case.base_url}/v1/models", endpoint_case.auth_headers
+        client, f"{endpoint_case.base_url}/models", endpoint_case.auth_headers
     )
     if openai_response is None:
         return None

@@ -3,35 +3,35 @@
 
 endpoints:
   planner:
-    base_url: "http://localhost:11434/"
+    base_url: "http://localhost:11434/v1"
     model_name: "cryptidbleh/gemma4-claude-opus-4.6:latest"
     tokenizer_family: "tiktoken"
     supports_concurrent_critics: false
     grammar_constraint_strategy: "json_schema"
 
   drafter:
-    base_url: "http://localhost:11434/"
+    base_url: "http://localhost:11434/v1"
     model_name: "cryptidbleh/gemma4-claude-opus-4.6:latest"
     tokenizer_family: "tiktoken"
     supports_concurrent_critics: false
-    grammar_constraint_strategy: "none"
+    grammar_constraint_strategy: "json_mode"
 
   critic:
-    base_url: "http://localhost:11434/"
+    base_url: "http://localhost:11434/v1"
     model_name: "cryptidbleh/gemma4-claude-opus-4.6:latest"
     tokenizer_family: "tiktoken"
     supports_concurrent_critics: true
     grammar_constraint_strategy: "json_schema"
 
   pad_translator:
-    base_url: "http://localhost:11434/"
+    base_url: "http://localhost:11434/v1"
     model_name: "cryptidbleh/gemma4-claude-opus-4.6:latest"
     tokenizer_family: "tiktoken"
     supports_concurrent_critics: false
     grammar_constraint_strategy: "json_schema"
 
   craft_consultant:
-    base_url: "http://localhost:11434/"
+    base_url: "http://localhost:11434/v1"
     model_name: "cryptidbleh/gemma4-claude-opus-4.6:latest"
     tokenizer_family: "tiktoken"
     supports_concurrent_critics: false
