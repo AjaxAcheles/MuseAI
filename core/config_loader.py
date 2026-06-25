@@ -70,6 +70,8 @@ class ContextConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     token_budget: int
+    coreference_high_confidence: float
+    coreference_mid_confidence: float
 
     @field_validator("token_budget")
     @classmethod
@@ -78,6 +80,22 @@ class ContextConfig(BaseModel):
         if value <= 0:
             raise ValueError("context token_budget must be positive")
         return value
+
+    @field_validator("coreference_high_confidence", "coreference_mid_confidence")
+    @classmethod
+    def require_probability_band(cls, value: float) -> float:
+        """Reject confidence bands outside the normalized probability range."""
+        if not 0 <= value <= 1:
+            raise ValueError("context coreference confidence bands must be between 0 and 1")
+        return value
+
+    def model_post_init(self, __context: object) -> None:
+        """Require the high-confidence band to be at or above the mid band."""
+        if self.coreference_high_confidence < self.coreference_mid_confidence:
+            raise ValueError(
+                "context coreference_high_confidence must be >= "
+                "coreference_mid_confidence"
+            )
 
 
 class RuntimeConfig(BaseModel):

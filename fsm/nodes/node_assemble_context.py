@@ -116,6 +116,9 @@ def build_context_package(state: dict[str, Any]) -> ContextPackage:
     }
     _record_token_sizing(package, config)
     _prune_to_budget(package, config)
+    _resolve_coreference_candidates(package, config)
+    _record_token_sizing(package, config)
+    _sync_final_pruning_meta(package, config)
     return package
 
 
@@ -343,6 +346,22 @@ def _prune_to_budget(package: ContextPackage, config: Any) -> None:
     package["meta"]["token_sizing"]["over_budget"] = final_total > budget
 
 
+def _sync_final_pruning_meta(package: ContextPackage, config: Any) -> None:
+    """Mirror final token sizing after post-prune deterministic injections."""
+
+    final_total = package["meta"]["token_sizing"]["total_tokens"]
+    initial_total = package["meta"].get("initial_token_total", final_total)
+    pruned_layers = list(package["meta"].get("pruned_layers", []))
+    package["meta"]["final_token_total"] = final_total
+    package["meta"]["over_budget"] = final_total > config.context.token_budget
+    package["meta"]["token_sizing"]["initial_total_tokens"] = initial_total
+    package["meta"]["token_sizing"]["final_token_total"] = final_total
+    package["meta"]["token_sizing"]["pruned_layers"] = pruned_layers
+    package["meta"]["token_sizing"]["over_budget"] = (
+        final_total > config.context.token_budget
+    )
+
+
 def _drop_summary_tiers_to_budget(
     package: ContextPackage, config: Any
 ) -> list[str]:
@@ -365,6 +384,71 @@ def _drop_summary_tiers_to_budget(
         pruned_layers.append("summaries")
         _record_token_sizing(package, config)
     return pruned_layers
+
+
+def _resolve_coreference_candidates(package: ContextPackage, config: Any) -> None:
+    """Classify provisional coreference links into facts, beliefs, or exclusion."""
+
+    high_band = config.context.coreference_high_confidence
+    mid_band = config.context.coreference_mid_confidence
+    facts: list[dict[str, Any]] = []
+    beliefs: list[dict[str, Any]] = []
+    excluded_count = 0
+
+    for candidate in package["coreference_candidates"]:
+        confidence = _candidate_confidence(candidate)
+        if confidence >= high_band:
+            facts.append(_coreference_fact(candidate, confidence))
+        elif confidence >= mid_band:
+            beliefs.append(_coreference_belief(candidate, confidence))
+        else:
+            excluded_count += 1
+
+    package["relational"].setdefault("coreference_facts", []).extend(facts)
+    package["coreference_candidates"] = beliefs
+    package["meta"]["coreference_resolution"] = {
+        "order": "after_budgeting_pruning",
+        "high_confidence_threshold": high_band,
+        "mid_confidence_threshold": mid_band,
+        "confirmed_fact_count": len(facts),
+        "epistemic_belief_count": len(beliefs),
+        "excluded_low_confidence_count": excluded_count,
+    }
+
+
+def _candidate_confidence(candidate: dict[str, Any]) -> float:
+    """Return the numeric confidence from a provisional coreference candidate."""
+
+    try:
+        return float(candidate["confidence"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(
+            "coreference candidate must carry a numeric confidence"
+        ) from exc
+
+
+def _coreference_fact(candidate: dict[str, Any], confidence: float) -> dict[str, Any]:
+    """Return a machine-readable confirmed factual coreference entry."""
+
+    return {
+        "injection_type": "confirmed_fact",
+        "confirmation_status": "confirmed",
+        "is_confirmed": True,
+        "confidence": confidence,
+        "claim": deepcopy(candidate),
+    }
+
+
+def _coreference_belief(candidate: dict[str, Any], confidence: float) -> dict[str, Any]:
+    """Return a machine-readable unconfirmed Epistemic Belief entry."""
+
+    return {
+        "injection_type": "epistemic_belief",
+        "confirmation_status": "unconfirmed",
+        "is_confirmed": False,
+        "confidence": confidence,
+        "claim": deepcopy(candidate),
+    }
 
 
 def _serialize_layer(layer: Any) -> str:

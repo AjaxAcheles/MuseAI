@@ -47,6 +47,8 @@ thresholds:
 
 context:
   token_budget: 8000 # provisional, uncalibrated assembled-package ceiling
+  coreference_high_confidence: 0.85 # provisional, uncalibrated confirmed-fact band
+  coreference_mid_confidence: 0.50 # provisional, uncalibrated epistemic-belief band
 
 runtime:
   model_validate_retry_cap: 3 # proposed default to be calibrated
