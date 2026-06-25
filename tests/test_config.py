@@ -67,6 +67,8 @@ thresholds:
   voice_evolution_l2_cap: 0.30
 context:
   token_budget: 8000
+  coreference_high_confidence: 0.85
+  coreference_mid_confidence: 0.50
 runtime:
   model_validate_retry_cap: 3
   headless_mode: false
@@ -97,6 +99,8 @@ def test_valid_synthetic_config_loads_typed_values(
     assert config.thresholds.stylometric_drift_threshold == 0.12
     assert config.thresholds.voice_evolution_l2_cap == 0.30
     assert config.context.token_budget == 8000
+    assert config.context.coreference_high_confidence == 0.85
+    assert config.context.coreference_mid_confidence == 0.50
     assert config.runtime.model_validate_retry_cap == 3
     assert config.logging.log_level == "INFO"
 
