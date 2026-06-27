@@ -123,8 +123,8 @@ def _load_hf_tokenizer(model_name: str | None) -> Any:
         from transformers import AutoTokenizer
     except ImportError as exc:
         raise RuntimeError(
-            "tokenizer_family='hf_auto' requires the optional transformers "
-            "dependency. Install it with `uv sync --extra hf-tokenizer`."
+            "tokenizer_family='hf_auto' requires the transformers package, "
+            "which is a core dependency. Run `uv sync` to install it."
         ) from exc
 
     return AutoTokenizer.from_pretrained(model_name)

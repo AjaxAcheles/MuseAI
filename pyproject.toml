@@ -16,10 +16,6 @@ dependencies = [
     "numpy",
     "httpx",
     "typing-extensions",
-]
-
-[project.optional-dependencies]
-hf-tokenizer = [
     "transformers",
 ]
 
@@ -34,4 +30,5 @@ markers = [
 [dependency-groups]
 dev = [
     "pytest>=9.1.1",
+    "streamlit>=1.40.0",
 ]

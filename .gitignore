@@ -19,3 +19,4 @@ logs/*
 __pycache__/
 .venv/
 *.pyc
+Current state report.md
