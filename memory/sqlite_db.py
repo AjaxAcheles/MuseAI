@@ -8,6 +8,7 @@ writes, read helpers, non-SQLite stores, and CommitIntent crash-recovery
 orchestration (M10) land in later increments.
 """
 
+import json
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -160,6 +161,84 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
         updated_at TEXT NOT NULL
     )
     """,
+    # --- Planning-persistence tables (§2.7), verbatim from the design DDL --------
+    # These live in the same DB file as the narrative tables above but are a separate
+    # *proposal surface*: a PlanningSnapshot is a versioned outline the user can
+    # approve/reject/annotate before any of it becomes committed prose. They never
+    # alter the nine narrative tables. Hard CHECK constraints pin the documented enum
+    # vocabularies at the store level. Declared in §2.7 order; `PlanningSnapshot` and
+    # `PlanningRevision` form a nullable circular reference (a snapshot's
+    # `active_revision_id` stays NULL until its first revision exists), which is safe
+    # because SQLite resolves foreign-key parents on row writes, not at CREATE time.
+    """
+    CREATE TABLE IF NOT EXISTS PlanningSnapshot (
+        snapshot_id        TEXT PRIMARY KEY,
+        project_id         TEXT NOT NULL,
+        mode               TEXT NOT NULL,
+        status             TEXT NOT NULL CHECK(status IN
+                             ('draft','user_annotated','revision_requested','revised','approved','rejected','superseded')),
+        created_at         TEXT NOT NULL,
+        approved_at        TEXT,
+        active_revision_id TEXT REFERENCES PlanningRevision(revision_id)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS PlanningNode (
+        node_id       TEXT PRIMARY KEY,
+        snapshot_id   TEXT NOT NULL REFERENCES PlanningSnapshot(snapshot_id),
+        level         TEXT NOT NULL CHECK(level IN ('global','arc','chapter','scene','beat')),
+        parent_id     TEXT REFERENCES PlanningNode(node_id),
+        ordering      INTEGER NOT NULL DEFAULT 0,
+        title         TEXT,
+        summary       TEXT,
+        purpose       TEXT,
+        status        TEXT NOT NULL,
+        locked_pinned INTEGER NOT NULL DEFAULT 0
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS PlanningAnnotation (
+        annotation_id  TEXT PRIMARY KEY,
+        snapshot_id    TEXT NOT NULL REFERENCES PlanningSnapshot(snapshot_id),
+        target_node_id TEXT NOT NULL REFERENCES PlanningNode(node_id),
+        target_level   TEXT NOT NULL CHECK(target_level IN ('global','arc','chapter','scene','beat')),
+        note_type      TEXT NOT NULL CHECK(note_type IN
+                         ('constraint','preference','concern','question','regenerate_request','pin','remove','move','tone','continuity')),
+        scope          TEXT NOT NULL CHECK(scope IN ('this_node','children','subtree','sibling_sequence','global')),
+        priority       TEXT NOT NULL CHECK(priority IN ('low','normal','high','hard')),
+        text           TEXT NOT NULL,
+        status         TEXT NOT NULL CHECK(status IN
+                         ('pending','applied','partially_applied','rejected','needs_clarification','superseded')),
+        planner_response TEXT,
+        created_at     TEXT NOT NULL,
+        resolved_at    TEXT
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS PlanningRevision (
+        revision_id        TEXT PRIMARY KEY,
+        snapshot_id        TEXT NOT NULL REFERENCES PlanningSnapshot(snapshot_id),
+        parent_revision_id TEXT REFERENCES PlanningRevision(revision_id),
+        change_summary     TEXT,
+        diff_json          TEXT NOT NULL,
+        created_at         TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS PlannerToolCallTrace (
+        trace_id        TEXT PRIMARY KEY,
+        snapshot_id     TEXT REFERENCES PlanningSnapshot(snapshot_id),
+        planner_level   TEXT NOT NULL CHECK(planner_level IN ('global','arc','chapter','scene','beat')),
+        planner_node_id TEXT,
+        loop_index      INTEGER NOT NULL,
+        tool_name       TEXT NOT NULL,
+        tool_args_json  TEXT,
+        result_summary  TEXT,
+        success         INTEGER NOT NULL,
+        error           TEXT,
+        created_at      TEXT NOT NULL
+    )
+    """,
 )
 
 # Indexes for the deterministic exact-read paths the design relies on. Each is
@@ -178,6 +257,15 @@ _INDEX_STATEMENTS: tuple[str, ...] = (
     # would otherwise be uncovered, so index character_id to keep the documented
     # foreign-key-lookup paths indexed.
     "CREATE INDEX IF NOT EXISTS idx_characteremotions_character ON CharacterEmotions(character_id)",
+    # Planning proposal-surface lookups (§2.7): nodes by snapshot+level and by parent
+    # for tree traversal, annotations by snapshot and by target node, revisions by
+    # snapshot, and tool-call traces by snapshot+planner level.
+    "CREATE INDEX IF NOT EXISTS idx_planningnode_snapshot_level ON PlanningNode(snapshot_id, level)",
+    "CREATE INDEX IF NOT EXISTS idx_planningnode_parent ON PlanningNode(parent_id)",
+    "CREATE INDEX IF NOT EXISTS idx_planningannotation_snapshot ON PlanningAnnotation(snapshot_id)",
+    "CREATE INDEX IF NOT EXISTS idx_planningannotation_target ON PlanningAnnotation(target_node_id)",
+    "CREATE INDEX IF NOT EXISTS idx_planningrevision_snapshot ON PlanningRevision(snapshot_id)",
+    "CREATE INDEX IF NOT EXISTS idx_plannertoolcalltrace_snapshot_level ON PlannerToolCallTrace(snapshot_id, planner_level)",
 )
 
 
@@ -187,11 +275,13 @@ def init_db(db_path: str | Path) -> None:
     Opens its own connection via ``connect_db``, issues every ``CREATE TABLE IF NOT
     EXISTS`` and ``CREATE INDEX IF NOT EXISTS`` statement, commits, and closes the
     connection it opened. Idempotent: running it twice against the same file neither
-    drops data nor raises. Creates the documented relational tables (Arcs, Chapters,
+    drops data nor raises. Creates the documented narrative tables (Arcs, Chapters,
     Scenes, Beats, Threads, Characters, CharacterEmotions, CommitIntent, RaptorNodes)
-    with their hard CHECK constraints, plus the indexes for the deterministic
-    exact-read paths. Data writes, read helpers, runtime wiring, and CommitIntent
-    crash-recovery orchestration (M10) are out of scope here.
+    and the §2.7 planning proposal-surface tables (PlanningSnapshot, PlanningNode,
+    PlanningAnnotation, PlanningRevision, PlannerToolCallTrace) with their hard CHECK
+    constraints, plus the indexes for the deterministic exact-read paths. Planning
+    read/write helpers, data writes, runtime wiring, and CommitIntent crash-recovery
+    orchestration (M10) are out of scope here.
     """
     conn = connect_db(db_path)
     try:
@@ -533,3 +623,906 @@ def get_raptor_nodes_by_parent(db_path: str | Path, parent_id: str | None) -> li
         "SELECT * FROM RaptorNodes WHERE parent_id IS ? ORDER BY id ASC",
         (parent_id,),
     )
+
+
+# --- Planning proposal-surface helpers (§2.7) -----------------------------------
+# Persistence primitives over the five planning tables: the macro-outline approval
+# flow and the annotation-driven revision loop. These are a *proposal surface* — they
+# never promote nodes into the canonical narrative tables or into committed prose.
+# Writes are idempotent/replay-safe per logical operation: snapshot/node writes upsert
+# by primary key; annotation/revision/trace inserts use ON CONFLICT DO NOTHING so a
+# replay of the same logical write never duplicates or silently overwrites a prior row
+# (a revision must never overwrite — §2.7 lifecycle). The annotation compiler, conflict
+# detection, planner loop, validators, and tool registry are the M05 library, not here.
+
+
+def _now_iso() -> str:
+    """Current UTC timestamp as an ISO-8601 string (matches the relational writers)."""
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _planning_write(db_path: str | Path, fn):
+    """Run ``fn(conn)`` inside one explicit transaction on the planning DB.
+
+    Initializes the schema if needed, opens a connection (FKs ON), runs ``fn`` under a
+    single ``BEGIN``/commit, rolls back and re-raises on any error, and always closes
+    the connection. ``fn`` returns the helper's result (typically a re-read row dict).
+    """
+    init_db(db_path)
+    conn = connect_db(db_path)
+    try:
+        conn.execute("BEGIN")
+        result = fn(conn)
+        conn.commit()
+        return result
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def _fetch_one(conn: sqlite3.Connection, query: str, params: dict) -> dict | None:
+    """Single-row read on an open connection, returning a plain dict or None."""
+    row = conn.execute(query, params).fetchone()
+    return dict(row) if row is not None else None
+
+
+# --- PlanningSnapshot ------------------------------------------------------------
+# Upsert keyed by snapshot_id; created_at is never overwritten on conflict so a replay
+# of create_planning_snapshot leaves the original creation time in place.
+_PLANNING_SNAPSHOT_UPSERT = """
+    INSERT INTO PlanningSnapshot
+        (snapshot_id, project_id, mode, status, created_at, approved_at, active_revision_id)
+    VALUES
+        (:snapshot_id, :project_id, :mode, :status, :created_at, :approved_at, :active_revision_id)
+    ON CONFLICT(snapshot_id) DO UPDATE SET
+        project_id = excluded.project_id,
+        mode = excluded.mode,
+        status = excluded.status,
+        approved_at = excluded.approved_at,
+        active_revision_id = excluded.active_revision_id
+"""
+
+
+def create_planning_snapshot(
+    db_path: str | Path,
+    *,
+    snapshot_id: str,
+    project_id: str,
+    mode: str,
+    status: str = "draft",
+    created_at: str | None = None,
+    approved_at: str | None = None,
+    active_revision_id: str | None = None,
+) -> dict:
+    """Create (or replay-upsert) a PlanningSnapshot, returning the stored row.
+
+    Idempotent keyed by ``snapshot_id``: re-running with the same arguments leaves a
+    single row and preserves the original ``created_at``. ``status`` is checked at the
+    store level against the §2.7 vocabulary (an out-of-set value raises
+    ``sqlite3.IntegrityError``); this helper does not duplicate that enum in Python.
+    """
+    params = {
+        "snapshot_id": snapshot_id,
+        "project_id": project_id,
+        "mode": mode,
+        "status": status,
+        "created_at": created_at if created_at is not None else _now_iso(),
+        "approved_at": approved_at,
+        "active_revision_id": active_revision_id,
+    }
+
+    def _do(conn: sqlite3.Connection) -> dict:
+        conn.execute(_PLANNING_SNAPSHOT_UPSERT, params)
+        return _fetch_one(
+            conn,
+            "SELECT * FROM PlanningSnapshot WHERE snapshot_id = :snapshot_id",
+            {"snapshot_id": snapshot_id},
+        )
+
+    return _planning_write(db_path, _do)
+
+
+def transition_snapshot_status(
+    db_path: str | Path,
+    snapshot_id: str,
+    *,
+    status: str,
+    approved_at: str | None = None,
+    has_unresolved_conflict: bool = False,
+) -> dict | None:
+    """Transition a snapshot's ``status``, returning the updated row (None if absent).
+
+    The status vocabulary is enforced by the table ``CHECK`` (an invalid value raises
+    ``sqlite3.IntegrityError``). When ``status == 'approved'`` the ``approved_at``
+    stamp is set (defaulting to now). This helper persists state only — the real
+    approval gate lives in M05/M01; if it is handed ``has_unresolved_conflict=True``
+    while asked to set ``approved``, it raises ``ValueError`` rather than persisting an
+    approval that a ``needs_clarification`` annotation should still be blocking.
+    Idempotent: re-applying the same transition is a no-op.
+    """
+    if status == "approved" and has_unresolved_conflict:
+        raise ValueError(
+            "cannot set status='approved' while an unresolved (needs_clarification) "
+            "conflict is flagged"
+        )
+
+    if status == "approved":
+        params = {
+            "snapshot_id": snapshot_id,
+            "status": status,
+            "approved_at": approved_at if approved_at is not None else _now_iso(),
+        }
+        sql = (
+            "UPDATE PlanningSnapshot SET status = :status, approved_at = :approved_at "
+            "WHERE snapshot_id = :snapshot_id"
+        )
+    else:
+        params = {"snapshot_id": snapshot_id, "status": status}
+        sql = "UPDATE PlanningSnapshot SET status = :status WHERE snapshot_id = :snapshot_id"
+
+    def _do(conn: sqlite3.Connection) -> dict | None:
+        conn.execute(sql, params)
+        return _fetch_one(
+            conn,
+            "SELECT * FROM PlanningSnapshot WHERE snapshot_id = :snapshot_id",
+            {"snapshot_id": snapshot_id},
+        )
+
+    return _planning_write(db_path, _do)
+
+
+def set_snapshot_active_revision(
+    db_path: str | Path,
+    snapshot_id: str,
+    revision_id: str | None,
+) -> dict | None:
+    """Point a snapshot's ``active_revision_id`` at ``revision_id`` (or NULL to clear).
+
+    Idempotent UPDATE; the FK requires a non-NULL ``revision_id`` to already exist in
+    ``PlanningRevision``. Returns the updated row, or None if the snapshot is absent.
+    """
+
+    def _do(conn: sqlite3.Connection) -> dict | None:
+        conn.execute(
+            "UPDATE PlanningSnapshot SET active_revision_id = :revision_id "
+            "WHERE snapshot_id = :snapshot_id",
+            {"snapshot_id": snapshot_id, "revision_id": revision_id},
+        )
+        return _fetch_one(
+            conn,
+            "SELECT * FROM PlanningSnapshot WHERE snapshot_id = :snapshot_id",
+            {"snapshot_id": snapshot_id},
+        )
+
+    return _planning_write(db_path, _do)
+
+
+def get_planning_snapshot(db_path: str | Path, snapshot_id: str) -> dict | None:
+    """Return the PlanningSnapshot row for ``snapshot_id`` as a dict, or None."""
+    return _read_one(
+        db_path,
+        "SELECT * FROM PlanningSnapshot WHERE snapshot_id = ?",
+        (snapshot_id,),
+    )
+
+
+# --- PlanningNode ----------------------------------------------------------------
+# Upsert keyed by node_id so a replanned node updates in place rather than duplicating.
+_PLANNING_NODE_UPSERT = """
+    INSERT INTO PlanningNode
+        (node_id, snapshot_id, level, parent_id, ordering, title, summary, purpose,
+         status, locked_pinned)
+    VALUES
+        (:node_id, :snapshot_id, :level, :parent_id, :ordering, :title, :summary,
+         :purpose, :status, :locked_pinned)
+    ON CONFLICT(node_id) DO UPDATE SET
+        snapshot_id = excluded.snapshot_id,
+        level = excluded.level,
+        parent_id = excluded.parent_id,
+        ordering = excluded.ordering,
+        title = excluded.title,
+        summary = excluded.summary,
+        purpose = excluded.purpose,
+        status = excluded.status,
+        locked_pinned = excluded.locked_pinned
+"""
+
+
+def upsert_planning_node(
+    db_path: str | Path,
+    *,
+    node_id: str,
+    snapshot_id: str,
+    level: str,
+    status: str,
+    parent_id: str | None = None,
+    ordering: int = 0,
+    title: str | None = None,
+    summary: str | None = None,
+    purpose: str | None = None,
+    locked_pinned: bool = False,
+) -> dict:
+    """Idempotently upsert a PlanningNode keyed by ``node_id``, returning the row.
+
+    ``level`` is enforced by the table ``CHECK``. ``locked_pinned`` is stored as 0/1;
+    its conflict-on-removal semantics are M05's concern, this layer only persists the
+    flag. A replay of the same logical node leaves exactly one row.
+    """
+    params = {
+        "node_id": node_id,
+        "snapshot_id": snapshot_id,
+        "level": level,
+        "parent_id": parent_id,
+        "ordering": ordering,
+        "title": title,
+        "summary": summary,
+        "purpose": purpose,
+        "status": status,
+        "locked_pinned": int(bool(locked_pinned)),
+    }
+
+    def _do(conn: sqlite3.Connection) -> dict:
+        conn.execute(_PLANNING_NODE_UPSERT, params)
+        return _fetch_one(
+            conn,
+            "SELECT * FROM PlanningNode WHERE node_id = :node_id",
+            {"node_id": node_id},
+        )
+
+    return _planning_write(db_path, _do)
+
+
+def update_planning_node_status(
+    db_path: str | Path,
+    node_id: str,
+    status: str,
+) -> dict | None:
+    """Update a PlanningNode's ``status`` (idempotent), returning the row or None."""
+
+    def _do(conn: sqlite3.Connection) -> dict | None:
+        conn.execute(
+            "UPDATE PlanningNode SET status = :status WHERE node_id = :node_id",
+            {"node_id": node_id, "status": status},
+        )
+        return _fetch_one(
+            conn,
+            "SELECT * FROM PlanningNode WHERE node_id = :node_id",
+            {"node_id": node_id},
+        )
+
+    return _planning_write(db_path, _do)
+
+
+def set_planning_node_locked(
+    db_path: str | Path,
+    node_id: str,
+    locked: bool,
+) -> dict | None:
+    """Set or clear a PlanningNode's ``locked_pinned`` flag, returning the row or None.
+
+    Persists the user-pin flag only; emitting a ``raise_conflict`` when a planner
+    revision would remove a pinned node is M05 behavior, not enforced here.
+    """
+
+    def _do(conn: sqlite3.Connection) -> dict | None:
+        conn.execute(
+            "UPDATE PlanningNode SET locked_pinned = :locked WHERE node_id = :node_id",
+            {"node_id": node_id, "locked": int(bool(locked))},
+        )
+        return _fetch_one(
+            conn,
+            "SELECT * FROM PlanningNode WHERE node_id = :node_id",
+            {"node_id": node_id},
+        )
+
+    return _planning_write(db_path, _do)
+
+
+def get_planning_nodes(
+    db_path: str | Path,
+    snapshot_id: str,
+    *,
+    level: str | None = None,
+) -> list[dict]:
+    """Return a snapshot's PlanningNodes ordered by ``ordering``, optionally one level.
+
+    ``level=None`` returns every node under ``snapshot_id``; otherwise only that level.
+    Ordered by ``ordering ASC`` then ``node_id`` for deterministic output.
+    """
+    if level is None:
+        return _read_all(
+            db_path,
+            "SELECT * FROM PlanningNode WHERE snapshot_id = ? "
+            "ORDER BY ordering ASC, node_id ASC",
+            (snapshot_id,),
+        )
+    return _read_all(
+        db_path,
+        "SELECT * FROM PlanningNode WHERE snapshot_id = ? AND level = ? "
+        "ORDER BY ordering ASC, node_id ASC",
+        (snapshot_id, level),
+    )
+
+
+def get_planning_nodes_by_parent(
+    db_path: str | Path,
+    parent_id: str | None,
+) -> list[dict]:
+    """Return PlanningNodes whose parent is ``parent_id``, ordered by ``ordering``.
+
+    ``parent_id=None`` selects root nodes (``parent_id IS NULL``); ``IS ?`` binds NULL
+    correctly so the same helper serves both root and child traversal.
+    """
+    return _read_all(
+        db_path,
+        "SELECT * FROM PlanningNode WHERE parent_id IS ? "
+        "ORDER BY ordering ASC, node_id ASC",
+        (parent_id,),
+    )
+
+
+# --- PlanningAnnotation ----------------------------------------------------------
+# Insert is append-only and history-preserving: ON CONFLICT(annotation_id) DO NOTHING
+# so a replay never duplicates and never overwrites an existing annotation. Annotations
+# are never deleted — status transitions record outcomes for the diff/UI.
+_PLANNING_ANNOTATION_INSERT = """
+    INSERT INTO PlanningAnnotation
+        (annotation_id, snapshot_id, target_node_id, target_level, note_type, scope,
+         priority, text, status, planner_response, created_at, resolved_at)
+    VALUES
+        (:annotation_id, :snapshot_id, :target_node_id, :target_level, :note_type,
+         :scope, :priority, :text, :status, :planner_response, :created_at,
+         :resolved_at)
+    ON CONFLICT(annotation_id) DO NOTHING
+"""
+
+
+def insert_planning_annotation(
+    db_path: str | Path,
+    *,
+    annotation_id: str,
+    snapshot_id: str,
+    target_node_id: str,
+    target_level: str,
+    note_type: str,
+    scope: str,
+    priority: str,
+    text: str,
+    status: str = "pending",
+    planner_response: str | None = None,
+    created_at: str | None = None,
+    resolved_at: str | None = None,
+) -> dict:
+    """Insert a PlanningAnnotation (append-only), returning the stored row.
+
+    ``note_type``/``scope``/``priority``/``status``/``target_level`` are all enforced
+    by table ``CHECK`` sets. Idempotent keyed by ``annotation_id`` via
+    ``ON CONFLICT DO NOTHING`` so a replay neither duplicates nor overwrites; updates go
+    through ``update_annotation_status``. Annotations are never deleted (history is kept
+    for the revision diff/UI).
+    """
+    params = {
+        "annotation_id": annotation_id,
+        "snapshot_id": snapshot_id,
+        "target_node_id": target_node_id,
+        "target_level": target_level,
+        "note_type": note_type,
+        "scope": scope,
+        "priority": priority,
+        "text": text,
+        "status": status,
+        "planner_response": planner_response,
+        "created_at": created_at if created_at is not None else _now_iso(),
+        "resolved_at": resolved_at,
+    }
+
+    def _do(conn: sqlite3.Connection) -> dict:
+        conn.execute(_PLANNING_ANNOTATION_INSERT, params)
+        return _fetch_one(
+            conn,
+            "SELECT * FROM PlanningAnnotation WHERE annotation_id = :annotation_id",
+            {"annotation_id": annotation_id},
+        )
+
+    return _planning_write(db_path, _do)
+
+
+def update_annotation_status(
+    db_path: str | Path,
+    annotation_id: str,
+    *,
+    status: str,
+    planner_response: str | None = None,
+    resolved_at: str | None = None,
+) -> dict | None:
+    """Update a PlanningAnnotation's outcome fields, returning the row or None.
+
+    Sets ``status`` (enforced by the table ``CHECK``) plus the ``planner_response`` and
+    ``resolved_at`` outcome fields in place. Idempotent; never deletes the annotation.
+    """
+
+    def _do(conn: sqlite3.Connection) -> dict | None:
+        conn.execute(
+            "UPDATE PlanningAnnotation SET status = :status, "
+            "planner_response = :planner_response, resolved_at = :resolved_at "
+            "WHERE annotation_id = :annotation_id",
+            {
+                "annotation_id": annotation_id,
+                "status": status,
+                "planner_response": planner_response,
+                "resolved_at": resolved_at,
+            },
+        )
+        return _fetch_one(
+            conn,
+            "SELECT * FROM PlanningAnnotation WHERE annotation_id = :annotation_id",
+            {"annotation_id": annotation_id},
+        )
+
+    return _planning_write(db_path, _do)
+
+
+def get_annotations_for_node(db_path: str | Path, target_node_id: str) -> list[dict]:
+    """Return annotations targeting ``target_node_id``, oldest-first by ``created_at``."""
+    return _read_all(
+        db_path,
+        "SELECT * FROM PlanningAnnotation WHERE target_node_id = ? "
+        "ORDER BY created_at ASC, annotation_id ASC",
+        (target_node_id,),
+    )
+
+
+def get_annotations_for_snapshot(db_path: str | Path, snapshot_id: str) -> list[dict]:
+    """Return all annotations under ``snapshot_id``, oldest-first by ``created_at``."""
+    return _read_all(
+        db_path,
+        "SELECT * FROM PlanningAnnotation WHERE snapshot_id = ? "
+        "ORDER BY created_at ASC, annotation_id ASC",
+        (snapshot_id,),
+    )
+
+
+# --- PlanningRevision ------------------------------------------------------------
+# A revision is never a silent overwrite (§2.7): insert is ON CONFLICT DO NOTHING and
+# the prior revision row is preserved, while the owning snapshot's active_revision_id is
+# advanced to this revision in the same transaction.
+_PLANNING_REVISION_INSERT = """
+    INSERT INTO PlanningRevision
+        (revision_id, snapshot_id, parent_revision_id, change_summary, diff_json,
+         created_at)
+    VALUES
+        (:revision_id, :snapshot_id, :parent_revision_id, :change_summary, :diff_json,
+         :created_at)
+    ON CONFLICT(revision_id) DO NOTHING
+"""
+
+
+def insert_planning_revision(
+    db_path: str | Path,
+    *,
+    revision_id: str,
+    snapshot_id: str,
+    diff_json: str,
+    parent_revision_id: str | None = None,
+    change_summary: str | None = None,
+    created_at: str | None = None,
+) -> dict:
+    """Insert a PlanningRevision and advance the snapshot's ``active_revision_id``.
+
+    Both the revision insert and the ``active_revision_id`` advance happen in one
+    transaction, so the snapshot always points at the newest revision while every prior
+    revision row is preserved (a revision never silently overwrites another). Idempotent
+    keyed by ``revision_id``: a replay inserts nothing new and re-asserts the same active
+    pointer. Returns the stored revision row.
+    """
+    params = {
+        "revision_id": revision_id,
+        "snapshot_id": snapshot_id,
+        "parent_revision_id": parent_revision_id,
+        "change_summary": change_summary,
+        "diff_json": diff_json,
+        "created_at": created_at if created_at is not None else _now_iso(),
+    }
+
+    def _do(conn: sqlite3.Connection) -> dict:
+        conn.execute(_PLANNING_REVISION_INSERT, params)
+        conn.execute(
+            "UPDATE PlanningSnapshot SET active_revision_id = :revision_id "
+            "WHERE snapshot_id = :snapshot_id",
+            {"revision_id": revision_id, "snapshot_id": snapshot_id},
+        )
+        return _fetch_one(
+            conn,
+            "SELECT * FROM PlanningRevision WHERE revision_id = :revision_id",
+            {"revision_id": revision_id},
+        )
+
+    return _planning_write(db_path, _do)
+
+
+def get_revisions_for_snapshot(
+    db_path: str | Path,
+    snapshot_id: str,
+    *,
+    newest_first: bool = True,
+) -> list[dict]:
+    """Return a snapshot's revisions ordered by ``created_at`` (newest-first default).
+
+    ``newest_first=False`` returns them oldest-first. ``revision_id`` is the secondary
+    sort key for deterministic ordering when timestamps collide.
+    """
+    direction = "DESC" if newest_first else "ASC"
+    return _read_all(
+        db_path,
+        f"SELECT * FROM PlanningRevision WHERE snapshot_id = ? "
+        f"ORDER BY created_at {direction}, revision_id {direction}",
+        (snapshot_id,),
+    )
+
+
+# --- PlannerToolCallTrace --------------------------------------------------------
+# Append-only observability rows for the planner loop. Idempotent keyed by trace_id.
+_PLANNER_TRACE_INSERT = """
+    INSERT INTO PlannerToolCallTrace
+        (trace_id, snapshot_id, planner_level, planner_node_id, loop_index, tool_name,
+         tool_args_json, result_summary, success, error, created_at)
+    VALUES
+        (:trace_id, :snapshot_id, :planner_level, :planner_node_id, :loop_index,
+         :tool_name, :tool_args_json, :result_summary, :success, :error, :created_at)
+    ON CONFLICT(trace_id) DO NOTHING
+"""
+
+
+def insert_planner_tool_call_trace(
+    db_path: str | Path,
+    *,
+    trace_id: str,
+    planner_level: str,
+    loop_index: int,
+    tool_name: str,
+    success: bool,
+    snapshot_id: str | None = None,
+    planner_node_id: str | None = None,
+    tool_args_json: str | None = None,
+    result_summary: str | None = None,
+    error: str | None = None,
+    created_at: str | None = None,
+) -> dict:
+    """Insert a PlannerToolCallTrace observability row, returning the stored row.
+
+    ``planner_level`` is enforced by the table ``CHECK``; ``success`` is stored as 0/1.
+    Idempotent keyed by ``trace_id`` via ``ON CONFLICT DO NOTHING`` so a replay of the
+    same logical trace never duplicates.
+    """
+    params = {
+        "trace_id": trace_id,
+        "snapshot_id": snapshot_id,
+        "planner_level": planner_level,
+        "planner_node_id": planner_node_id,
+        "loop_index": loop_index,
+        "tool_name": tool_name,
+        "tool_args_json": tool_args_json,
+        "result_summary": result_summary,
+        "success": int(bool(success)),
+        "error": error,
+        "created_at": created_at if created_at is not None else _now_iso(),
+    }
+
+    def _do(conn: sqlite3.Connection) -> dict:
+        conn.execute(_PLANNER_TRACE_INSERT, params)
+        return _fetch_one(
+            conn,
+            "SELECT * FROM PlannerToolCallTrace WHERE trace_id = :trace_id",
+            {"trace_id": trace_id},
+        )
+
+    return _planning_write(db_path, _do)
+
+
+def get_traces_for_snapshot(
+    db_path: str | Path,
+    snapshot_id: str,
+    *,
+    planner_level: str | None = None,
+    loop_index: int | None = None,
+) -> list[dict]:
+    """Return tool-call traces for ``snapshot_id``, optionally filtered.
+
+    Optional ``planner_level`` and ``loop_index`` narrow the result. Ordered by
+    ``loop_index`` then ``created_at`` then ``trace_id`` for deterministic output.
+    """
+    clauses = ["snapshot_id = ?"]
+    params: list = [snapshot_id]
+    if planner_level is not None:
+        clauses.append("planner_level = ?")
+        params.append(planner_level)
+    if loop_index is not None:
+        clauses.append("loop_index = ?")
+        params.append(loop_index)
+    where = " AND ".join(clauses)
+    return _read_all(
+        db_path,
+        f"SELECT * FROM PlannerToolCallTrace WHERE {where} "
+        f"ORDER BY loop_index ASC, created_at ASC, trace_id ASC",
+        tuple(params),
+    )
+
+
+# --- Plan-time outline writers (§2.1 narrative rows, structural scaffolding) ------
+# These persist *validated planner structure* into the canonical narrative tables:
+# the minimal structural identity of an arc/chapter/scene/beat. They are distinct from
+# the commit-time path (`upsert_beat_commit` / `node_commit_transaction`, M10): they
+# never write draft or committed prose. A plan-time Beats row carries only structural
+# columns (id/scene_id/beat_index/status); `prose`/`word_count`/`committed_at` are left
+# untouched so a later commit fills them without the planner ever overwriting prose.
+#
+# The narrative tables hold only minimal structural columns, so the richer planner
+# detail the design routes to the proposal surface — chapter obligations (dramatic
+# function / expected emotional shift / required thread progress / scene-planning
+# constraints) and the tailored beat PAD behavioral-constraint string — is written into
+# a paired ``PlanningNode`` row (``level='chapter'``/``'beat'``) in the *same DB*, per
+# LangGraph_Nodes.md (node_plan_chapter writes "Chapter rows … and PlanningNode rows at
+# level='chapter'"; node_plan_beat writes "Beat Nodes … including the tailored PAD
+# behavioral constraint string"). All writers upsert by primary key, so a replay of the
+# same logical plan write never duplicates a row.
+_DEFAULT_PLAN_STATUS = "planned"  # narrative status vocabulary: planned/active/completed
+
+_ARC_PLAN_UPSERT = """
+    INSERT INTO Arcs (id, description, status)
+    VALUES (:id, :description, :status)
+    ON CONFLICT(id) DO UPDATE SET
+        description = excluded.description,
+        status = excluded.status
+"""
+
+_CHAPTER_PLAN_UPSERT = """
+    INSERT INTO Chapters (id, arc_id, description, status)
+    VALUES (:id, :arc_id, :description, :status)
+    ON CONFLICT(id) DO UPDATE SET
+        arc_id = excluded.arc_id,
+        description = excluded.description,
+        status = excluded.status
+"""
+
+_SCENE_PLAN_UPSERT = """
+    INSERT INTO Scenes (id, chapter_id, description, word_budget, ordering, status)
+    VALUES (:id, :chapter_id, :description, :word_budget, :ordering, :status)
+    ON CONFLICT(id) DO UPDATE SET
+        chapter_id = excluded.chapter_id,
+        description = excluded.description,
+        word_budget = excluded.word_budget,
+        ordering = excluded.ordering,
+        status = excluded.status
+"""
+
+# Structural beat columns only — deliberately omits prose/word_count/committed_at so a
+# plan-time write never clobbers committed prose and a later commit upsert is unaffected.
+_BEAT_PLAN_UPSERT = """
+    INSERT INTO Beats (id, scene_id, beat_index, status)
+    VALUES (:id, :scene_id, :beat_index, :status)
+    ON CONFLICT(id) DO UPDATE SET
+        scene_id = excluded.scene_id,
+        beat_index = excluded.beat_index,
+        status = excluded.status
+"""
+
+
+def upsert_arc_plan(
+    db_path: str | Path,
+    *,
+    arc_id: str,
+    description: str,
+    status: str = _DEFAULT_PLAN_STATUS,
+) -> dict:
+    """Idempotently persist a validated arc-plan row, returning the stored Arc dict.
+
+    Writes the minimal `Arcs` structural row keyed by ``arc_id``. ``status`` is enforced
+    by the table ``CHECK``. Structural scaffolding only — no prose, no commit fields.
+    """
+    params = {"id": arc_id, "description": description, "status": status}
+
+    def _do(conn: sqlite3.Connection) -> dict:
+        conn.execute(_ARC_PLAN_UPSERT, params)
+        return _fetch_one(conn, "SELECT * FROM Arcs WHERE id = :id", {"id": arc_id})
+
+    return _planning_write(db_path, _do)
+
+
+def upsert_chapter_plan(
+    db_path: str | Path,
+    *,
+    chapter_id: str,
+    arc_id: str,
+    description: str,
+    status: str = _DEFAULT_PLAN_STATUS,
+    snapshot_id: str | None = None,
+    node_id: str | None = None,
+    parent_node_id: str | None = None,
+    ordering: int = 0,
+    title: str | None = None,
+    dramatic_function: str | None = None,
+    expected_emotional_shift: str | None = None,
+    required_thread_progress: str | None = None,
+    scene_planning_constraints: str | None = None,
+    locked_pinned: bool = False,
+) -> dict:
+    """Persist a validated chapter-plan row plus its obligations, returning the dict.
+
+    Writes the minimal `Chapters` structural row keyed by ``chapter_id``. The chapter's
+    obligations — dramatic function, expected emotional shift, required thread progress,
+    and scene-planning constraints — are persisted to a paired ``PlanningNode``
+    (``level='chapter'``) in the same DB, serialized as JSON in the node's ``purpose``
+    (the design routes this detail to the proposal surface, not the narrative tables).
+
+    Pass ``snapshot_id`` and ``node_id`` to write that PlanningNode. If any obligation
+    field is supplied without both, a ``ValueError`` is raised rather than silently
+    dropping the obligations. The returned dict is the Chapters row, with the stored
+    PlanningNode row under a ``"planning_node"`` key when one was written. Idempotent:
+    both rows upsert by primary key, so a replay never duplicates. Structural/proposal
+    scaffolding only — never narrative prose.
+    """
+    obligations = {
+        "dramatic_function": dramatic_function,
+        "expected_emotional_shift": expected_emotional_shift,
+        "required_thread_progress": required_thread_progress,
+        "scene_planning_constraints": scene_planning_constraints,
+    }
+    has_obligations = any(v is not None for v in obligations.values())
+    write_node = snapshot_id is not None and node_id is not None
+    if has_obligations and not write_node:
+        raise ValueError(
+            "chapter obligations require snapshot_id and node_id (they are persisted to "
+            "the PlanningNode proposal surface, not the narrative Chapters row)"
+        )
+
+    chapter_params = {
+        "id": chapter_id,
+        "arc_id": arc_id,
+        "description": description,
+        "status": status,
+    }
+    node_params = None
+    if write_node:
+        node_params = {
+            "node_id": node_id,
+            "snapshot_id": snapshot_id,
+            "level": "chapter",
+            "parent_id": parent_node_id,
+            "ordering": ordering,
+            "title": title if title is not None else description,
+            "summary": dramatic_function,
+            "purpose": json.dumps(obligations),
+            "status": status,
+            "locked_pinned": int(bool(locked_pinned)),
+        }
+
+    def _do(conn: sqlite3.Connection) -> dict:
+        conn.execute(_CHAPTER_PLAN_UPSERT, chapter_params)
+        result = _fetch_one(
+            conn, "SELECT * FROM Chapters WHERE id = :id", {"id": chapter_id}
+        )
+        if node_params is not None:
+            conn.execute(_PLANNING_NODE_UPSERT, node_params)
+            result["planning_node"] = _fetch_one(
+                conn,
+                "SELECT * FROM PlanningNode WHERE node_id = :node_id",
+                {"node_id": node_id},
+            )
+        return result
+
+    return _planning_write(db_path, _do)
+
+
+def upsert_scene_plan(
+    db_path: str | Path,
+    *,
+    scene_id: str,
+    chapter_id: str,
+    description: str,
+    ordering: int,
+    word_budget: int = 0,
+    status: str = _DEFAULT_PLAN_STATUS,
+) -> dict:
+    """Idempotently persist a validated scene-plan row, returning the stored Scene dict.
+
+    Writes the `Scenes` structural row keyed by ``scene_id`` and sets the explicit
+    ``ordering`` sort key (read paths sort scenes by ``ordering ASC``, not creation
+    time). Structural scaffolding only — no prose, no commit fields.
+    """
+    params = {
+        "id": scene_id,
+        "chapter_id": chapter_id,
+        "description": description,
+        "word_budget": word_budget,
+        "ordering": ordering,
+        "status": status,
+    }
+
+    def _do(conn: sqlite3.Connection) -> dict:
+        conn.execute(_SCENE_PLAN_UPSERT, params)
+        return _fetch_one(conn, "SELECT * FROM Scenes WHERE id = :id", {"id": scene_id})
+
+    return _planning_write(db_path, _do)
+
+
+def upsert_beat_plan(
+    db_path: str | Path,
+    *,
+    beat_id: str,
+    scene_id: str,
+    beat_index: int,
+    status: str = _DEFAULT_PLAN_STATUS,
+    snapshot_id: str | None = None,
+    node_id: str | None = None,
+    parent_node_id: str | None = None,
+    ordering: int = 0,
+    title: str | None = None,
+    pad_constraint: str | None = None,
+    immediate_objective: str | None = None,
+    physical_constraints: str | None = None,
+    locked_pinned: bool = False,
+) -> dict:
+    """Persist a validated beat-plan row plus its PAD constraint, returning the dict.
+
+    Writes the minimal `Beats` structural row keyed by ``beat_id`` (id/scene_id/
+    beat_index/status only — ``prose``/``word_count``/``committed_at`` are left for the
+    commit path and never touched here). The tailored PAD behavioral-constraint string
+    (with the beat's immediate objective and physical constraints) is persisted to a
+    paired ``PlanningNode`` (``level='beat'``) in the same DB, serialized as JSON in the
+    node's ``purpose``.
+
+    Pass ``snapshot_id`` and ``node_id`` to write that PlanningNode. If ``pad_constraint``
+    (or the other beat detail fields) is supplied without both, a ``ValueError`` is
+    raised rather than silently dropping it. The returned dict is the Beats row, with the
+    stored PlanningNode under a ``"planning_node"`` key when one was written. Idempotent:
+    both rows upsert by primary key. Structural/proposal scaffolding only — never prose.
+    """
+    beat_detail = {
+        "immediate_objective": immediate_objective,
+        "physical_constraints": physical_constraints,
+        "pad_constraint": pad_constraint,
+    }
+    has_detail = any(v is not None for v in beat_detail.values())
+    write_node = snapshot_id is not None and node_id is not None
+    if has_detail and not write_node:
+        raise ValueError(
+            "beat PAD/objective detail requires snapshot_id and node_id (it is persisted "
+            "to the PlanningNode proposal surface, not the narrative Beats row)"
+        )
+
+    beat_params = {
+        "id": beat_id,
+        "scene_id": scene_id,
+        "beat_index": beat_index,
+        "status": status,
+    }
+    node_params = None
+    if write_node:
+        node_params = {
+            "node_id": node_id,
+            "snapshot_id": snapshot_id,
+            "level": "beat",
+            "parent_id": parent_node_id,
+            "ordering": ordering,
+            "title": title,
+            "summary": immediate_objective,
+            "purpose": json.dumps(beat_detail),
+            "status": status,
+            "locked_pinned": int(bool(locked_pinned)),
+        }
+
+    def _do(conn: sqlite3.Connection) -> dict:
+        conn.execute(_BEAT_PLAN_UPSERT, beat_params)
+        result = _fetch_one(conn, "SELECT * FROM Beats WHERE id = :id", {"id": beat_id})
+        if node_params is not None:
+            conn.execute(_PLANNING_NODE_UPSERT, node_params)
+            result["planning_node"] = _fetch_one(
+                conn,
+                "SELECT * FROM PlanningNode WHERE node_id = :node_id",
+                {"node_id": node_id},
+            )
+        return result
+
+    return _planning_write(db_path, _do)
