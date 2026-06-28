@@ -69,6 +69,17 @@ context:
   token_budget: 8000
   coreference_high_confidence: 0.85
   coreference_mid_confidence: 0.50
+planning:
+  execution_mode: "macro_outline_before_draft"
+  approval_mode: "off"
+  planner_max_deliberation_loops: {global: 4, arc: 3, chapter: 3, scene: 2, beat: 2}
+  planner_max_tool_calls_per_loop: {global: 8, arc: 6, chapter: 5, scene: 4, beat: 3}
+  planner_required_checks:
+    global: ["schema", "arc_coverage", "major_promise_payoff"]
+    arc: ["schema", "escalation", "thread_distribution"]
+    chapter: ["schema", "chapter_function", "pacing", "annotation_satisfaction"]
+    scene: ["schema", "continuity", "scene_function", "entry_exit_state"]
+    beat: ["schema", "draftability", "continuity", "pad_grounding"]
 runtime:
   model_validate_retry_cap: 3
   headless_mode: false
@@ -104,6 +115,16 @@ def test_valid_synthetic_config_loads_typed_values(
     assert config.context.coreference_mid_confidence == 0.50
     assert config.runtime.model_validate_retry_cap == 3
     assert config.logging.log_level == "INFO"
+    assert config.planning.execution_mode == "macro_outline_before_draft"
+    assert config.planning.approval_mode == "off"
+    assert config.planning.planner_max_deliberation_loops["global"] == 4
+    assert config.planning.planner_max_tool_calls_per_loop["beat"] == 3
+    assert config.planning.planner_required_checks["beat"] == [
+        "schema",
+        "draftability",
+        "continuity",
+        "pad_grounding",
+    ]
 
 
 def test_unknown_key_raises_validation_error(
@@ -145,3 +166,55 @@ def test_missing_endpoint_secret_raises_clear_error(
 
     with pytest.raises(ValidationError, match="api_key|secret|PLANNER_API_KEY"):
         load_config(write_config(tmp_path, valid_config_yaml()))
+
+
+def test_macro_outline_approval_requires_macro_execution_mode(
+    tmp_path: Path, endpoint_secrets: None
+) -> None:
+    """approval_mode='macro_outline' is invalid unless execution_mode is macro-first."""
+    del endpoint_secrets
+    bad_yaml = valid_config_yaml().replace(
+        'execution_mode: "macro_outline_before_draft"',
+        'execution_mode: "rolling"',
+    ).replace(
+        'approval_mode: "off"',
+        'approval_mode: "macro_outline"',
+    )
+
+    with pytest.raises(
+        ValidationError, match="approval_mode.*macro_outline|execution_mode"
+    ):
+        load_config(write_config(tmp_path, bad_yaml))
+
+
+def test_headless_with_approval_gate_raises(
+    tmp_path: Path, endpoint_secrets: None
+) -> None:
+    """A headless run must never enable an approval gate it can never clear."""
+    del endpoint_secrets
+    # execution_mode stays macro-first (so the first rule passes), isolating the
+    # headless/approval conflict as the failing rule.
+    bad_yaml = valid_config_yaml().replace(
+        "headless_mode: false",
+        "headless_mode: true",
+    ).replace(
+        'approval_mode: "off"',
+        'approval_mode: "macro_outline"',
+    )
+
+    with pytest.raises(ValidationError, match="headless"):
+        load_config(write_config(tmp_path, bad_yaml))
+
+
+def test_default_repo_config_still_loads(endpoint_secrets: None) -> None:
+    """Regression guard: the real config.yaml loads now that planning is required."""
+    del endpoint_secrets
+    repo_config = Path(__file__).resolve().parents[1] / "config.yaml"
+
+    config = load_config(repo_config)
+
+    assert config.planning.execution_mode in {
+        "rolling",
+        "macro_outline_before_draft",
+    }
+    assert config.planning.approval_mode in {"off", "macro_outline"}

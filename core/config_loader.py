@@ -11,7 +11,16 @@ import os
 from pathlib import Path
 
 import yaml
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
+
+# The five planner cascade levels every per-level planning map must key over.
+_PLANNER_LEVELS = frozenset({"global", "arc", "chapter", "scene", "beat"})
 
 # Per-endpoint secrets are never stored in config.yaml. Each endpoint's API key
 # is read from "{ENDPOINT_NAME_UPPER}_API_KEY" (mirrors .env.example).
@@ -112,6 +121,62 @@ class RuntimeConfig(BaseModel):
     inference_timeout_seconds: int
 
 
+class PlanningConfig(BaseModel):
+    """Five-level planner cascade: deliberation/tool-call caps, required validator
+    checks, and the execution/approval mode. Caps and checks are proposed defaults
+    read from config, never hardcoded in planner logic."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    execution_mode: str
+    approval_mode: str
+    planner_max_deliberation_loops: dict[str, int]
+    planner_max_tool_calls_per_loop: dict[str, int]
+    planner_required_checks: dict[str, list[str]]
+
+    @field_validator("execution_mode")
+    @classmethod
+    def require_known_execution_mode(cls, value: str) -> str:
+        """Reject any execution_mode outside the documented vocabulary."""
+        allowed = {"rolling", "macro_outline_before_draft"}
+        if value not in allowed:
+            raise ValueError(
+                f"planning execution_mode must be one of {sorted(allowed)}"
+            )
+        return value
+
+    @field_validator("approval_mode")
+    @classmethod
+    def require_known_approval_mode(cls, value: str) -> str:
+        """Reject any approval_mode outside the documented vocabulary."""
+        allowed = {"off", "macro_outline"}
+        if value not in allowed:
+            raise ValueError(
+                f"planning approval_mode must be one of {sorted(allowed)}"
+            )
+        return value
+
+    @field_validator(
+        "planner_max_deliberation_loops",
+        "planner_max_tool_calls_per_loop",
+        "planner_required_checks",
+    )
+    @classmethod
+    def require_exact_planner_levels(cls, value: dict, info: ValidationInfo) -> dict:
+        """Require each per-level map to key over exactly the five planner levels.
+
+        A missing or extra level is a load-time error so the planner can never read
+        an undefined level cap or check list.
+        """
+        keys = set(value)
+        if keys != set(_PLANNER_LEVELS):
+            raise ValueError(
+                f"planning {info.field_name} must have exactly the five planner "
+                f"levels {sorted(_PLANNER_LEVELS)}; got {sorted(keys)}"
+            )
+        return value
+
+
 class LoggingConfig(BaseModel):
     """Observability surface configuration."""
 
@@ -128,8 +193,36 @@ class AppConfig(BaseModel):
     endpoints: EndpointsConfig
     thresholds: ThresholdsConfig
     context: ContextConfig
+    planning: PlanningConfig
     runtime: RuntimeConfig
     logging: LoggingConfig
+
+    @model_validator(mode="after")
+    def _validate_planning_safety_rules(self) -> "AppConfig":
+        """Reject unsafe planning/runtime combinations at load (§3a cross-field rules).
+
+        These span two sub-models (``planning`` and ``runtime``), so they live here on
+        the top-level config rather than on ``PlanningConfig`` alone. Both are safety
+        rules: the message names the rule so a misconfiguration fails loudly at boot
+        instead of stranding a run mid-flight.
+        """
+        if (
+            self.planning.approval_mode == "macro_outline"
+            and self.planning.execution_mode != "macro_outline_before_draft"
+        ):
+            raise ValueError(
+                "planning.approval_mode == 'macro_outline' is valid only when "
+                "planning.execution_mode == 'macro_outline_before_draft' (got "
+                f"execution_mode='{self.planning.execution_mode}')"
+            )
+        if self.runtime.headless_mode and self.planning.approval_mode != "off":
+            raise ValueError(
+                "runtime.headless_mode is true but planning.approval_mode is "
+                f"'{self.planning.approval_mode}': a headless run must never be parked "
+                "at an approval gate it can never clear. Set approval_mode='off' or "
+                "disable headless_mode."
+            )
+        return self
 
 
 def load_config(path: str | os.PathLike) -> AppConfig:

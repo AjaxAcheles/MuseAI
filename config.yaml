@@ -50,6 +50,20 @@ context:
   coreference_high_confidence: 0.85 # provisional, uncalibrated confirmed-fact band
   coreference_mid_confidence: 0.50 # provisional, uncalibrated epistemic-belief band
 
+planning:
+  execution_mode: "macro_outline_before_draft"  # macro_outline_before_draft | rolling   (DEFAULT shown)
+  approval_mode: "off"                           # off | macro_outline
+  # Hard caps on the bounded planner loop, per cascade level — proposed defaults to be calibrated.
+  planner_max_deliberation_loops:  {global: 4, arc: 3, chapter: 3, scene: 2, beat: 2}  # proposed defaults to be calibrated
+  planner_max_tool_calls_per_loop: {global: 8, arc: 6, chapter: 5, scene: 4, beat: 3}  # proposed defaults to be calibrated
+  # Validators each planner level must pass before its finalize is accepted.
+  planner_required_checks:
+    global:  ["schema", "arc_coverage", "major_promise_payoff"]
+    arc:     ["schema", "escalation", "thread_distribution"]
+    chapter: ["schema", "chapter_function", "pacing", "annotation_satisfaction"]
+    scene:   ["schema", "continuity", "scene_function", "entry_exit_state"]
+    beat:    ["schema", "draftability", "continuity", "pad_grounding"]
+
 runtime:
   model_validate_retry_cap: 3 # proposed default to be calibrated
   headless_mode: false
