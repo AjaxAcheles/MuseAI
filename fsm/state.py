@@ -1,8 +1,9 @@
 """Module: M01 (Coordinator & State Machine)
-Define typed orchestrator state, FSM pointer, and failure object schemas.
-STUB:
+Define typed orchestrator state, FSM pointer, and failure object schemas, including
+the planning-subsystem fields the five-level planner cascade reads and mutates.
 """
 
+import operator
 from typing import Annotated, Any
 
 from pydantic import BaseModel, ConfigDict
@@ -17,7 +18,13 @@ class FSM_Pointer(BaseModel):
     arc_id: str
     chapter_id: str
     scene_id: str
+    # `beat_index` is in-scene *position* (ordering), while `beat_id` below is the
+    # current beat's *identity* — they are not the same field.
     beat_index: int
+    # Identity of the current beat (matches Beats.id / a beat PlanningNode). Defaults to
+    # "" so existing FSM_Pointer(...) construction sites keep working under
+    # extra="forbid"/strict=True until the planner populates a real beat id.
+    beat_id: str = ""
 
 
 class FailureObject(BaseModel):
@@ -65,6 +72,23 @@ class OrchestratorState(TypedDict):
     failed_beat_cache: Annotated[list[dict[str, Any]], accumulate_or_reset]
     best_seen_draft: str | None
 
+    # --- Planning subsystem (five-level cascade, deliberation loops, macro-outline +
+    # approval). Approval-waiting is a safe boundary, never pause_requested /
+    # hard_stop_asserted (Data_Structures.md §1.1; Module_Ability_Specification §5). ---
+    planning_execution_mode: str
+    approval_mode: str
+    macro_outline_ready: bool
+    macro_outline_approved: bool
+    awaiting_planning_approval: bool
+    planning_snapshot_id: str | None
+    active_planning_revision_id: str | None
+    planner_loop_index: int
+    planner_tool_call_count: int
+    # operator.add (append-only), NOT accumulate_or_reset: planner-action trace is
+    # observability history that must never be reset by an empty contribution.
+    planner_deliberation_trace: Annotated[list[dict[str, Any]], operator.add]
+    planning_block_reason: str | None
+
 
 def make_initial_state(
     project_id: str, fsm_pointer: FSM_Pointer, **overrides: Any
@@ -88,6 +112,20 @@ def make_initial_state(
         "hard_stop_asserted": False,
         "failed_beat_cache": [],
         "best_seen_draft": None,
+        # Planning subsystem — §1.x "Init on run" defaults. The mode fields default to
+        # the system default and stay overridable via **overrides; Build 14 snapshots
+        # the real config.planning.* values at graph entry (never read config here).
+        "planning_execution_mode": "macro_outline_before_draft",
+        "approval_mode": "off",
+        "macro_outline_ready": False,
+        "macro_outline_approved": False,
+        "awaiting_planning_approval": False,
+        "planning_snapshot_id": None,
+        "active_planning_revision_id": None,
+        "planner_loop_index": 0,
+        "planner_tool_call_count": 0,
+        "planner_deliberation_trace": [],
+        "planning_block_reason": None,
     }
     unknown_keys = set(overrides) - set(state)
     if unknown_keys:
