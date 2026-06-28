@@ -31,6 +31,7 @@ from memory.sqlite_db import (
     insert_planner_tool_call_trace,
     insert_planning_annotation,
     insert_planning_revision,
+    set_snapshot_active_revision,
     transition_snapshot_status,
     upsert_arc_plan,
     upsert_beat_plan,
@@ -202,6 +203,41 @@ def test_revision_history_is_preserved_not_overwritten(tmp_path):
     assert get_planning_snapshot(db, "s1")["active_revision_id"] == "r2"
 
 
+def test_replaying_older_revision_does_not_demote_active_pointer(tmp_path):
+    """A resumed older revision insert cannot move active_revision_id backward."""
+    db = _db(tmp_path)
+    create_planning_snapshot(db, snapshot_id="s1", project_id="p1", mode="rolling")
+    insert_planning_revision(
+        db,
+        revision_id="r1",
+        snapshot_id="s1",
+        diff_json="{}",
+        created_at="2026-06-27T00:00:00+00:00",
+    )
+    insert_planning_revision(
+        db,
+        revision_id="r2",
+        snapshot_id="s1",
+        parent_revision_id="r1",
+        diff_json="{}",
+        created_at="2026-06-27T01:00:00+00:00",
+    )
+
+    insert_planning_revision(
+        db,
+        revision_id="r1",
+        snapshot_id="s1",
+        diff_json='{"replayed": true}',
+        created_at="2026-06-27T00:00:00+00:00",
+    )
+
+    assert get_planning_snapshot(db, "s1")["active_revision_id"] == "r2"
+    assert [r["revision_id"] for r in get_revisions_for_snapshot(db, "s1")] == [
+        "r2",
+        "r1",
+    ]
+
+
 def test_approved_gate_blocks_on_unresolved_conflict(tmp_path):
     """Approval is persisted only when no unresolved conflict is flagged."""
     db = _db(tmp_path)
@@ -219,6 +255,93 @@ def test_approved_gate_blocks_on_unresolved_conflict(tmp_path):
         pass
     else:  # pragma: no cover - the gate must raise
         raise AssertionError("expected ValueError when approving with a conflict")
+
+
+def test_snapshot_create_replay_preserves_advanced_lifecycle(tmp_path):
+    """Replaying create cannot revert status, approval stamp, or active revision."""
+    db = _db(tmp_path)
+    create_planning_snapshot(
+        db,
+        snapshot_id="s1",
+        project_id="p1",
+        mode="rolling",
+        created_at="2026-06-27T00:00:00+00:00",
+    )
+    transition_snapshot_status(
+        db,
+        "s1",
+        status="approved",
+        approved_at="2026-06-27T00:05:00+00:00",
+    )
+    insert_planning_revision(
+        db,
+        revision_id="r1",
+        snapshot_id="s1",
+        diff_json="{}",
+        created_at="2026-06-27T00:10:00+00:00",
+    )
+    set_snapshot_active_revision(db, "s1", "r1")
+
+    replayed = create_planning_snapshot(
+        db,
+        snapshot_id="s1",
+        project_id="p1-refreshed",
+        mode="rolling",
+        created_at="2026-06-27T00:00:00+00:00",
+    )
+
+    assert replayed["project_id"] == "p1-refreshed"
+    assert replayed["status"] == "approved"
+    assert replayed["approved_at"] == "2026-06-27T00:05:00+00:00"
+    assert replayed["active_revision_id"] == "r1"
+
+
+def test_reapproving_snapshot_preserves_first_approval_stamp(tmp_path):
+    """Approving twice is a replay-safe no-op for approved_at."""
+    db = _db(tmp_path)
+    create_planning_snapshot(db, snapshot_id="s1", project_id="p1", mode="rolling")
+
+    first = transition_snapshot_status(
+        db,
+        "s1",
+        status="approved",
+        approved_at="2026-06-27T00:05:00+00:00",
+    )
+    second = transition_snapshot_status(db, "s1", status="approved")
+
+    assert first["approved_at"] == "2026-06-27T00:05:00+00:00"
+    assert second["approved_at"] == "2026-06-27T00:05:00+00:00"
+
+
+def test_leaving_approved_clears_approval_stamp(tmp_path):
+    """Rejected/superseded snapshots do not retain stale approval timestamps."""
+    db = _db(tmp_path)
+    create_planning_snapshot(db, snapshot_id="s1", project_id="p1", mode="rolling")
+    transition_snapshot_status(
+        db,
+        "s1",
+        status="approved",
+        approved_at="2026-06-27T00:05:00+00:00",
+    )
+
+    rejected = transition_snapshot_status(db, "s1", status="rejected")
+
+    assert rejected["status"] == "rejected"
+    assert rejected["approved_at"] is None
+
+
+def test_schema_init_guard_recovers_after_db_file_is_removed(tmp_path):
+    """The once-per-process init guard reinitializes if the DB file disappears."""
+    db = _db(tmp_path)
+    create_planning_snapshot(db, snapshot_id="s1", project_id="p1", mode="rolling")
+    db.unlink()
+
+    recreated = create_planning_snapshot(
+        db, snapshot_id="s2", project_id="p1", mode="rolling"
+    )
+
+    assert recreated["snapshot_id"] == "s2"
+    assert get_planning_snapshot(db, "s1") is None
 
 
 # --- (b) plan-time narrative outline round-trip ----------------------------------
@@ -419,6 +542,28 @@ def test_planning_node_parent_child_traversal(tmp_path):
         parent_node_id="pn-ch1",
         pad_constraint="tense",
     )
-    children = get_planning_nodes_by_parent(db, "pn-ch1")
+    children = get_planning_nodes_by_parent(db, "snap1", "pn-ch1")
     assert [n["node_id"] for n in children] == ["pn-b1"]
-    assert [n["node_id"] for n in get_planning_nodes_by_parent(db, None)] == ["pn-ch1"]
+    assert [n["node_id"] for n in get_planning_nodes_by_parent(db, "snap1", None)] == [
+        "pn-ch1"
+    ]
+
+
+def test_root_planning_node_traversal_is_snapshot_scoped(tmp_path):
+    """Root traversal for one snapshot cannot mix in another snapshot's roots."""
+    db = _db(tmp_path)
+    create_planning_snapshot(db, snapshot_id="snap1", project_id="proj1", mode="rolling")
+    create_planning_snapshot(db, snapshot_id="snap2", project_id="proj1", mode="rolling")
+    upsert_planning_node(
+        db, node_id="snap1-root", snapshot_id="snap1", level="arc", status="proposed"
+    )
+    upsert_planning_node(
+        db, node_id="snap2-root", snapshot_id="snap2", level="arc", status="proposed"
+    )
+
+    assert [
+        n["node_id"] for n in get_planning_nodes_by_parent(db, "snap1", None)
+    ] == ["snap1-root"]
+    assert [
+        n["node_id"] for n in get_planning_nodes_by_parent(db, "snap2", None)
+    ] == ["snap2-root"]

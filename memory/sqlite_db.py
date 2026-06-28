@@ -14,6 +14,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 
+_INITIALIZED_DB_PATHS: set[Path] = set()
+
+
 def _resolve_db_path(db_path: str | Path) -> Path:
     """Coerce a string/Path target into a Path and ensure its parent exists.
 
@@ -39,6 +42,15 @@ def connect_db(db_path: str | Path) -> sqlite3.Connection:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     return conn
+
+
+def _ensure_db_initialized(db_path: str | Path) -> None:
+    """Initialize ``db_path`` once per process, and again if the file is removed."""
+    path = _resolve_db_path(db_path)
+    cache_key = path.resolve()
+    if cache_key not in _INITIALIZED_DB_PATHS or not path.exists():
+        init_db(path)
+        _INITIALIZED_DB_PATHS.add(cache_key)
 
 
 # Outline and planning schema for the relational hub. Hard CHECK constraints pin
@@ -422,7 +434,7 @@ def upsert_beat_commit(
         "committed_at": committed_at,
     }
 
-    init_db(db_path)
+    _ensure_db_initialized(db_path)
     conn = connect_db(db_path)
     try:
         conn.execute("BEGIN")
@@ -451,7 +463,7 @@ _REMAINING_STATUSES = ("planned", "active")  # everything that is not 'completed
 
 def _read_one(db_path: str | Path, query: str, params: tuple) -> dict | None:
     """Run a single-row exact read, returning a plain dict or None."""
-    init_db(db_path)
+    _ensure_db_initialized(db_path)
     conn = connect_db(db_path)
     try:
         row = conn.execute(query, params).fetchone()
@@ -462,7 +474,7 @@ def _read_one(db_path: str | Path, query: str, params: tuple) -> dict | None:
 
 def _read_all(db_path: str | Path, query: str, params: tuple) -> list[dict]:
     """Run a multi-row exact read, returning a list of plain dicts."""
-    init_db(db_path)
+    _ensure_db_initialized(db_path)
     conn = connect_db(db_path)
     try:
         return [dict(row) for row in conn.execute(query, params).fetchall()]
@@ -648,7 +660,7 @@ def _planning_write(db_path: str | Path, fn):
     single ``BEGIN``/commit, rolls back and re-raises on any error, and always closes
     the connection. ``fn`` returns the helper's result (typically a re-read row dict).
     """
-    init_db(db_path)
+    _ensure_db_initialized(db_path)
     conn = connect_db(db_path)
     try:
         conn.execute("BEGIN")
@@ -669,8 +681,9 @@ def _fetch_one(conn: sqlite3.Connection, query: str, params: dict) -> dict | Non
 
 
 # --- PlanningSnapshot ------------------------------------------------------------
-# Upsert keyed by snapshot_id; created_at is never overwritten on conflict so a replay
-# of create_planning_snapshot leaves the original creation time in place.
+# Upsert keyed by snapshot_id. A create replay may refresh stable identity fields, but
+# lifecycle state belongs to the dedicated transition/revision helpers and is never
+# rewound by this helper after the snapshot has advanced.
 _PLANNING_SNAPSHOT_UPSERT = """
     INSERT INTO PlanningSnapshot
         (snapshot_id, project_id, mode, status, created_at, approved_at, active_revision_id)
@@ -678,10 +691,7 @@ _PLANNING_SNAPSHOT_UPSERT = """
         (:snapshot_id, :project_id, :mode, :status, :created_at, :approved_at, :active_revision_id)
     ON CONFLICT(snapshot_id) DO UPDATE SET
         project_id = excluded.project_id,
-        mode = excluded.mode,
-        status = excluded.status,
-        approved_at = excluded.approved_at,
-        active_revision_id = excluded.active_revision_id
+        mode = excluded.mode
 """
 
 
@@ -699,9 +709,12 @@ def create_planning_snapshot(
     """Create (or replay-upsert) a PlanningSnapshot, returning the stored row.
 
     Idempotent keyed by ``snapshot_id``: re-running with the same arguments leaves a
-    single row and preserves the original ``created_at``. ``status`` is checked at the
-    store level against the §2.7 vocabulary (an out-of-set value raises
-    ``sqlite3.IntegrityError``); this helper does not duplicate that enum in Python.
+    single row and preserves the original ``created_at``. On conflict, this helper
+    refreshes only stable identity fields (``project_id`` and ``mode``); lifecycle
+    fields (``status``, ``approved_at``, ``active_revision_id``) are preserved so a
+    create replay cannot rewind approval or revision state. ``status`` is checked at
+    the store level against the planning vocabulary; this helper does not duplicate
+    that enum in Python.
     """
     params = {
         "snapshot_id": snapshot_id,
@@ -736,11 +749,12 @@ def transition_snapshot_status(
 
     The status vocabulary is enforced by the table ``CHECK`` (an invalid value raises
     ``sqlite3.IntegrityError``). When ``status == 'approved'`` the ``approved_at``
-    stamp is set (defaulting to now). This helper persists state only — the real
+    stamp is set once (defaulting to now) and preserved on replay. Moving out of
+    ``approved`` clears the approval stamp. This helper persists state only — the real
     approval gate lives in M05/M01; if it is handed ``has_unresolved_conflict=True``
     while asked to set ``approved``, it raises ``ValueError`` rather than persisting an
     approval that a ``needs_clarification`` annotation should still be blocking.
-    Idempotent: re-applying the same transition is a no-op.
+    Idempotent: re-applying the same transition does not restamp approval time.
     """
     if status == "approved" and has_unresolved_conflict:
         raise ValueError(
@@ -755,12 +769,16 @@ def transition_snapshot_status(
             "approved_at": approved_at if approved_at is not None else _now_iso(),
         }
         sql = (
-            "UPDATE PlanningSnapshot SET status = :status, approved_at = :approved_at "
+            "UPDATE PlanningSnapshot SET status = :status, "
+            "approved_at = COALESCE(approved_at, :approved_at) "
             "WHERE snapshot_id = :snapshot_id"
         )
     else:
         params = {"snapshot_id": snapshot_id, "status": status}
-        sql = "UPDATE PlanningSnapshot SET status = :status WHERE snapshot_id = :snapshot_id"
+        sql = (
+            "UPDATE PlanningSnapshot SET status = :status, approved_at = NULL "
+            "WHERE snapshot_id = :snapshot_id"
+        )
 
     def _do(conn: sqlite3.Connection) -> dict | None:
         conn.execute(sql, params)
@@ -948,18 +966,19 @@ def get_planning_nodes(
 
 def get_planning_nodes_by_parent(
     db_path: str | Path,
+    snapshot_id: str,
     parent_id: str | None,
 ) -> list[dict]:
-    """Return PlanningNodes whose parent is ``parent_id``, ordered by ``ordering``.
+    """Return snapshot-scoped PlanningNodes whose parent is ``parent_id``.
 
     ``parent_id=None`` selects root nodes (``parent_id IS NULL``); ``IS ?`` binds NULL
     correctly so the same helper serves both root and child traversal.
     """
     return _read_all(
         db_path,
-        "SELECT * FROM PlanningNode WHERE parent_id IS ? "
+        "SELECT * FROM PlanningNode WHERE snapshot_id = ? AND parent_id IS ? "
         "ORDER BY ordering ASC, node_id ASC",
-        (parent_id,),
+        (snapshot_id, parent_id),
     )
 
 
@@ -1086,8 +1105,8 @@ def get_annotations_for_snapshot(db_path: str | Path, snapshot_id: str) -> list[
 
 # --- PlanningRevision ------------------------------------------------------------
 # A revision is never a silent overwrite (§2.7): insert is ON CONFLICT DO NOTHING and
-# the prior revision row is preserved, while the owning snapshot's active_revision_id is
-# advanced to this revision in the same transaction.
+# the prior revision row is preserved. The owning snapshot's active_revision_id advances
+# only when this call inserted a new revision, so replaying an older revision is a no-op.
 _PLANNING_REVISION_INSERT = """
     INSERT INTO PlanningRevision
         (revision_id, snapshot_id, parent_revision_id, change_summary, diff_json,
@@ -1112,10 +1131,10 @@ def insert_planning_revision(
     """Insert a PlanningRevision and advance the snapshot's ``active_revision_id``.
 
     Both the revision insert and the ``active_revision_id`` advance happen in one
-    transaction, so the snapshot always points at the newest revision while every prior
-    revision row is preserved (a revision never silently overwrites another). Idempotent
-    keyed by ``revision_id``: a replay inserts nothing new and re-asserts the same active
-    pointer. Returns the stored revision row.
+    transaction, so a newly inserted revision becomes active while every prior revision
+    row is preserved (a revision never silently overwrites another). Idempotent keyed by
+    ``revision_id``: a replay inserts nothing new and leaves the active pointer where it
+    already is. Returns the stored revision row.
     """
     params = {
         "revision_id": revision_id,
@@ -1127,12 +1146,13 @@ def insert_planning_revision(
     }
 
     def _do(conn: sqlite3.Connection) -> dict:
-        conn.execute(_PLANNING_REVISION_INSERT, params)
-        conn.execute(
-            "UPDATE PlanningSnapshot SET active_revision_id = :revision_id "
-            "WHERE snapshot_id = :snapshot_id",
-            {"revision_id": revision_id, "snapshot_id": snapshot_id},
-        )
+        cursor = conn.execute(_PLANNING_REVISION_INSERT, params)
+        if cursor.rowcount == 1:
+            conn.execute(
+                "UPDATE PlanningSnapshot SET active_revision_id = :revision_id "
+                "WHERE snapshot_id = :snapshot_id",
+                {"revision_id": revision_id, "snapshot_id": snapshot_id},
+            )
         return _fetch_one(
             conn,
             "SELECT * FROM PlanningRevision WHERE revision_id = :revision_id",
