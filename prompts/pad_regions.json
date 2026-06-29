@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "_doc": "Static behavioural floor for the PAD (Pleasure-Arousal-Dominance) Grounded Translation Pipeline (node_plan_beat). A beat's raw PAD coordinate is reduced to a region by the sign of each axis: P+ pleasant / P- unpleasant, A+ activated/energised / A- calm/deactivated, D+ in-control/dominant / D- submissive/overwhelmed. The eight octant keys are 'P{+|-}A{+|-}D{+|-}' (e.g. 'P+A+D+'); a coordinate whose every axis lies within +/- 'neutral_band' of zero resolves to 'neutral'. Each region gives a writing-useful baseline: a 'behaviour' descriptor (how the character tends to act and speak), a few concrete 'physical_cues', and a 'register' note (tone of voice/prose). These are generic behavioural floors, not prose: node_plan_beat hands the matched string to a small-tier LLM to adapt to scene intent, and falls back to this string verbatim if that adaptation fails. Descriptive baseline data only — thresholds, EWMA weights, and endpoint routing live in config.yaml, not here.",
+  "_neutral_band_doc": "Half-width of the dead zone around the origin on each PAD axis (axes are normalized to [-1, 1]). A coordinate is 'neutral' only when |pleasure|, |arousal|, and |dominance| are all <= this value. Kept here as data, not in region-resolution logic, so it can be tuned without a code change. Provisional and uncalibrated.",
+  "neutral_band": 0.15,
+  "regions": {
+    "P+A+D+": {
+      "behaviour": "Confident and exuberant; takes initiative, drives the moment forward, speaks freely and shapes events to their liking.",
+      "physical_cues": ["open expansive posture", "quick decisive gestures", "bright direct eye contact", "easy laughter"],
+      "register": "warm, assertive, buoyant"
+    },
+    "P+A+D-": {
+      "behaviour": "Eager but deferential; swept up and delighted, looking to others to lead or grant permission, expressing enthusiasm without claiming control.",
+      "physical_cues": ["leaning toward others", "animated but seeking-approval glances", "fidgety excited hands", "quick nodding"],
+      "register": "bright, breathless, eager-to-please"
+    },
+    "P+A-D+": {
+      "behaviour": "Calmly satisfied and in command; relaxed, unhurried, secure enough to let silences sit and to set the pace without effort.",
+      "physical_cues": ["settled grounded stance", "slow deliberate movements", "steady soft gaze", "faint contented smile"],
+      "register": "low, measured, serene"
+    },
+    "P+A-D-": {
+      "behaviour": "Quietly content and yielding; at ease but passive, content to follow, soothed rather than driven, offering little resistance.",
+      "physical_cues": ["loose unguarded posture", "soft half-lidded eyes", "gentle small movements", "unhurried breathing"],
+      "register": "soft, mild, untroubled"
+    },
+    "P-A+D+": {
+      "behaviour": "Angry and forceful; agitated and hostile while still in control, pressing, confronting, or commanding through the displeasure.",
+      "physical_cues": ["jaw clenched", "sharp jabbing gestures", "hard fixed stare", "tense forward lean"],
+      "register": "clipped, hard-edged, commanding"
+    },
+    "P-A+D-": {
+      "behaviour": "Afraid and overwhelmed; agitated and distressed with no sense of control, reacting, flinching, or scrambling rather than steering.",
+      "physical_cues": ["flinching or recoiling", "shallow rapid breathing", "darting eyes", "trembling or guarded hands"],
+      "register": "tight, urgent, unsteady"
+    },
+    "P-A-D+": {
+      "behaviour": "Coldly displeased but composed; withdrawn disapproval held under control, distant and unimpressed, withholding warmth deliberately.",
+      "physical_cues": ["closed arms-crossed posture", "flat unmoving expression", "slow dismissive glances", "deliberate stillness"],
+      "register": "cool, curt, withholding"
+    },
+    "P-A-D-": {
+      "behaviour": "Dejected and defeated; low, heavy, and powerless, disengaged from events, speaking little and expecting nothing to change.",
+      "physical_cues": ["slumped shoulders", "downcast gaze", "sluggish reluctant movement", "long silences"],
+      "register": "flat, quiet, weary"
+    },
+    "neutral": {
+      "behaviour": "Even and unremarkable; engaged but not pulled in any affective direction, responsive and matter-of-fact without strong colouring.",
+      "physical_cues": ["relaxed neutral posture", "ordinary unforced gestures", "level attentive gaze", "even breathing"],
+      "register": "plain, balanced, conversational"
+    }
+  }
+}
