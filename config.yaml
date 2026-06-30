@@ -54,11 +54,16 @@ planning:
   execution_mode: "macro_outline_before_draft"  # macro_outline_before_draft | rolling   (DEFAULT shown)
   approval_mode: "off"                           # off | macro_outline
   # Hard caps on the bounded planner loop, per cascade level — proposed defaults to be calibrated.
-  planner_max_deliberation_loops:  {global: 4, arc: 3, chapter: 3, scene: 2, beat: 2}  # proposed defaults to be calibrated
+  planner_max_deliberation_loops:  {global: 6, arc: 3, chapter: 3, scene: 2, beat: 2}  # proposed defaults to be calibrated; global raised to give the planner room to think (continue_deliberation)
   planner_max_tool_calls_per_loop: {global: 8, arc: 6, chapter: 5, scene: 4, beat: 3}  # proposed defaults to be calibrated
   # Validators each planner level must pass before its finalize is accepted.
+  # Deterministic-fallback (baseline) scaffold — only used when the planner loop yields no
+  # validated plan. Proposed defaults to be calibrated.
+  baseline_act_count: 3
+  baseline_word_weights: [0.25, 0.5, 0.25]   # per-act pacing weights; length should match baseline_act_count, else equal split
+  creative_second_pass_enabled: false        # craft-consultant revision pass (re-validated) before persist; off until calibrated
   planner_required_checks:
-    global:  ["schema", "arc_coverage", "major_promise_payoff"]
+    global:  ["schema", "arc_coverage", "major_promise_payoff", "arc_diversity", "promise_payoff_distinct"]
     arc:     ["schema", "escalation", "thread_distribution"]
     chapter: ["schema", "chapter_function", "pacing", "annotation_satisfaction"]
     scene:   ["schema", "continuity", "scene_function", "entry_exit_state"]

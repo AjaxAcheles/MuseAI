@@ -4,7 +4,7 @@ turn of its bounded, harness-owned deliberation loop.
 
 The deliberation loop is harness-owned: the model emits exactly one structured action
 per turn; the harness validates it, executes any permitted tool, and decides whether a
-`finalize_plan` is accepted. The model proposes; the harness disposes. The four
+`finalize_plan` is accepted. The model proposes; the harness disposes. The five
 `action_type` values are exhaustive — `extra='forbid'` plus the `Literal` reject any
 unknown action type or unexpected field, so a malformed action fails validation rather
 than being silently coerced.
@@ -35,7 +35,9 @@ class PlannerAction(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    action_type: Literal["call_tool", "revise_plan", "finalize_plan", "raise_conflict"]
+    action_type: Literal[
+        "call_tool", "revise_plan", "finalize_plan", "raise_conflict", "continue_deliberation"
+    ]
     # call_tool:
     tool_name: str | None = None
     tool_args: Dict | None = None
@@ -47,6 +49,9 @@ class PlannerAction(BaseModel):
     self_check: Dict | None = None  # {schema_valid, continuity_checked, depth_checked, user_annotations_addressed}
     # raise_conflict:
     conflicts: List[Dict] | None = None  # [{conflict_type, description, requires_user_resolution}]
+    # continue_deliberation: a "think" turn — the planner records reasoning (in `rationale`)
+    # and asks for another turn without finalizing. The harness threads the note forward and
+    # does not count it as a wasted turn or charge the tool budget.
     rationale: str | None = None
 
 

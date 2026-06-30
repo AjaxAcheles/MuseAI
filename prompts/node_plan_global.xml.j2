@@ -45,18 +45,21 @@
       - premise / logline: a one- to two-sentence statement of the story.
       - central_conflict: the single driving conflict the whole book turns on.
       - ending_target: the intended end-state / resolution the book builds toward.
-      - major_promises: the major promises the opening makes to the reader, each
-        paired with its intended payoff (where/how it is honored).
+      - promises: the major promises the opening makes to the reader, each carrying
+        a unique "id", the "promise" itself, and its "payoff" (where/how it is honored).
       - arcs: the ordered set of arcs that cover the whole story from premise to
-        ending_target, each with a clear narrative function and a rough word
-        allocation. Size the arcs with a "density" judgement — allot more words to
-        arcs carrying more subplot and character complexity — so the arc word
-        allocations sum toward the target_word_count. These are estimates, not
-        prose.
+        ending_target, each carrying a unique "arc_id", a clear narrative "function",
+        and a rough "word_allocation". Size the arcs with a "density" judgement —
+        allot more words to arcs carrying more subplot and character complexity — so
+        the arc word allocations sum toward the target_word_count. These are
+        estimates, not prose.
     The harness will check this plan for: premise consistency, a clear central
-    conflict, a defined ending target, complete arc coverage from start to ending,
-    and that every major promise has an intended payoff. Make those elements
-    explicit and self-consistent.
+    conflict, a defined ending target, complete arc coverage from start to ending
+    (every arc has an arc_id), and that every promise has a payoff. It will also
+    reject a templated outline: every arc must have a DISTINCT narrative "function"
+    (no two arcs doing the same job), and each promise's "payoff" must say something
+    genuinely different from the promise itself (no circular "answered when it is
+    answered" pairings). Make those elements explicit and self-consistent.
   </planning_objective>
 
   <context>
@@ -143,26 +146,31 @@
       - "raise_conflict": only when two HARD requirements genuinely cannot both be
         satisfied. List the conflicts (each with conflict_type, description,
         requires_user_resolution); this pauses for user clarification.
+      - "continue_deliberation": a "think" turn — when you are not ready to revise or
+        finalize but want to reason first, put your reasoning in "rationale" and take
+        another turn. It does not cost a tool call and is not penalized; your note is
+        carried into the next turn. Prefer this over a premature finalize.
 
     {% raw %}
     Shape (emit only the keys for your chosen action_type):
     {
-      "action_type": "call_tool" | "revise_plan" | "finalize_plan" | "raise_conflict",
+      "action_type": "call_tool" | "revise_plan" | "finalize_plan" | "raise_conflict" | "continue_deliberation",
       "tool_name": "<tool>",            "tool_args": { },                 // call_tool
       "revised_plan": { },              "change_summary": "<text>",       // revise_plan
       "final_plan": { },                "self_check": { },                // finalize_plan
       "conflicts": [ { "conflict_type": "<type>", "description": "<text>", "requires_user_resolution": true } ], // raise_conflict
-      "rationale": "<optional short reason>"
+      "rationale": "<text>"             // continue_deliberation (your reasoning) / optional elsewhere
     }
 
-    For revise_plan/finalize_plan, the plan object should carry:
+    For revise_plan/finalize_plan, the plan object should carry (use these exact keys):
     {
       "premise": "<logline>",
       "central_conflict": "<text>",
       "ending_target": "<text>",
-      "major_promises": [ { "promise": "<text>", "intended_payoff": "<text>" } ],
-      "arcs": [ { "title": "<text>", "function": "<role in the story>", "word_allocation": <int> } ]
+      "promises": [ { "id": "<promise_id>", "promise": "<text>", "payoff": "<where/how it is honored>" } ],
+      "arcs": [ { "arc_id": "<arc_id>", "title": "<text>", "function": "<role in the story>", "word_allocation": <int> } ]
     }
+    Every arc MUST have a unique "arc_id" and every promise MUST have a non-empty "payoff".
     {% endraw %}
   </output_contract>
 

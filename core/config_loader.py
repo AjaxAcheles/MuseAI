@@ -133,6 +133,33 @@ class PlanningConfig(BaseModel):
     planner_max_deliberation_loops: dict[str, int]
     planner_max_tool_calls_per_loop: dict[str, int]
     planner_required_checks: dict[str, list[str]]
+    # Deterministic-fallback (baseline) scaffold shape. Proposed defaults; the baseline
+    # only runs when the planner loop yields no validated plan.
+    baseline_act_count: int = 3
+    baseline_word_weights: list[float] | None = None
+    # When true, a validated plan gets a craft-consultant revision pass before persist; the
+    # revision is re-validated and only kept if it still passes. Off until calibrated.
+    creative_second_pass_enabled: bool = False
+
+    @field_validator("baseline_act_count")
+    @classmethod
+    def require_positive_act_count(cls, value: int) -> int:
+        """The fallback baseline must produce at least one arc."""
+        if value < 1:
+            raise ValueError("planning baseline_act_count must be >= 1")
+        return value
+
+    @field_validator("baseline_word_weights")
+    @classmethod
+    def require_non_negative_weights(cls, value: list[float] | None) -> list[float] | None:
+        """Pacing weights, when given, must be non-negative and not all zero."""
+        if value is None:
+            return value
+        if any(w < 0 for w in value):
+            raise ValueError("planning baseline_word_weights must be non-negative")
+        if sum(value) <= 0:
+            raise ValueError("planning baseline_word_weights must not sum to zero")
+        return value
 
     @field_validator("execution_mode")
     @classmethod

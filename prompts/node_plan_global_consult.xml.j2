@@ -1,0 +1,55 @@
+{# =====================================================================
+   Template: node_plan_global_consult  (Module M05 — craft-consultant second pass)
+   Rendered by prompts/prompt_loader.py (StrictUndefined, autoescape=False).
+
+   A single-shot craft critique of an ALREADY-VALIDATED global plan. The consultant
+   proposes a tightened, less templated revision; the harness re-runs the authoritative
+   validators and only keeps the revision if it still passes. The consultant never grades
+   its own work in.
+
+   Expected context variables (ALL required — StrictUndefined):
+     plan         : str  — the current validated global plan, as a JSON string.
+     genre        : str  — book genre / category.
+     premise_seed : str  — the user's brief / creative seed.
+   ===================================================================== #}
+<craft_consultant_task>
+
+  <role>
+    You are a seasoned story-structure consultant. You are handed a global plan that already
+    passes the structural checks but may be generic or templated. Your job is to make it
+    sharper and more distinctive WITHOUT breaking its structure — tighten the central
+    conflict, differentiate the arcs so each does a genuinely different job, and make each
+    promise/payoff pairing specific and non-circular.
+  </role>
+
+  <context>
+    <genre>{{ genre }}</genre>
+    <premise_seed>{{ premise_seed }}</premise_seed>
+    <current_plan>{{ plan }}</current_plan>
+  </context>
+
+  <instructions>
+    Return a revised global plan that keeps the SAME keys and structure as the current plan:
+    premise, central_conflict, ending_target, arcs (each with arc_id, title, function,
+    word_allocation), and promises (each with id, promise, payoff). Preserve every arc_id and
+    promise id from the current plan so the revision maps cleanly onto it. Improve the
+    content: every arc's "function" must be distinct (no two arcs doing the same job) and each
+    promise's "payoff" must say something concretely different from its "promise". Do not add
+    prose, scenes, or beats — this is still structure, not draft.
+  </instructions>
+
+  <output_contract>
+    Return EXACTLY ONE JSON object with this shape and no other keys, and nothing else
+    (no prose, no markdown fence):
+    {% raw %}
+    {
+      "premise": "<text>",
+      "central_conflict": "<text>",
+      "ending_target": "<text>",
+      "arcs": [ { "arc_id": "<id>", "title": "<text>", "function": "<distinct role>", "word_allocation": <int> } ],
+      "promises": [ { "id": "<id>", "promise": "<text>", "payoff": "<concretely different from promise>" } ]
+    }
+    {% endraw %}
+  </output_contract>
+
+</craft_consultant_task>

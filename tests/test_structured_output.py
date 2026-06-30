@@ -246,6 +246,25 @@ def test_structured_json_mode_strategy_sets_response_format() -> None:
     assert sent["response_format"] == {"type": "json_object"}
 
 
+def test_structured_json_schema_strategy_sets_response_format() -> None:
+    call = _RecordingCall(texts=[json.dumps(_valid_payload())])
+    asyncio.run(
+        call_llm_structured(
+            [{"role": "user", "content": "go"}],
+            _FakeEndpoint(grammar_constraint_strategy="json_schema"),
+            schema_model=_SyntheticRecord,
+            validate_retry_cap=1,
+            call=call,
+        )
+    )
+    sent = call.calls[0]
+    rf = sent["response_format"]
+    assert rf["type"] == "json_schema"
+    assert rf["json_schema"]["name"] == _SyntheticRecord.__name__
+    assert rf["json_schema"]["strict"] is True
+    assert isinstance(rf["json_schema"]["schema"], dict) and rf["json_schema"]["schema"]
+
+
 def test_structured_unknown_strategy_raises_config_error() -> None:
     call = _RecordingCall(texts=[json.dumps(_valid_payload())])
     with pytest.raises(UnsupportedGrammarStrategyError):

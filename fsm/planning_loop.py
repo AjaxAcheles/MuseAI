@@ -6,10 +6,11 @@ deliberation has an unmeasured cost/quality tradeoff").
 Every planner level (global → arc → chapter → scene → beat) runs this one controller.
 The model proposes; the harness disposes: each turn the loop asks an injected
 `planner_decider` for exactly one `PlannerAction`, then *the harness* decides what
-happens. It dispatches the four action types — `call_tool`, `revise_plan`,
-`finalize_plan`, `raise_conflict` — gates acceptance of a `finalize_plan` solely on the
-deterministic validators (`run_validators`, ignoring the planner's advisory
-`self_check`), and enforces the per-level caps from config.
+happens. It dispatches the five action types — `call_tool`, `revise_plan`,
+`finalize_plan`, `raise_conflict`, `continue_deliberation` (a non-finalizing "think" turn
+that is not charged as wasted or against the tool budget) — gates acceptance of a
+`finalize_plan` solely on the deterministic validators (`run_validators`, ignoring the
+planner's advisory `self_check`), and enforces the per-level caps from config.
 
 The loop is **pure**: it returns a `LoopOutcome` and performs no persistence, no
 revision writes, and no escalation side effects. Mapping an outcome to snapshot/revision
@@ -45,9 +46,10 @@ tool call with no per-iteration reset): the deliberation loop is bounded by
 mirrors the accumulating `planner_tool_call_count` FSM state field.
 """
 
+import inspect
 import json
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any, Awaitable, Callable, Union
 
 from fsm.planning_actions import PlannerAction
 from fsm.planning_validators import ValidationResult, run_validators
@@ -121,10 +123,11 @@ class LoopOutcome:
     wasted_turns: int = 0
 
 
-# Injected seams. The decider returns one PlannerAction given the running state; the
-# deterministic baseline produces a fallback plan (or None) for a level. Real nodes back
-# these with M04 / a static template; tests inject synthetic callables.
-PlannerDecider = Callable[[DeliberationState], PlannerAction]
+# Injected seams. The decider returns one PlannerAction given the running state — either
+# synchronously (synthetic test deciders) or as an awaitable (the real M04-backed decider,
+# which awaits the inference boundary); the loop awaits the result only if it is awaitable.
+# The deterministic baseline produces a fallback plan (or None) for a level.
+PlannerDecider = Callable[[DeliberationState], Union[PlannerAction, Awaitable[PlannerAction]]]
 DeterministicBaseline = Callable[[str, Any, dict], dict | None]
 
 
@@ -138,7 +141,7 @@ def _dedup_key(tool_name: str | None, args: dict) -> tuple[str | None, str]:
     return (tool_name, encoded)
 
 
-def run_planner_loop(
+async def run_planner_loop(
     *,
     level: str,
     snapshot_id: Any,
@@ -214,7 +217,8 @@ def run_planner_loop(
         # Decider error: a flaky/non-conforming decider is a consumed, non-progressing
         # turn — count it and carry on so a single bad turn cannot crash the loop.
         try:
-            action = planner_decider(state)
+            result = planner_decider(state)
+            action = await result if inspect.isawaitable(result) else result
         except Exception as exc:  # noqa: BLE001 - degrade safely on any decider fault
             wasted_turns += 1
             records.append(
@@ -390,7 +394,30 @@ def run_planner_loop(
                 wasted_turns=wasted_turns,
             )
 
-        # PlannerAction.action_type is a four-value Literal, so this is unreachable for a
+        if action.action_type == "continue_deliberation":
+            # A "think" turn: the planner records reasoning and asks for another turn
+            # without finalizing. It is NOT wasted and does NOT consume the per-loop tool
+            # budget; the note is threaded into the accumulated window so the next render
+            # carries the thinking forward. It still consumes one loop iteration (the
+            # for-range bound), which is the intended room-to-breathe.
+            note = action.rationale or ""
+            tool_results.append(
+                {
+                    "type": "deliberation_note",
+                    "loop_index": planner_loop_index,
+                    "note": note,
+                }
+            )
+            records.append(
+                {
+                    "loop_index": planner_loop_index,
+                    "action_type": "continue_deliberation",
+                    "note": note,
+                }
+            )
+            continue
+
+        # PlannerAction.action_type is a five-value Literal, so this is unreachable for a
         # conforming decider; treat a non-conforming action as a wasted turn (degrade
         # safely) rather than crashing the loop.
         wasted_turns += 1

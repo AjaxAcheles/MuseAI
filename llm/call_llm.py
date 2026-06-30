@@ -520,6 +520,19 @@ def _build_structured_options(
         return None, merged
     if strategy == "json_mode":
         return {"type": "json_object"}, (merged or None)
+    if strategy == "json_schema":
+        # OpenAI-style structured outputs: the endpoint is handed the model's JSON Schema
+        # directly. Pydantic still validates the response, so this is a constraint hint —
+        # an endpoint that ignores it is still guarded by validate -> salvage -> retry.
+        response_format = {
+            "type": "json_schema",
+            "json_schema": {
+                "name": schema_model.__name__,
+                "schema": schema_model.model_json_schema(),
+                "strict": True,
+            },
+        }
+        return response_format, (merged or None)
     raise UnsupportedGrammarStrategyError(
         f"unsupported grammar_constraint_strategy: {strategy!r}"
     )

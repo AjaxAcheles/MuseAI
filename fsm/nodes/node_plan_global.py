@@ -24,18 +24,26 @@ and wires no graph route / approval edge (that is Build 14).
 
 from __future__ import annotations
 
-import asyncio
+import dataclasses
+import inspect
 import json
-import threading
 from pathlib import Path
 from typing import Any
 
 import core.runtime as runtime
 from fsm.planning_annotations import compile_planning_constraints
 from fsm.planning_loop import run_planner_loop
-from fsm.planning_node_support import make_planner_decider, persist_loop_outcome
+from fsm.planning_node_support import (
+    make_planner_decider,
+    persist_loop_outcome,
+    run_creative_consult,
+)
 from fsm.planning_tools import PlanningToolRegistry
+from fsm.planning_validators import run_validators
 from memory import sqlite_db
+
+# Outcomes that carry a validator-passed plan eligible for the optional craft-consultant pass.
+_REVISABLE_OUTCOMES = frozenset({"finalized", "fallback_baseline"})
 
 CONFIG_PATH = Path(__file__).resolve().parents[2] / "config.yaml"
 _LEVEL = "global"
@@ -56,75 +64,82 @@ def _resolve_config(state: dict[str, Any]) -> Any:
     return load_config(state.get("config_path", CONFIG_PATH))
 
 
-def _sync_decider_from_async(async_decider: Any) -> Any:
-    """Adapt an async decider to the synchronous seam ``run_planner_loop`` expects.
-
-    Temporary shim (07.07 carryover): ``run_planner_loop`` calls ``planner_decider(state)``
-    synchronously, but ``make_planner_decider`` returns an async decider (it awaits the M04
-    inference boundary). Until the loop is made async, bridge by running the coroutine to
-    completion on a dedicated worker thread + event loop — safe even though this node runs
-    inside an event loop, because the work is offloaded off the running loop's thread. Any
-    exception (e.g. ``PlannerDeciderError``) propagates to the loop, which treats it as a
-    non-finalizing wasted turn.
-    """
-
-    def _call(loop_state: Any) -> Any:
-        box: dict[str, Any] = {}
-
-        def _runner() -> None:
-            worker_loop = asyncio.new_event_loop()
-            try:
-                box["value"] = worker_loop.run_until_complete(async_decider(loop_state))
-            except BaseException as exc:  # noqa: BLE001 - re-raised on the caller's thread
-                box["error"] = exc
-            finally:
-                worker_loop.close()
-
-        thread = threading.Thread(target=_runner, daemon=True)
-        thread.start()
-        thread.join()
-        if "error" in box:
-            raise box["error"]
-        return box["value"]
-
-    return _call
+# Distinct rising-action functions the baseline draws on (kept distinct so the scaffold
+# also satisfies the arc_diversity quality-proxy validator). The final act is always a
+# resolution; middles are taken from this list and synthesized beyond it.
+_BASELINE_RISING_ACTS = (
+    ("Setup", "establish the premise, characters, and stakes"),
+    ("Inciting complication", "disrupt the status quo and commit the protagonist"),
+    ("Rising action", "complicate the situation and deepen the conflict"),
+    ("Midpoint turn", "reframe the stakes at the story's pivot"),
+    ("Escalation", "escalate the central conflict toward its crisis"),
+    ("Crisis", "force the decisive confrontation"),
+)
+_BASELINE_RESOLUTION_ACT = ("Resolution", "resolve the central conflict and pay off the promises")
 
 
-def _build_global_baseline(base_context: dict[str, Any]) -> Any:
-    """Build the loop's deterministic baseline: a minimal, single-pass valid global plan.
+def _baseline_act_specs(act_count: int) -> list[tuple[str, str]]:
+    """Return ``act_count`` distinct (title, function) pairs; the last is the resolution."""
+    if act_count <= 1:
+        return [_BASELINE_RESOLUTION_ACT]
+    middles = list(_BASELINE_RISING_ACTS[: act_count - 1])
+    while len(middles) < act_count - 1:
+        i = len(middles)
+        middles.append((f"Development {i}", f"develop subplot strand {i} and sustain momentum"))
+    return middles + [_BASELINE_RESOLUTION_ACT]
 
-    The fallback floor when the model never produces a validating plan. Its shape matches
-    the authoritative global validators (``schema``/``arc_coverage``/``major_promise_payoff``
-    in ``fsm/planning_validators.py``): a non-empty ``arcs`` list whose entries carry an
-    ``arc_id``, and a non-empty ``promises`` list whose entries carry a ``payoff``. A plain
-    deterministic three-act scaffold — not a tunable threshold.
+
+def _baseline_word_allocations(total_words: int, weights: list[float] | None, n: int) -> list[int]:
+    """Distribute ``total_words`` across ``n`` acts by ``weights`` (equal split if absent/mismatched)."""
+    if not total_words or n <= 0:
+        return [0] * max(n, 0)
+    if not weights or len(weights) != n or sum(weights) <= 0:
+        weights = [1.0] * n
+    norm = sum(weights)
+    return [int(round(total_words * (w / norm))) for w in weights]
+
+
+def _build_global_baseline(base_context: dict[str, Any], config: Any) -> Any:
+    """Build the loop's deterministic baseline: a config-shaped, single-pass valid global plan.
+
+    The fallback floor when the model never produces a validating plan. Its shape matches the
+    authoritative global validators (``schema``/``arc_coverage``/``major_promise_payoff``): a
+    non-empty ``arcs`` list whose entries carry a unique ``arc_id``, and a non-empty
+    ``promises`` list whose entries carry a non-empty, non-tautological ``payoff``. Act count
+    and per-act pacing weights are read from config (``planning.baseline_act_count`` /
+    ``planning.baseline_word_weights``) — no hardcoded scaffold size — and the act functions
+    are kept distinct so the scaffold also passes the quality-proxy validators.
     """
     premise = base_context.get("premise_seed") or "Untitled story"
     try:
         total_words = int(base_context.get("target_word_count") or 0)
     except (TypeError, ValueError):
         total_words = 0
-    acts = (
-        ("arc_1", "Setup", "establish the premise, characters, and stakes"),
-        ("arc_2", "Confrontation", "escalate the central conflict toward its crisis"),
-        ("arc_3", "Resolution", "resolve the central conflict and honor the promises"),
-    )
-    per_arc = total_words // len(acts) if total_words else 0
+    planning = getattr(config, "planning", None)
+    act_count = max(1, int(getattr(planning, "baseline_act_count", 3) or 3))
+    weights = getattr(planning, "baseline_word_weights", None)
+    specs = _baseline_act_specs(act_count)
+    allocations = _baseline_word_allocations(total_words, weights, len(specs))
 
     def _baseline(level: str, target_node: Any, constraints: dict) -> dict:
         return {
             "premise": premise,
-            "central_conflict": f"The unresolved tension at the heart of: {premise}",
+            "central_conflict": f"The escalating struggle set in motion by: {premise}",
             "ending_target": "Resolve the central conflict and pay off the story's promises.",
             "arcs": [
-                {"arc_id": aid, "title": title, "function": function, "word_allocation": per_arc}
-                for aid, title, function in acts
+                {
+                    "arc_id": f"arc_{i + 1}",
+                    "title": title,
+                    "function": function,
+                    "word_allocation": allocations[i],
+                }
+                for i, (title, function) in enumerate(specs)
             ],
             "promises": [
                 {
                     "id": "promise_1",
-                    "promise": "The dramatic question the premise raises will be answered.",
-                    "payoff": "Answered as the resolution arc closes.",
+                    "promise": f"The reader is promised an answer to the question the premise raises: {premise}",
+                    "payoff": "Delivered in the final act as the central conflict resolves toward the ending target.",
                 }
             ],
         }
@@ -163,13 +178,15 @@ async def node_plan_global(
     *,
     decider: Any = None,
     registry: Any = None,
+    consult: Any = None,
 ) -> dict[str, Any]:
     """Plan the global story structure and persist the validated global plan.
 
     Returns the (mutated) orchestrator state. ``decider`` and ``registry`` are injectable
-    seams (the synthetic decider keeps the node testable with no model/network); when
-    ``decider`` is None the production M04-backed decider is built and bridged to the loop's
-    synchronous seam.
+    seams (a synthetic decider keeps the node testable with no model/network); when
+    ``decider`` is None the production M04-backed decider is built via
+    ``make_planner_decider`` and awaited by the loop (the loop awaits any awaitable the
+    decider returns, so sync test deciders work too).
     """
     config = _resolve_config(state)
     db_path = state.get("sqlite_db_path", runtime.SQLITE_DB_PATH)
@@ -195,6 +212,11 @@ async def node_plan_global(
     )
 
     # 2. compile constraints — bail to clarification on a hard-vs-hard contradiction.
+    # Design decision (Data_Structures §2.7): two contradictory HARD annotations
+    # (`requires_user_resolution`) are NOT auto-reconciled — the snapshot cannot reach
+    # `approved` while one is unresolved, so guessing a middle path would be unsafe. We
+    # surface the conflict (block reason + the structured `hard_conflicts` in the trace) for
+    # the user / Build-14 recovery to resolve, and run no planning on contradictory input.
     constraints = compile_planning_constraints(snapshot_id, global_target, db_path=db_path)
     if constraints.get("needs_clarification"):
         state["planning_block_reason"] = constraints.get(
@@ -219,6 +241,9 @@ async def node_plan_global(
         ),
         "premise_seed": project_metadata.get("premise_seed", ""),
         "world_rules": list(state.get("world_rules") or []),
+        # existing_arcs supports the continuation pass (append new arcs after exhaustion).
+        # A true "revise the existing arcs" mode (re-planning bad arcs in place) is a deferred
+        # follow-up, scoped as its own increment.
         "existing_arcs": list(state.get("existing_arcs") or []),
     }
     continuity: dict[str, Any] = {}
@@ -226,12 +251,10 @@ async def node_plan_global(
     # 4. registry + decider (model contact only through the injected/bridged decider seam).
     registry = registry or PlanningToolRegistry(db_path)
     if decider is None:
-        decider = _sync_decider_from_async(
-            make_planner_decider(_NODE_NAME, base_context, config)
-        )
+        decider = make_planner_decider(_NODE_NAME, base_context, config)
 
     # 5. run the bounded deliberation loop with a deterministic baseline floor.
-    outcome = run_planner_loop(
+    outcome = await run_planner_loop(
         level=_LEVEL,
         snapshot_id=snapshot_id,
         target_node=global_target,
@@ -240,10 +263,45 @@ async def node_plan_global(
         registry=registry,
         config=config,
         planner_decider=decider,
-        deterministic_baseline=_build_global_baseline(base_context),
+        deterministic_baseline=_build_global_baseline(base_context, config),
     )
     if outcome.records:
         trace.extend(outcome.records)
+
+    # 5b. optional craft-consultant creative second pass: tighten a validated plan, then
+    # RE-VALIDATE and only adopt the revision if it still passes (never persist unvalidated).
+    if (
+        getattr(config.planning, "creative_second_pass_enabled", False)
+        and outcome.outcome in _REVISABLE_OUTCOMES
+        and outcome.plan is not None
+    ):
+        consult_fn = consult
+        if consult_fn is None:
+            consult_fn = lambda p: run_creative_consult(p, base_context, config)  # noqa: E731
+        try:
+            consult_result = consult_fn(outcome.plan)
+            revised = (
+                await consult_result if inspect.isawaitable(consult_result) else consult_result
+            )
+            revised_validation = run_validators(_LEVEL, revised, constraints, continuity, config)
+            if revised_validation.passes:
+                outcome = dataclasses.replace(
+                    outcome, plan=revised, validation=revised_validation
+                )
+                trace.append({"level": _LEVEL, "phase": "creative_consult", "adopted": True})
+            else:
+                trace.append(
+                    {
+                        "level": _LEVEL,
+                        "phase": "creative_consult",
+                        "adopted": False,
+                        "failed_checks": list(revised_validation.failed_checks),
+                    }
+                )
+        except Exception as exc:  # noqa: BLE001 - best-effort; keep the original validated plan
+            trace.append(
+                {"level": _LEVEL, "phase": "creative_consult", "adopted": False, "error": repr(exc)}
+            )
 
     # 6. map the outcome to persistence + state (never persists an invalid plan).
     prior_nodes = sqlite_db.get_planning_nodes(db_path, snapshot_id)
@@ -263,6 +321,8 @@ async def node_plan_global(
     if result.outcome == "needs_clarification":
         state["planning_block_reason"] = result.planning_block_reason
     elif result.outcome == "escalate":
-        # Loop exhausted caps + fallback ladder with no valid plan: signal recovery.
+        # Loop exhausted caps + fallback ladder with no valid plan: signal recovery. Expected
+        # to be rare — the deterministic baseline is the validated floor, so escalate fires
+        # mainly on a store failure or a baseline that cannot validate, not in normal runs.
         state["planning_block_reason"] = _ESCALATION_BLOCK_REASON
     return state

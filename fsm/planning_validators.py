@@ -574,6 +574,70 @@ def _check_major_promise_payoff(plan: Any, level: str, constraints: dict, contin
     return _pass("major_promise_payoff", promises=len(promises))
 
 
+def _norm_text(value: Any) -> str:
+    """Lowercase + collapse whitespace for deterministic structural comparison."""
+    return " ".join(str(value).lower().split())
+
+
+def _check_arc_diversity(plan: Any, level: str, constraints: dict, continuity: dict) -> ValidationResult:
+    """Global (quality proxy): every arc has a non-empty, distinct narrative `function`.
+
+    Deterministic structural taste only — rejects a plan whose arcs repeat the same
+    function (a templated/undifferentiated outline). A near-duplicate / embedding-similarity
+    version is deferred (needs the not-yet-built embedding store and an impure validator).
+    """
+    guard = _not_dict(plan, "arc_diversity")
+    if guard:
+        return guard
+    arcs = plan.get("arcs")
+    if not isinstance(arcs, list) or len(arcs) == 0:
+        return _fail("arc_diversity", reason="no_arcs_declared")
+    seen: dict[str, int] = {}
+    missing: list[int] = []
+    duplicates: list[str] = []
+    for i, arc in enumerate(arcs):
+        function = arc.get("function") if isinstance(arc, dict) else None
+        if _is_empty(function):
+            missing.append(i)
+            continue
+        key = _norm_text(function)
+        if key in seen:
+            duplicates.append(key)
+        seen[key] = i
+    if missing:
+        return _fail("arc_diversity", reason="arcs_missing_function", indices=missing)
+    if duplicates:
+        return _fail("arc_diversity", reason="duplicate_arc_functions", functions=sorted(set(duplicates)))
+    return _pass("arc_diversity", distinct_functions=len(seen))
+
+
+def _check_promise_payoff_distinct(plan: Any, level: str, constraints: dict, continuity: dict) -> ValidationResult:
+    """Global (quality proxy): each promise's `payoff` is not a restatement of the promise.
+
+    Deterministic non-tautology check by normalized-string comparison — rejects circular
+    "the question is answered when it is answered" pairings. Presence of a payoff is already
+    enforced by `major_promise_payoff`; this adds the distinctness requirement.
+    """
+    guard = _not_dict(plan, "promise_payoff_distinct")
+    if guard:
+        return guard
+    promises = plan.get("promises")
+    if not isinstance(promises, list) or len(promises) == 0:
+        return _fail("promise_payoff_distinct", reason="no_promises_declared")
+    tautological: list[str | None] = []
+    for promise in promises:
+        if not isinstance(promise, dict):
+            tautological.append(None)
+            continue
+        pid = promise.get("id", promise.get("promise_id"))
+        payoff = promise.get("payoff")
+        if _is_empty(payoff) or _norm_text(payoff) == _norm_text(promise.get("promise")):
+            tautological.append(pid)
+    if tautological:
+        return _fail("promise_payoff_distinct", tautological_promises=tautological)
+    return _pass("promise_payoff_distinct", promises=len(promises))
+
+
 def _check_escalation(plan: Any, level: str, constraints: dict, continuity: dict) -> ValidationResult:
     """Arc: declares ordered milestones; any integer tension values do not de-escalate."""
 
@@ -717,6 +781,9 @@ REQUIRED_CHECK_REGISTRY: dict[str, CheckFn] = {
     # level-specific structural checks
     "arc_coverage": _check_arc_coverage,
     "major_promise_payoff": _check_major_promise_payoff,
+    # quality-proxy checks (deterministic taste)
+    "arc_diversity": _check_arc_diversity,
+    "promise_payoff_distinct": _check_promise_payoff_distinct,
     "escalation": _check_escalation,
     "thread_distribution": _check_thread_distribution,
     "chapter_function": _check_chapter_function,

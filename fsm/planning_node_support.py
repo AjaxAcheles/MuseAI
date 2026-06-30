@@ -44,6 +44,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Mapping
 
+from pydantic import BaseModel, ConfigDict
+
 from fsm.planning_actions import PlannerAction
 from fsm.planning_annotations import compute_revision_diff
 from fsm.planning_loop import LoopOutcome
@@ -362,3 +364,86 @@ def persist_loop_outcome(
         )
 
     raise ValueError(f"unknown LoopOutcome.outcome: {outcome.outcome!r}")
+
+
+# ---------------------------------------------------------------------------
+# Craft-consultant creative second pass (optional, config-gated, re-validated)
+# ---------------------------------------------------------------------------
+
+class _ConsultArc(BaseModel):
+    """One arc of a consultant-revised global plan (validator-shaped keys)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    arc_id: str
+    function: str
+    title: str | None = None
+    word_allocation: int | None = None
+
+
+class _ConsultPromise(BaseModel):
+    """One promise/payoff pair of a consultant-revised global plan."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    promise: str
+    payoff: str
+
+
+class GlobalPlanRevision(BaseModel):
+    """A craft-consultant's revised global plan — the same validator-facing shape.
+
+    Strict (`extra='forbid'`) so the consultant cannot smuggle unknown keys; the node still
+    re-runs the authoritative validators before any persist, so this is a structured hint,
+    not an acceptance gate.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    premise: str
+    central_conflict: str
+    ending_target: str
+    arcs: list[_ConsultArc]
+    promises: list[_ConsultPromise]
+
+
+async def run_creative_consult(
+    plan: Mapping[str, Any],
+    base_context: Mapping[str, Any],
+    config: Any,
+    *,
+    endpoint_role: str = "craft_consultant",
+    template_node: str = "node_plan_global_consult",
+    loader: PromptLoader | None = None,
+    call_structured: Callable[..., Awaitable[Any]] | None = None,
+    schema_model: type[BaseModel] = GlobalPlanRevision,
+) -> dict[str, Any]:
+    """Ask the craft-consultant endpoint to critique and tighten a *validated* global plan.
+
+    Renders the consult template with the current plan + base context, calls
+    ``call_llm_structured`` on the role-resolved consultant endpoint constrained to
+    ``GlobalPlanRevision``, and returns the revised plan as a plain dict. This is a structured
+    hint only: the caller (the node) re-runs the authoritative validators and persists the
+    revision **only if it still passes** — the consultant can never grade itself in. Best-effort:
+    the node treats any raised error as "keep the original validated plan". ``loader`` /
+    ``call_structured`` / ``schema_model`` are injectable test seams.
+    """
+    endpoint = getattr(config.endpoints, endpoint_role)
+    validate_retry_cap = config.runtime.model_validate_retry_cap
+    prompt_loader = loader if loader is not None else PromptLoader()
+    structured = call_structured if call_structured is not None else call_llm_structured
+
+    render_context = {
+        "plan": json.dumps(dict(plan), sort_keys=True),
+        "genre": base_context.get("genre", ""),
+        "premise_seed": base_context.get("premise_seed", ""),
+    }
+    rendered = prompt_loader.render(template_node, render_context)
+    revised = await structured(
+        [{"role": "user", "content": rendered}],
+        endpoint,
+        schema_model=schema_model,
+        validate_retry_cap=validate_retry_cap,
+    )
+    return revised.model_dump()
