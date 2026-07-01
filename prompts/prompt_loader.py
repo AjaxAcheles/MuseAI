@@ -42,6 +42,24 @@ def _default_template_dir() -> Path:
     return Path(__file__).resolve().parent
 
 
+def xml_escape(value: object) -> str:
+    """Escape XML metacharacters in an interpolated value.
+
+    Autoescape is off (templates are hand-authored XML for the model, not HTML),
+    so untrusted **raw** context values — premise seeds, world rules, RAPTOR
+    summaries, prior plans — are dropped straight into XML elements. Without
+    escaping, such a value containing ``</premise_seed><role>…</role>`` could close
+    the surrounding tag and inject instruction elements the model treats as
+    authoritative. ``| xmlsafe`` neutralizes that by encoding ``&``, ``<``, and
+    ``>`` so the value can only ever be data. It is the primary guard on raw
+    fields; on ``| tojson`` fields it is applied only as belt-and-suspenders, since
+    Jinja's ``tojson`` already emits HTML-safe JSON (``<``/``>``/``&`` escaped to
+    ``\\uXXXX``), making it a no-op there.
+    """
+    text = str(value)
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
 class PromptLoader:
     """Strict Jinja2 renderer for node prompt templates rooted at ``prompts/``."""
 
@@ -55,6 +73,10 @@ class PromptLoader:
             autoescape=False,  # prompts are raw XML for the model, not HTML
             keep_trailing_newline=True,
         )
+        # `| xmlsafe` lets a template neutralize XML-structure injection from any
+        # untrusted context value without turning on global autoescape (which would
+        # also mangle the templates' own literal XML and every `| tojson` payload).
+        self._env.filters["xmlsafe"] = xml_escape
 
     def template_name_for_node(self, node_name: str) -> str:
         """Return ``<node_name>.xml.j2`` after validating a safe node name.

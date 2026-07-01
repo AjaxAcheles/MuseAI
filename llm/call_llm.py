@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import re
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from time import perf_counter
@@ -764,5 +765,16 @@ def _redact_secrets(value: Any) -> Any:
 
 
 def _is_secret_key(key: str) -> bool:
+    """True when ``key`` names a secret-bearing field, matched on word boundaries.
+
+    A marker must sit at the start/end of the (``-``→``_`` normalized) key or be
+    delimited by underscores — so ``api_key``, ``openai_api_key``, and
+    ``access_token`` redact, while ``max_tokens`` (which merely contains the
+    substring ``token``) does not, keeping request bodies observable in the log
+    without leaking credentials.
+    """
     lower = key.lower().replace("-", "_")
-    return any(marker in lower for marker in _SECRET_KEY_MARKERS)
+    return any(
+        re.search(rf"(?:^|_){re.escape(marker)}(?:$|_)", lower)
+        for marker in _SECRET_KEY_MARKERS
+    )

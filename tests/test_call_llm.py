@@ -279,3 +279,37 @@ async def _4xx_failure_does_not_retry_and_logs_error(log_path: Path) -> None:
     assert record["request"]["attempt_count"] == 1
     assert record["request"]["tokens_in"] > 0
     assert record["request"]["tokens_out"] is None
+
+
+def test_redaction_masks_secret_fields_but_keeps_max_tokens() -> None:
+    from llm.call_llm import _REDACTED, _redact_secrets
+
+    body = {
+        "model": "synthetic-model",
+        "max_tokens": 256,  # must NOT be redacted despite containing "token"
+        "n_tokens": 12,
+        "temperature": 0.7,
+        "api_key": "sk-live-should-be-hidden",
+        "authorization": "Bearer sk-live",
+        "access_token": "tok-should-be-hidden",
+        "client_secret": "hunter2",
+        "nested": {"password": "hunter2", "keep_me": "visible"},
+        "messages": [{"role": "user", "content": "hi"}],
+    }
+    redacted = _redact_secrets(body)
+
+    # Observability preserved for the (very common) max_tokens knob and friends.
+    assert redacted["max_tokens"] == 256
+    assert redacted["n_tokens"] == 12
+    assert redacted["temperature"] == 0.7
+    assert redacted["model"] == "synthetic-model"
+    assert redacted["messages"] == [{"role": "user", "content": "hi"}]
+
+    # Every secret-bearing field is masked, including a nested one.
+    for secret_key in ("api_key", "authorization", "access_token", "client_secret"):
+        assert redacted[secret_key] == _REDACTED
+    assert redacted["nested"]["password"] == _REDACTED
+    assert redacted["nested"]["keep_me"] == "visible"
+
+    # The original payload is untouched — redaction is non-destructive.
+    assert body["api_key"] == "sk-live-should-be-hidden"

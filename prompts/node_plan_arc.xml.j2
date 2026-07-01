@@ -62,20 +62,20 @@
 
   <context>
     <genre>{{ genre }}</genre>
-    <approved_global_plan>{{ global_plan | tojson }}</approved_global_plan>
+    <approved_global_plan>{{ global_plan | tojson | xmlsafe }}</approved_global_plan>
     <global_arc_slots note="Realize these arc slots from the approved global plan.">
     {% for arc in global_plan.get('arcs', []) %}
-      - {{ arc | tojson }}
+      - {{ arc | tojson | xmlsafe }}
     {% else %}
       (the global plan declared no arc slots)
     {% endfor %}
     </global_arc_slots>
     <raptor_root_summary>
-    {% if raptor_root_summary %}{{ raptor_root_summary }}{% else %}(no summary available yet){% endif %}
+    {% if raptor_root_summary %}{{ raptor_root_summary | xmlsafe }}{% else %}(no summary available yet){% endif %}
     </raptor_root_summary>
     <open_threads note="Subplot threads to open / progress / close across the arcs.">
     {% for thread in open_threads %}
-      - {{ thread | tojson }}
+      - {{ thread | tojson | xmlsafe }}
     {% else %}
       (no open threads recorded)
     {% endfor %}
@@ -85,14 +85,14 @@
   <compiled_constraints note="Hard requirements must be satisfied; preferences should be honored where possible. If two hard requirements truly contradict, raise_conflict instead of guessing.">
     <hard_requirements>
     {% for c in compiled_constraints.get('hard_annotations', []) %}
-      - {{ c.get('text', c) }}
+      - {{ c.get('text', c) | xmlsafe }}
     {% else %}
       (none)
     {% endfor %}
     </hard_requirements>
     <preferences>
     {% for c in compiled_constraints.get('soft_preferences', []) %}
-      - {{ c.get('text', c) }}
+      - {{ c.get('text', c) | xmlsafe }}
     {% else %}
       (none)
     {% endfor %}
@@ -102,11 +102,11 @@
   <deliberation_state>
     <turn>{{ loop_index }}</turn>
     <current_draft_plan>
-    {% if current_plan %}{{ current_plan | tojson }}{% else %}(no draft yet — this is the first proposal){% endif %}
+    {% if current_plan %}{{ current_plan | tojson | xmlsafe }}{% else %}(no draft yet — this is the first proposal){% endif %}
     </current_draft_plan>
     <accumulated_tool_results>
     {% for tr in tool_results %}
-      - {{ tr | tojson }}
+      - {{ tr | tojson | xmlsafe }}
     {% else %}
       (no tools called yet)
     {% endfor %}

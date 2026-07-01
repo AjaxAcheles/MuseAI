@@ -9,6 +9,8 @@ ingestion, Graphiti promotion, and M10 belief resolution are out of scope here.
 Band thresholds are always supplied by the caller; none are hardcoded.
 """
 
+import pytest
+
 from core import runtime
 from memory.provisional_store import (
     PENDING_STATUS,
@@ -118,3 +120,48 @@ def test_provisional_path_is_separate_from_canonical_db(tmp_path):
     assert store.name != runtime.SQLITE_DB_PATH.name
     # Nothing was written to a canonical fictionwriter.db in the fixture tree.
     assert not (tmp_path / "data" / "fictionwriter.db").exists()
+
+
+@pytest.mark.parametrize("bad_confidence", [-0.01, 1.01, 2.0, -5.0])
+def test_upsert_rejects_confidence_outside_probability_range(tmp_path, bad_confidence):
+    store = _store_path(tmp_path)
+    with pytest.raises(ValueError):
+        upsert_claim(store, claim_text="t", confidence=bad_confidence)
+    # Nothing was persisted by the rejected write.
+    assert _all_claims(store) == []
+
+
+@pytest.mark.parametrize("bad_status", ["confirmed", "reviewed", "rejected", "bogus"])
+def test_upsert_refuses_to_record_a_review_decision(tmp_path, bad_status):
+    # upsert_claim writes only pending claims; a caller cannot smuggle a claim
+    # straight to a reviewed/confirmed state and bypass the review gate.
+    store = _store_path(tmp_path)
+    with pytest.raises(ValueError):
+        upsert_claim(store, claim_text="t", confidence=0.5, status=bad_status)
+    assert _all_claims(store) == []
+
+
+def test_replay_after_review_preserves_the_decision(tmp_path):
+    # Re-ingesting a span that has since been reviewed must refresh only the
+    # imputed content/confidence and leave the review decision intact — the
+    # crash-recovery replay path must be non-destructive to human review.
+    store = _store_path(tmp_path)
+    fields = dict(
+        claim_text="She is Mara",
+        source_ref="ch3:span[1040:1052]",
+        subject_id="pron_7",
+        entity_id="char_mara",
+    )
+    claim_id = upsert_claim(store, confidence=0.62, **fields)
+    mark_claim_reviewed(store, claim_id, status="confirmed", reviewer_note="verified")
+
+    # Ingestion replays the same span (crash recovery) with a refined confidence.
+    upsert_claim(store, confidence=0.80, **fields)
+
+    stored = get_claim(store, claim_id)
+    assert stored["status"] == "confirmed"  # decision preserved, not rewound
+    assert stored["reviewer_note"] == "verified"
+    assert stored["reviewed_at"]  # review timestamp still present
+    assert stored["confidence"] == 0.80  # imputed content refreshed
+    # The reviewed claim has left the pending queue and stays out on replay.
+    assert list_pending_claims(store) == []

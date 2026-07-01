@@ -19,9 +19,15 @@ later Graphiti/branch work), and commit orchestration land in later increments.
 """
 
 import json
+import os
 from collections import deque
 from collections.abc import Iterator, Mapping
 from pathlib import Path
+
+try:
+    import fcntl  # POSIX advisory file locking (Linux/WSL2/macOS)
+except ImportError:  # pragma: no cover - native Windows has no fcntl
+    fcntl = None
 
 
 def init_event_log(config, log_path: str | Path) -> None:
@@ -41,8 +47,13 @@ def write_event(log_path: str | Path, payload: Mapping) -> None:
 
     The log is strictly append-only: the parent directory is created if missing
     and the file is opened in append mode, so an existing log is never truncated
-    or rewritten. The encoded object plus a trailing newline is emitted in one
-    write so a record is always a single complete line.
+    or rewritten. The whole record (encoded object plus trailing newline) is
+    written under an exclusive advisory lock, flushed, and ``fsync``ed before the
+    lock is released, so concurrent writers can never interleave a partial line
+    into the ledger and a record that returns is durable on disk — the crash
+    recovery this log exists to serve can therefore always parse every line. On a
+    platform without ``fcntl`` (native Windows), the lock is skipped but the
+    single flushed write still holds under a single writer.
 
     ``payload`` must be a JSON-serializable mapping — for example a
     ``beat_commit`` event carrying its nested ``pad_states`` snapshot. PAD state
@@ -67,8 +78,17 @@ def write_event(log_path: str | Path, payload: Mapping) -> None:
 
     path = Path(log_path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "a", encoding="utf-8") as f:
-        f.write(line + "\n")
+    record = (line + "\n").encode("utf-8")
+    with open(path, "ab") as f:
+        if fcntl is not None:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        try:
+            f.write(record)
+            f.flush()
+            os.fsync(f.fileno())
+        finally:
+            if fcntl is not None:
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
 
 
 def iter_events(log_path: str | Path) -> Iterator[dict]:
@@ -76,11 +96,15 @@ def iter_events(log_path: str | Path) -> Iterator[dict]:
 
     A missing log file yields nothing rather than raising — an absent ledger is
     an empty history, not an error. Whitespace-only lines (e.g. a trailing blank
-    line) are tolerated and skipped. A non-blank line that does not parse as JSON
-    is malformed: it raises ``ValueError`` naming the 1-based line number.
+    line) are tolerated and skipped. A non-blank line that does not parse as JSON,
+    or that parses to something other than a JSON object (e.g. a bare number,
+    string, or array from a truncated/forged line), is malformed: it raises
+    ``ValueError`` naming the 1-based line number. Every event is a mapping, so a
+    non-dict line would otherwise slip through and blow up a downstream
+    ``event["type"]`` mid-replay.
 
     Raises:
-        ValueError: if a non-blank line is not valid JSON.
+        ValueError: if a non-blank line is not a valid JSON object.
     """
     path = Path(log_path)
     if not path.exists():
@@ -90,11 +114,17 @@ def iter_events(log_path: str | Path) -> Iterator[dict]:
             if not raw.strip():
                 continue
             try:
-                yield json.loads(raw)
+                event = json.loads(raw)
             except (ValueError, TypeError) as exc:
                 raise ValueError(
                     f"{path}: malformed JSON on line {line_number}: {exc}"
                 ) from exc
+            if not isinstance(event, dict):
+                raise ValueError(
+                    f"{path}: line {line_number} is a JSON {type(event).__name__}, "
+                    "not an object; the event log holds exactly one object per line"
+                )
+            yield event
 
 
 def tail_events(log_path: str | Path, limit: int) -> list[dict]:

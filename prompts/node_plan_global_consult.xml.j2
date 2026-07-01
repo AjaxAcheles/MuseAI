@@ -24,8 +24,8 @@
 
   <context>
     <genre>{{ genre }}</genre>
-    <premise_seed>{{ premise_seed }}</premise_seed>
-    <current_plan>{{ plan }}</current_plan>
+    <premise_seed>{{ premise_seed | xmlsafe }}</premise_seed>
+    <current_plan>{{ plan | xmlsafe }}</current_plan>
   </context>
 
   <instructions>
