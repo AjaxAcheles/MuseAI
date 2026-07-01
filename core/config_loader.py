@@ -203,6 +203,31 @@ class PlanningConfig(BaseModel):
             )
         return value
 
+    @field_validator("planner_required_checks")
+    @classmethod
+    def require_known_check_names(cls, value: dict) -> dict:
+        """Every configured required-check name must have a registered validator.
+
+        Fail closed at boot rather than at first planner run: a typo like
+        ``"escalaton"`` would otherwise load cleanly and only raise mid-cascade
+        (validators.py's fail-closed guard) after the run is already underway. The
+        registry is imported lazily so this low-level config module stays free of a
+        static dependency on ``fsm``.
+        """
+        from fsm.planning_validators import REQUIRED_CHECK_REGISTRY
+
+        known = set(REQUIRED_CHECK_REGISTRY)
+        unknown = sorted(
+            {name for names in value.values() for name in names if name not in known}
+        )
+        if unknown:
+            raise ValueError(
+                f"planning planner_required_checks names not registered as "
+                f"validators: {unknown}; each required check must map to an "
+                f"implementation in REQUIRED_CHECK_REGISTRY"
+            )
+        return value
+
 
 class LoggingConfig(BaseModel):
     """Observability surface configuration."""

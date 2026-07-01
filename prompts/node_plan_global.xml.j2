@@ -65,10 +65,10 @@
   <context>
     <genre>{{ genre }}</genre>
     <target_word_count>{{ target_word_count }}</target_word_count>
-    <premise_seed>{{ premise_seed }}</premise_seed>
+    <premise_seed>{{ premise_seed | xmlsafe }}</premise_seed>
     <world_rules>
     {% for rule in world_rules %}
-      - {{ rule }}
+      - {{ rule | xmlsafe }}
     {% else %}
       (none provided)
     {% endfor %}
@@ -76,7 +76,7 @@
     {% if existing_arcs %}
     <existing_arcs note="Continuation pass: extend the story beyond these without contradicting them.">
       {% for arc in existing_arcs %}
-      - {{ arc | tojson }}
+      - {{ arc | tojson | xmlsafe }}
       {% endfor %}
     </existing_arcs>
     {% else %}
@@ -87,14 +87,14 @@
   <compiled_constraints note="Hard requirements must be satisfied; preferences should be honored where possible. If two hard requirements truly contradict, raise_conflict instead of guessing.">
     <hard_requirements>
     {% for c in compiled_constraints.get('hard_annotations', []) %}
-      - {{ c.get('text', c) }}
+      - {{ c.get('text', c) | xmlsafe }}
     {% else %}
       (none)
     {% endfor %}
     </hard_requirements>
     <preferences>
     {% for c in compiled_constraints.get('soft_preferences', []) %}
-      - {{ c.get('text', c) }}
+      - {{ c.get('text', c) | xmlsafe }}
     {% else %}
       (none)
     {% endfor %}
@@ -104,11 +104,11 @@
   <deliberation_state>
     <turn>{{ loop_index }}</turn>
     <current_draft_plan>
-    {% if current_plan %}{{ current_plan | tojson }}{% else %}(no draft yet — this is the first proposal){% endif %}
+    {% if current_plan %}{{ current_plan | tojson | xmlsafe }}{% else %}(no draft yet — this is the first proposal){% endif %}
     </current_draft_plan>
     <accumulated_tool_results>
     {% for tr in tool_results %}
-      - {{ tr | tojson }}
+      - {{ tr | tojson | xmlsafe }}
     {% else %}
       (no tools called yet)
     {% endfor %}

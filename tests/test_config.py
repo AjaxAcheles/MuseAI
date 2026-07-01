@@ -218,3 +218,32 @@ def test_default_repo_config_still_loads(endpoint_secrets: None) -> None:
         "macro_outline_before_draft",
     }
     assert config.planning.approval_mode in {"off", "macro_outline"}
+
+
+def test_unknown_required_check_name_fails_at_load(
+    tmp_path: Path, endpoint_secrets: None
+) -> None:
+    del endpoint_secrets
+    # A typo in a required-check name would otherwise load cleanly and only fail
+    # mid-cascade (fail-closed) once a run is underway; it must be fatal at boot.
+    bad_yaml = valid_config_yaml().replace('"escalation"', '"escalaton"')
+    assert '"escalaton"' in bad_yaml  # guard: the replacement actually happened
+
+    with pytest.raises(ValidationError) as exc_info:
+        load_config(write_config(tmp_path, bad_yaml))
+
+    assert "escalaton" in str(exc_info.value)
+
+
+def test_no_drafting_is_an_accepted_required_check(
+    tmp_path: Path, endpoint_secrets: None
+) -> None:
+    del endpoint_secrets
+    # The prose-boundary guard is a registered validator, so wiring it into a
+    # level's required checks (as config.yaml now does) loads cleanly.
+    yaml_with_guard = valid_config_yaml().replace(
+        'beat: ["schema", "draftability", "continuity", "pad_grounding"]',
+        'beat: ["schema", "no_drafting", "draftability", "continuity", "pad_grounding"]',
+    )
+    config = load_config(write_config(tmp_path, yaml_with_guard))
+    assert "no_drafting" in config.planning.planner_required_checks["beat"]

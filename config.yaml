@@ -62,12 +62,16 @@ planning:
   baseline_act_count: 3
   baseline_word_weights: [0.25, 0.5, 0.25]   # per-act pacing weights; length should match baseline_act_count, else equal split
   creative_second_pass_enabled: false        # craft-consultant revision pass (re-validated) before persist; off until calibrated
+  # `no_drafting` guards the proposal-surface-vs-committed-prose boundary at every
+  # level: a planner finalize may carry structural fields only, never prose/draft
+  # text. It only rejects a plan that violates the boundary, so it is safe on all
+  # levels and closes the gap where the guard was defined but never run.
   planner_required_checks:
-    global:  ["schema", "arc_coverage", "major_promise_payoff", "arc_diversity", "promise_payoff_distinct"]
-    arc:     ["schema", "escalation", "thread_distribution"]
-    chapter: ["schema", "chapter_function", "pacing", "annotation_satisfaction"]
-    scene:   ["schema", "continuity", "scene_function", "entry_exit_state"]
-    beat:    ["schema", "draftability", "continuity", "pad_grounding"]
+    global:  ["schema", "no_drafting", "arc_coverage", "major_promise_payoff", "arc_diversity", "promise_payoff_distinct"]
+    arc:     ["schema", "no_drafting", "escalation", "thread_distribution"]
+    chapter: ["schema", "no_drafting", "chapter_function", "pacing", "annotation_satisfaction"]
+    scene:   ["schema", "no_drafting", "continuity", "scene_function", "entry_exit_state"]
+    beat:    ["schema", "no_drafting", "draftability", "continuity", "pad_grounding"]
 
 runtime:
   model_validate_retry_cap: 3 # proposed default to be calibrated

@@ -37,6 +37,11 @@ from pathlib import Path
 # `data/fictionwriter.db`; callers may override the path per project/test.
 DEFAULT_PROVISIONAL_PATH = "data/provisional_claims.db"
 
+# CHECK constraints pin the enum and probability range at the storage boundary so
+# a forged/mis-typed write (e.g. status='confirmed' bypassing the review gate, or
+# confidence=999) is rejected by the DB itself, mirroring the hard CHECKs on the
+# canonical hub. The IN-list is kept in sync with PENDING_STATUS + REVIEW_STATUSES
+# below.
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS ProvisionalClaims (
     claim_id TEXT PRIMARY KEY,
@@ -44,8 +49,10 @@ CREATE TABLE IF NOT EXISTS ProvisionalClaims (
     subject_id TEXT,
     entity_id TEXT,
     claim_text TEXT NOT NULL,
-    confidence REAL NOT NULL,
-    status TEXT NOT NULL,
+    confidence REAL NOT NULL CHECK(confidence >= 0.0 AND confidence <= 1.0),
+    status TEXT NOT NULL CHECK(
+        status IN ('provisional', 'reviewed', 'confirmed', 'rejected')
+    ),
     created_at TEXT NOT NULL,
     reviewer_note TEXT,
     reviewed_at TEXT
@@ -137,9 +144,30 @@ def upsert_claim(
     same imputed link never duplicates a row. On conflict the mutable fields are
     updated in place while ``created_at`` is preserved from first write.
 
-    ``confidence`` is stored verbatim — this boundary does not compare it to any
-    high/mid/low threshold. Returns the resolved ``claim_id``.
+    ``confidence`` is stored verbatim within [0.0, 1.0] — this boundary does not
+    compare it to any high/mid/low threshold, but it does reject a value outside
+    the normalized probability range. ``status`` may only be the ``provisional``
+    pending label: this writer never records a review decision, so a caller cannot
+    smuggle a claim straight to ``confirmed`` and bypass the review gate — decisions
+    go through :func:`mark_claim_reviewed`. On replay, the review-state fields
+    (``status``, ``reviewer_note``, ``reviewed_at``) are preserved, not clobbered,
+    so re-ingesting a span that has since been reviewed refreshes only the imputed
+    content and confidence and leaves the decision intact. Returns the resolved
+    ``claim_id``.
+
+    Raises:
+        ValueError: if ``confidence`` is outside [0.0, 1.0] or ``status`` is not
+            the pending label.
     """
+    if not 0.0 <= confidence <= 1.0:
+        raise ValueError(
+            f"confidence must be within [0.0, 1.0]; got {confidence!r}"
+        )
+    if status != PENDING_STATUS:
+        raise ValueError(
+            f"upsert_claim only writes '{PENDING_STATUS}' claims; record review "
+            f"decisions via mark_claim_reviewed (got status={status!r})"
+        )
     resolved_id = claim_id or _derive_claim_id(
         source_ref, subject_id, entity_id, claim_text
     )
@@ -159,9 +187,7 @@ def upsert_claim(
                 subject_id = excluded.subject_id,
                 entity_id = excluded.entity_id,
                 claim_text = excluded.claim_text,
-                confidence = excluded.confidence,
-                status = excluded.status,
-                reviewer_note = excluded.reviewer_note
+                confidence = excluded.confidence
             """,
             (
                 resolved_id,

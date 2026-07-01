@@ -11,6 +11,8 @@ logic, and SQLite relational writes are out of scope here.
 
 import json
 
+import pytest
+
 import memory.event_log as event_log
 from memory.event_log import iter_events, tail_events, write_event
 
@@ -110,3 +112,48 @@ def test_no_public_helper_writes_standalone_pad_events():
     # travels nested inside a beat_commit payload via write_event.
     assert [name for name in public_names if "pad" in name.lower()] == []
     assert "write_event" in public_names
+
+
+def test_iter_events_rejects_a_non_object_line(tmp_path):
+    # A forged or truncation-corrupted line that parses as valid JSON but is not
+    # an object (bare number / string / array / null) must fail loudly during
+    # replay, not slip through and blow up a downstream ``event["type"]``.
+    log = tmp_path / "log.jsonl"
+    write_event(log, {"event": "scene_open", "seq": 1})
+    with open(log, "a", encoding="utf-8") as f:
+        f.write("42\n")  # a valid JSON scalar, but not an event object
+
+    events = iter_events(log)
+    assert next(events) == {"event": "scene_open", "seq": 1}
+    with pytest.raises(ValueError) as exc_info:
+        next(events)
+    # The error names the 1-based line number of the offending record.
+    assert "line 2" in str(exc_info.value)
+
+
+@pytest.mark.parametrize("bad_line", ['"just a string"', "[1, 2, 3]", "null", "3.14"])
+def test_iter_events_rejects_every_non_object_json_shape(tmp_path, bad_line):
+    log = tmp_path / "log.jsonl"
+    log.write_text(bad_line + "\n", encoding="utf-8")
+    with pytest.raises(ValueError):
+        list(iter_events(log))
+
+
+def test_write_event_emits_a_large_payload_as_one_complete_line(tmp_path):
+    # A beat_commit carrying prose + nested pad_states can exceed the OS atomic
+    # append size; the record must still land as exactly one parseable line.
+    log = tmp_path / "log.jsonl"
+    big = {
+        "event": "beat_commit",
+        "beat_id": "b1",
+        "prose_delta": "x" * 200_000,
+        "pad_states": {f"char_{i}": [0.1, 0.2, 0.3] for i in range(50)},
+    }
+    write_event(log, big)
+    write_event(log, {"event": "scene_close", "seq": 2})
+
+    raw_lines = log.read_text(encoding="utf-8").splitlines()
+    assert len(raw_lines) == 2  # no interleaving / split of the large record
+    recovered = list(iter_events(log))
+    assert recovered[0] == big
+    assert recovered[1] == {"event": "scene_close", "seq": 2}
