@@ -1,0 +1,82 @@
+{% extends "base.html" %}
+{% block title %}MuseAI — Dashboard{% endblock %}
+{% block content %}
+<header id="status-ribbon" class="ribbon">
+  <div class="ribbon-left">
+    <span id="live-dot" class="dot dot-idle" title="run indicator"></span>
+    <span id="run-status" class="pill pill-idle">idle</span>
+    <span class="ribbon-label">phase</span>
+    <span id="phase" class="ribbon-value">idle</span>
+  </div>
+  <div class="ribbon-pointer">
+    <span class="ribbon-label">arc</span><span id="ptr-arc" class="ribbon-value">–</span>
+    <span class="ribbon-label">chapter</span><span id="ptr-chapter" class="ribbon-value">–</span>
+    <span class="ribbon-label">scene</span><span id="ptr-scene" class="ribbon-value">–</span>
+    <span class="ribbon-label">beat</span><span id="ptr-beat" class="ribbon-value">–</span>
+  </div>
+  <div class="ribbon-right">
+    <span id="conn-status" class="conn">connecting…</span>
+  </div>
+</header>
+
+<main class="layout">
+  <section class="col col-main">
+    <div class="card" id="planning-snapshot-card">
+      <h2>Planning snapshot</h2>
+      <div id="planning-snapshot-body" class="card-body muted">No planning snapshot yet.</div>
+    </div>
+
+    <div class="card" id="planning-node-card">
+      <h2>Latest planning node</h2>
+      <div id="planning-node-body" class="card-body muted">No planner node has run yet.</div>
+    </div>
+
+    <div class="card card-block hidden" id="block-card">
+      <h2>Blocked</h2>
+      <div id="block-body" class="card-body"></div>
+    </div>
+
+    <div class="card card-error hidden" id="error-card">
+      <h2>Error</h2>
+      <div id="error-body" class="card-body"></div>
+    </div>
+  </section>
+
+  <section class="col col-side">
+    <div class="card" id="controls-card">
+      <h2>Controls</h2>
+      <div class="controls">
+        <button id="btn-start" type="button">Start</button>
+        <button id="btn-pause" type="button" disabled>Pause</button>
+        <button id="btn-resume" type="button" disabled>Resume</button>
+        <button id="btn-stop" type="button" disabled>Stop</button>
+      </div>
+      <p class="hint">{{ manager_status.get('pause_note', 'Pause takes effect at the next planner-node boundary.') }}</p>
+      <div id="notice" class="notice hidden"></div>
+    </div>
+
+    <div class="card" id="stores-card">
+      <h2>Store status</h2>
+      <ul class="stores">
+        {% for store in stores %}
+        <li>
+          <span class="store-name">{{ store.name }}</span>
+          <span class="badge badge-{{ store.kind }}">{{ store.kind }}</span>
+          <span class="store-note">{{ store.note }}</span>
+        </li>
+        {% endfor %}
+      </ul>
+    </div>
+
+    <div class="card" id="event-stream-card">
+      <h2>Event stream <span class="hint-inline">(last 100)</span></h2>
+      <div id="event-log" class="event-log" aria-live="polite"></div>
+    </div>
+  </section>
+</main>
+
+<script id="bootstrap-data" type="application/json">{{ {"snapshot": snapshot, "manager": manager_status} | tojson }}</script>
+{% endblock %}
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/main.js') }}"></script>
+{% endblock %}
