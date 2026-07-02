@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>MuseAI — local end-to-end</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body { font-family: system-ui, sans-serif; margin: 0; padding: 1.5rem; max-width: 900px; margin: 0 auto; }
+    h1 { font-size: 1.3rem; }
+    label { display: block; font-size: .85rem; margin: .6rem 0 .2rem; opacity: .8; }
+    input, textarea { width: 100%; box-sizing: border-box; padding: .5rem; font: inherit; }
+    textarea { min-height: 4rem; }
+    .row { display: flex; gap: 1rem; }
+    .row > div { flex: 1; }
+    button { margin-top: 1rem; padding: .6rem 1.2rem; font: inherit; cursor: pointer; }
+    #status { margin: 1rem 0; font-size: .9rem; opacity: .85; }
+    #prose { white-space: pre-wrap; line-height: 1.5; border: 1px solid #8884; padding: 1rem; border-radius: 6px; min-height: 8rem; }
+    .muted { opacity: .6; }
+  </style>
+</head>
+<body>
+  <h1>MuseAI — local end-to-end (minimal spike)</h1>
+  <p class="muted">Plans a story (global → arc → structure) then streams drafted prose beat by beat. Needs a running local model endpoint configured in <code>config.yaml</code>.</p>
+
+  <label for="premise">Premise / creative seed</label>
+  <textarea id="premise" placeholder="A lighthouse keeper discovers the sea has started writing back."></textarea>
+
+  <div class="row">
+    <div>
+      <label for="genre">Genre</label>
+      <input id="genre" value="literary" />
+    </div>
+    <div>
+      <label for="words">Target word count</label>
+      <input id="words" type="number" value="2000" />
+    </div>
+  </div>
+
+  <button id="start">Start generation</button>
+
+  <div id="status">Idle.</div>
+  <div id="prose" class="muted">Drafted prose will stream here…</div>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const statusEl = $("status");
+    const proseEl = $("prose");
+    let source = null;
+
+    $("start").addEventListener("click", async () => {
+      if (source) { source.close(); source = null; }
+      proseEl.textContent = "";
+      proseEl.classList.remove("muted");
+      statusEl.textContent = "Starting…";
+
+      const body = {
+        premise_seed: $("premise").value,
+        genre: $("genre").value,
+        target_word_count: Number($("words").value) || 2000,
+      };
+      const res = await fetch("/control/start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const { run_id } = await res.json();
+      statusEl.textContent = `Run ${run_id}: planning…`;
+
+      source = new EventSource(`/events/${run_id}`);
+      source.onmessage = (e) => {
+        const ev = JSON.parse(e.data);
+        if (ev.type === "token") {
+          proseEl.textContent += ev.text;
+        } else if (ev.type === "status" || ev.type === "structure") {
+          statusEl.textContent = `Run ${run_id}: ${ev.status || "planning"}` +
+            (ev.beat_count != null ? ` — ${ev.beat_count} beats planned` : "");
+        } else if (ev.type === "beat_start") {
+          proseEl.textContent += "\n\n";
+        } else if (ev.type === "beat_committed") {
+          statusEl.textContent = `Run ${run_id}: drafting — ${ev.word_count} words committed`;
+        } else if (ev.type === "complete") {
+          statusEl.textContent = `Run ${run_id}: complete — ${ev.beats} beats, ${ev.word_count} words`;
+        } else if (ev.type === "error") {
+          statusEl.textContent = `Run ${run_id}: ERROR — ${ev.message}`;
+        }
+      };
+      source.addEventListener("done", () => { source.close(); source = null; });
+      source.onerror = () => { statusEl.textContent += " (stream closed)"; };
+    });
+  </script>
+</body>
+</html>

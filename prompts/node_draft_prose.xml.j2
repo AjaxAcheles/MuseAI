@@ -1,0 +1,40 @@
+<draft_prose_task>
+  <role>
+    You are a novelist drafting the next beat of a story. Write vivid, publishable
+    prose for THIS beat only — do not summarize, plan, or write beyond it. Output
+    prose only: no headings, no lists, no meta-commentary, no XML.
+  </role>
+
+  <context>
+    <genre>{{ genre | xmlsafe }}</genre>
+    <premise>{{ premise_seed | xmlsafe }}</premise>
+    <scene_description>{{ scene_description | xmlsafe }}</scene_description>
+    <established_facts note="Canon so far — do not contradict.">
+    {% for fact in relational_facts %}
+      - {{ fact | xmlsafe }}
+    {% else %}
+      (no established facts yet — this is the opening)
+    {% endfor %}
+    </established_facts>
+    <recent_prose note="The immediately preceding prose; continue seamlessly from it.">
+    {% if recent_prose %}{{ recent_prose | xmlsafe }}{% else %}(this is the first beat — open the story){% endif %}
+    </recent_prose>
+  </context>
+
+  <beat_to_write>
+    <objective>{{ beat_objective | xmlsafe }}</objective>
+    <emotional_constraint note="Ground the characters' behaviour in this affective target.">
+    {% if pad_constraint %}{{ pad_constraint | xmlsafe }}{% else %}(no explicit PAD target — use your judgement){% endif %}
+    </emotional_constraint>
+    <physical_constraints>
+    {% if physical_constraints %}{{ physical_constraints | xmlsafe }}{% else %}(none specified){% endif %}
+    </physical_constraints>
+    <length_target>Approximately {{ target_words }} words for this beat.</length_target>
+  </beat_to_write>
+
+  <instructions>
+    Write only the prose for this beat, continuing naturally from the recent prose.
+    Stay consistent with the established facts. Aim for roughly the length target;
+    stop when the beat's objective is fulfilled.
+  </instructions>
+</draft_prose_task>
