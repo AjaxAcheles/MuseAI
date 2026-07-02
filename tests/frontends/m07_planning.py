@@ -2,19 +2,27 @@
 Streamlit frontend for the real planner cascade over temp stores.
 
 Drives the production planner nodes (global/arc/chapter/scene/beat) end to end —
-compile constraints -> bounded deliberation loop -> persist — with an injected
-*scripted* decider (an editable list of PlannerActions), so no live model or network
-is ever contacted. The page renders every intermediate planning structure AND the
-agentic loop itself: the per-iteration deliberation trace, validator results per
-configured required check, the fallback rung taken, the persisted PlanningNode +
-PlanningRevision diff, the PAD grounding pipeline (beat level, `adapt_fn=None`),
-and the PlannerToolCallTrace rows including rejected/degraded calls.
+compile constraints -> bounded deliberation loop -> persist. An **LLM mode** toggle
+at the top selects the decider: "Mocked LLM" (default) injects a *scripted* decider
+(an editable list of PlannerActions) so no live model or network is ever contacted;
+"Real LLM" leaves the decider seam empty so the node builds the production
+M04-backed decider (`make_planner_decider` -> `call_llm_structured`) against the
+endpoints in `config.yaml`, with per-endpoint secrets (and optional base-URL
+overrides) loaded from the repo `.env`. The page renders every intermediate
+planning structure AND the agentic loop itself: the per-iteration deliberation
+trace, validator results per configured required check, the fallback rung taken,
+the persisted PlanningNode + PlanningRevision diff, the PAD grounding pipeline
+(beat level; `adapt_fn=None` in both modes — the small-tier adapter's prompt
+template is not authored yet), and the PlannerToolCallTrace rows including
+rejected/degraded calls.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import os
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -34,6 +42,7 @@ from shared import (
     two_section_help,
     workspace,
 )
+from core.config_loader import load_config
 from fsm.nodes.node_plan_arc import node_plan_arc
 from fsm.nodes.node_plan_beat import node_plan_beat
 from fsm.nodes.node_plan_chapter import _select_chapter_target, node_plan_chapter
@@ -47,6 +56,20 @@ from fsm.state import FSM_Pointer
 from memory import event_log, sqlite_db
 
 _LEVELS = ("global", "arc", "chapter", "scene", "beat")
+
+# LLM-mode toggle: mocked (scripted decider, zero network) is ALWAYS the default.
+_LLM_MODES = ("Mocked LLM", "Real LLM")
+_LLM_MODE_WIDGET_KEY = "m07_llm_mode_widget"
+# Widget-keyed session values are dropped when the widget unmounts (e.g. switching
+# pages inside run_all.py), so the chosen mode is mirrored into this plain session
+# key, which survives, and fed back as the widget's index on remount.
+_LLM_MODE_STORE_KEY = "m07_llm_mode_store"
+
+_ENV_PATH = ROOT / ".env"
+# The five endpoint roles named in config.yaml / .env.example; used only for the
+# frontend's optional {ROLE}_BASE_URL overrides (api_key env handling is owned by
+# core.config_loader.load_config, not re-implemented here).
+_ENDPOINT_ROLES = ("planner", "drafter", "critic", "pad_translator", "craft_consultant")
 
 _PLANNER_NODES = {
     "global": node_plan_global,
@@ -291,6 +314,71 @@ def _planning_visual_config(execution_mode: str, approval_mode: str) -> SimpleNa
     )
 
 
+def _load_env_file(path: Any) -> list[str]:
+    """Load KEY=VALUE lines from ``path`` into ``os.environ`` (existing env wins).
+
+    Minimal dotenv semantics — blank lines and ``#`` comments skipped, surrounding
+    quotes stripped — so the frontend needs no extra dependency. Returns the keys it
+    actually set, for display. Variables already present in the environment are never
+    overwritten (the shell stays authoritative, matching production expectations).
+    """
+    loaded: list[str] = []
+    path = Path(path)
+    if not path.exists():
+        return loaded
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key and value and key not in os.environ:
+            os.environ[key] = value
+            loaded.append(key)
+    return loaded
+
+
+def _build_real_config() -> tuple[Any, dict[str, Any]]:
+    """Build the real validated AppConfig for Real-LLM runs, plus a status dict.
+
+    Loads ``.env`` (per-endpoint ``{ROLE}_API_KEY`` secrets, exactly the variables
+    ``.env.example`` documents), then runs the production ``core.config_loader
+    .load_config`` — strict validation included, so a missing or empty secret fails
+    here with the loader's own error rather than mid-run. ``{ROLE}_BASE_URL`` env
+    values, when set, override the yaml ``base_url`` afterwards (a frontend
+    convenience mirroring ``.env.example``; the production loader keeps base_url in
+    config.yaml).
+    """
+    loaded_keys = _load_env_file(_ENV_PATH)
+    try:
+        config = load_config(ROOT / "config.yaml")
+    except Exception as exc:
+        hint = (
+            f" — Real LLM mode needs the per-endpoint secrets from .env "
+            f"({_ENV_PATH}{'' if _ENV_PATH.exists() else ' does not exist; copy .env.example'}). "
+        )
+        raise RuntimeError(f"config load failed{hint}{exc}") from exc
+    overridden: list[str] = []
+    for role in _ENDPOINT_ROLES:
+        env_url = os.environ.get(f"{role.upper()}_BASE_URL")
+        if env_url:
+            getattr(config.endpoints, role).base_url = env_url
+            overridden.append(role)
+    info = {
+        "env_file": str(_ENV_PATH),
+        "env_file_found": _ENV_PATH.exists(),
+        "env_keys_loaded": loaded_keys,
+        "base_url_overrides": overridden,
+        "planner_endpoint": {
+            "base_url": config.endpoints.planner.base_url,
+            "model_name": config.endpoints.planner.model_name,
+            "grammar_constraint_strategy": config.endpoints.planner.grammar_constraint_strategy,
+        },
+    }
+    return config, info
+
+
 def _make_scripted_decider(actions: list[PlannerAction]):
     """One PlannerAction per loop turn, in order; raises when exhausted.
 
@@ -343,12 +431,25 @@ def _run_level(
     pointer: FSM_Pointer,
     execution_mode: str,
     approval_mode: str,
-    actions: list[PlannerAction],
+    actions: list[PlannerAction] | None,
+    llm_mode: str = _LLM_MODES[0],
 ) -> dict[str, Any]:
-    """Drive one real planner-node invocation and gather everything the runbook shows."""
+    """Drive one real planner-node invocation and gather everything the runbook shows.
+
+    ``llm_mode`` selects the decider seam: "Mocked LLM" injects the scripted
+    ``actions`` sequence (no model, no network); "Real LLM" passes ``decider=None``
+    so the node builds the production M04-backed decider against the validated
+    real config (endpoints + secrets from config.yaml/.env). In both modes the PAD
+    ladder runs ``adapt_fn=None`` (its adapter template is not authored yet).
+    """
     db_path = str(paths["db"])
     log_path = str(paths["event_log"])
-    config = _planning_visual_config(execution_mode, approval_mode)
+    real_llm = llm_mode == _LLM_MODES[1]
+    llm_info: dict[str, Any] | None = None
+    if real_llm:
+        config, llm_info = _build_real_config()
+    else:
+        config = _planning_visual_config(execution_mode, approval_mode)
 
     state: dict[str, Any] = {
         "project_id": PLANNING_PROJECT_ID,
@@ -376,9 +477,14 @@ def _run_level(
     target = _resolve_compile_target(level, db_path, PLANNING_SNAPSHOT_ID, pointer)
 
     node_fn = _PLANNER_NODES[level]
-    kwargs: dict[str, Any] = {"decider": _make_scripted_decider(actions)}
+    kwargs: dict[str, Any] = {}
+    if not real_llm:
+        # Mocked mode: the scripted sequence replaces the model behind the seam.
+        kwargs["decider"] = _make_scripted_decider(actions or [])
+    # Real mode passes no decider: the node builds the production M04-backed decider
+    # (make_planner_decider -> call_llm_structured on config.endpoints.planner).
     if level == "beat":
-        kwargs["adapt_fn"] = None  # LLM-free: static PAD floor, no adaptation rung
+        kwargs["adapt_fn"] = None  # static PAD floor; adapter template not authored yet
     result_state = asyncio.run(node_fn(state, **kwargs))
 
     # Re-compile the constraints the node just planned against, for display. The
@@ -422,6 +528,8 @@ def _run_level(
         "target": target,
         "state": result_state,
         "config": config,
+        "llm_mode": llm_mode,
+        "llm_info": llm_info,
         "constraints": constraints,
         "constraints_error": constraints_error,
         "commit_event": commit_event,
@@ -642,11 +750,11 @@ def _render_status(run: dict[str, Any]) -> None:
         "scene_needs_more": state.get("scene_needs_more"),
     }
     cols[4].metric(
-        "Pointer",
-        "advanced" if run["level"] != "global" else "n/a",
+        "LLM mode",
+        run.get("llm_mode", _LLM_MODES[0]),
         help=two_section_help(
-            "Successful arc/chapter/scene/beat runs advance the FSM pointer to the newly planned unit; the exact pointer is shown in the state expander below.",
-            "fsm_pointer after the run (model_copy update on success).",
+            "Which decider produced this run: the scripted mock (deterministic, offline) or the real M04-backed decider making live structured-output calls to the planner endpoint.",
+            "Mocked: injected action sequence. Real: make_planner_decider -> call_llm_structured; endpoint details in the expander below.",
         ),
     )
     with st.expander("Returned orchestrator-state fields"):
@@ -658,6 +766,11 @@ def _render_status(run: dict[str, Any]) -> None:
                 "active_planning_revision_id": state.get("active_planning_revision_id"),
                 "planning_block_reason": state.get("planning_block_reason"),
                 **{k: v for k, v in flags.items() if v is not None},
+                **(
+                    {"real_llm_endpoint": run["llm_info"]}
+                    if run.get("llm_info")
+                    else {}
+                ),
             }
         )
 
@@ -921,9 +1034,47 @@ def render() -> None:
         "M07 Hierarchical Planning Cascade",
         two_section_help(
             "This page runs the real five-level planner cascade — the bounded 'the model proposes, the harness disposes' loop — with a scripted decider standing in for the model, so you can watch constraint compilation, every deliberation turn, validator gating, the fallback ladder, and what actually gets persisted, all against throwaway temp stores.",
-            "Drives node_plan_{global,arc,chapter,scene,beat} with an injected decider (no call_llm, no network); PAD runs with adapt_fn=None.",
+            "Drives node_plan_{global,arc,chapter,scene,beat}; the LLM-mode toggle picks the scripted decider (default) or the production M04-backed one; PAD runs with adapt_fn=None.",
         ),
     )
+
+    # --- LLM mode toggle (mocked is the default) --------------------------------
+    stored_mode = st.session_state.get(_LLM_MODE_STORE_KEY, _LLM_MODES[0])
+    if stored_mode not in _LLM_MODES:
+        stored_mode = _LLM_MODES[0]
+    mode_cols = st.columns([1, 3])
+    llm_mode = mode_cols[0].selectbox(
+        "LLM mode",
+        _LLM_MODES,
+        index=_LLM_MODES.index(stored_mode),
+        key=_LLM_MODE_WIDGET_KEY,
+        help=two_section_help(
+            "Mocked LLM (the default) feeds the loop your scripted PlannerAction sequence — fully deterministic, zero network. Real LLM bypasses the mock: the node builds its production decider and every deliberation turn is an actual structured-output call to the planner endpoint, with secrets (and optional base-URL overrides) loaded from the repo .env file.",
+            "Mocked: decider=_make_scripted_decider(...). Real: decider=None -> make_planner_decider -> call_llm_structured on config.endpoints.planner; config via core.config_loader.load_config after reading .env.",
+        ),
+    )
+    st.session_state[_LLM_MODE_STORE_KEY] = llm_mode
+    real_llm = llm_mode == _LLM_MODES[1]
+    with mode_cols[1]:
+        if real_llm:
+            if _ENV_PATH.exists():
+                st.warning(
+                    "Real LLM mode: deliberation turns will call the configured planner "
+                    "endpoint. Secrets load from .env; an unreachable endpoint degrades "
+                    "through retries to the fallback ladder (slow, not an error).",
+                    icon="⚡",
+                )
+            else:
+                st.error(
+                    f"Real LLM mode needs `{_ENV_PATH}` (copy `.env.example` and fill the "
+                    "`*_API_KEY` values). Runs will fail config validation until it exists.",
+                    icon="🔑",
+                )
+        else:
+            st.caption(
+                "Mocked LLM: the scripted decider below stands in for the model — "
+                "no credentials, no network."
+            )
 
     action_cols = st.columns([1, 1, 2])
     if action_cols[0].button(
@@ -996,8 +1147,9 @@ def render() -> None:
         preset = st.selectbox(
             "decider preset",
             _DECIDER_PRESETS,
+            disabled=real_llm,
             help=two_section_help(
-                "'valid finalize' scripts a think turn / tool call / validator-passing finalize (level-dependent). 'always-invalid finalize' scripts a plan no validator accepts, so you can watch the loop burn its budget and the fallback ladder catch it — no invalid plan is ever persisted.",
+                "'valid finalize' scripts a think turn / tool call / validator-passing finalize (level-dependent). 'always-invalid finalize' scripts a plan no validator accepts, so you can watch the loop burn its budget and the fallback ladder catch it — no invalid plan is ever persisted. Disabled in Real LLM mode (the real model decides).",
                 "Presets only change the editable JSON below; edit freely before running.",
             ),
         )
@@ -1034,8 +1186,8 @@ def render() -> None:
         output_label(
             "Real code under this page",
             two_section_help(
-                "The run button calls the production node for the chosen level, which compiles constraints (fsm/planning_annotations), runs the bounded loop (fsm/planning_loop) with your scripted decider, gates finalizes on the deterministic validators (fsm/planning_validators), executes tools through the traced permission-matrix registry (fsm/planning_tools), and persists through the 07.00 helpers (fsm/planning_node_support).",
-                "No mocks: the only injected pieces are the decider sequence and adapt_fn=None.",
+                "The run button calls the production node for the chosen level, which compiles constraints (fsm/planning_annotations), runs the bounded loop (fsm/planning_loop) with the selected decider — scripted (mocked) or the production M04-backed one (real) — gates finalizes on the deterministic validators (fsm/planning_validators), executes tools through the traced permission-matrix registry (fsm/planning_tools), and persists through the 07.00 helpers (fsm/planning_node_support).",
+                "Injected pieces: the decider sequence in Mocked mode (none in Real mode) and adapt_fn=None in both.",
             ),
         )
         st.caption(
@@ -1048,11 +1200,17 @@ def render() -> None:
         value=_default_decider_json(level, preset),
         height=260,
         key=f"m07_decider_{level}_{preset}",
+        disabled=real_llm,
         help=two_section_help(
-            "One PlannerAction per loop turn, in order. Five action types exist: call_tool, revise_plan, finalize_plan, raise_conflict, and continue_deliberation (a free 'think' turn). When the list runs out the decider raises, which the loop counts as wasted turns until its cap.",
+            "One PlannerAction per loop turn, in order. Five action types exist: call_tool, revise_plan, finalize_plan, raise_conflict, and continue_deliberation (a free 'think' turn). When the list runs out the decider raises, which the loop counts as wasted turns until its cap. Ignored (disabled) in Real LLM mode — the production decider proposes each turn instead.",
             "Each entry is validated with PlannerAction.model_validate (extra='forbid') before the run starts.",
         ),
     )
+    if real_llm:
+        st.caption(
+            "Real LLM mode: the scripted sequence above is ignored; each turn is a live "
+            "structured-output call constrained to the PlannerAction schema."
+        )
 
     if st.button(
         "Run planner level",
@@ -1063,24 +1221,34 @@ def render() -> None:
         ),
     ):
         try:
-            raw_actions = json.loads(decider_text)
-            if not isinstance(raw_actions, list):
-                raise ValueError("the decider sequence must be a JSON list")
-            actions = [PlannerAction.model_validate(a) for a in raw_actions]
+            actions: list[PlannerAction] | None = None
+            if not real_llm:
+                raw_actions = json.loads(decider_text)
+                if not isinstance(raw_actions, list):
+                    raise ValueError("the decider sequence must be a JSON list")
+                actions = [PlannerAction.model_validate(a) for a in raw_actions]
             pointer = FSM_Pointer(
                 arc_id=arc_id,
                 chapter_id=chapter_id,
                 scene_id=scene_id,
                 beat_index=int(beat_index),
             )
-            st.session_state.m07_run = _run_level(
-                level,
-                paths,
-                pointer,
-                execution_mode,
-                "macro_outline" if approval else "off",
-                actions,
+            spinner_text = (
+                "Running planner level with REAL LLM calls (bounded by the level's "
+                "deliberation caps; retries on a slow endpoint take a while)…"
+                if real_llm
+                else "Running planner level with the scripted decider…"
             )
+            with st.spinner(spinner_text):
+                st.session_state.m07_run = _run_level(
+                    level,
+                    paths,
+                    pointer,
+                    execution_mode,
+                    "macro_outline" if approval else "off",
+                    actions,
+                    llm_mode=llm_mode,
+                )
         except Exception as exc:  # noqa: BLE001
             st.error(f"{type(exc).__name__}: {exc}")
 
