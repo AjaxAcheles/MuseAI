@@ -11,6 +11,7 @@
    - [M04 — Inference Boundary](#m04--inference-boundary)
    - [M05 — Prompt Loader](#m05--prompt-loader)
    - [M06 — Context Assembly & Budgeting](#m06--context-assembly--budgeting)
+   - [M07 — Planning Cascade](#m07--planning-cascade)
 5. [Debugging Techniques](#debugging-techniques)
 6. [Extending a Frontend for a New Module](#extending-a-frontend-for-a-new-module)
 7. [Streamlit Frontends vs. pytest — When to Use What](#streamlit-frontends-vs-pytest--when-to-use-what)
@@ -45,15 +46,20 @@ These frontends (`tests/frontends/m02_memory.py`, `m03_state.py`, etc.) are **in
 │  m03_state.py     ├── import real module code       │
 │  m04_inference.py │    no mocks, no stubs           │
 │  m05_prompt_loader│                                 │
-│  m06_context...   ┘                                 │
+│  m06_context...   │                                 │
+│  m07_planning.py  ┘                                 │
 ├─────────────────────────────────────────────────────┤
 │  shared.py  (workspace(), seed_narrative_data(),    │
-│              visual_config(), context_defaults())    │
+│              seed_planning_data(), visual_config(),  │
+│              context_defaults())                     │
 ├─────────────────────────────────────────────────────┤
 │  Production modules:                                │
 │  memory/sqlite_db.py   memory/event_log.py          │
 │  memory/provisional_store.py                        │
 │  fsm/state.py           fsm/nodes/...              │
+│  fsm/planning_loop.py   fsm/planning_validators.py  │
+│  fsm/planning_tools.py  fsm/planning_annotations.py │
+│  fsm/pad_translation.py                             │
 │  llm/tokenizer.py       llm/gbnf_compiler.py       │
 │  prompts/prompt_loader.py                           │
 ├─────────────────────────────────────────────────────┤
@@ -93,6 +99,17 @@ paths = workspace()
 
 Stable IDs (`arc-1` / `chapter-1` / `scene-1`, plus a `scene-1` beat at `beat_index` 2) mean the M02 and M06 forms resolve against the seeded data out of the box. The spread of confidences is designed so filtering by threshold produces predictable subsets — useful for verifying coreference tiering.
 
+`shared.seed_planning_data(db_path, *, event_log_path=None)` layers the M05 planning surface on top, through the real 07.00 planning-store helpers (no raw SQL):
+
+| Store | Content |
+|-------|---------|
+| PlanningSnapshot | `snap_proj-1` for project `proj-1` — the id the planner nodes derive themselves from `project_id='proj-1'` |
+| PlanningNode | 6 nodes: planned `global` / `arc:arc-1` / `chapter:chapter-1` / `scene:scene-1` (full plan JSON in `purpose`; scene-1 declares a `pad_target`), plus unplanned `chapter-2` / `chapter-3` stubs as chapter-planner targets |
+| PlanningAnnotation | 4 annotations: a soft global `tone` preference, a satisfiable hard constraint on chapter-1, and a deliberate hard-vs-hard `pin`/`remove` pair on the chapter-2 stub (the clarification demo) |
+| PlanningRevision | `rev-seed-1`, inserted through the real helper (advances `active_revision_id`) |
+
+Call `seed_narrative_data` first when narrative rows are needed (the M07 seed button does both); nothing is duplicated between the two.
+
 ### Config plumbing
 
 `shared.context_defaults()` reads `config.yaml` directly to populate slider ranges. `shared.visual_config()` builds a `SimpleNamespace` that mimics the real `app_config` dict shape, so context-assembly code runs without modification.
@@ -127,7 +144,7 @@ No mocks, no stubs, no monkey-patching. The code running under the UI is the sam
 uv run streamlit run tests/frontends/m02_memory.py
 ```
 
-Replace `m02_memory` with `m03_state`, `m04_inference`, `m05_prompt_loader`, or `m06_context_assembly`.
+Replace `m02_memory` with `m03_state`, `m04_inference`, `m05_prompt_loader`, `m06_context_assembly`, or `m07_planning`.
 
 ### Launcher with sidebar navigation
 
@@ -135,7 +152,7 @@ Replace `m02_memory` with `m03_state`, `m04_inference`, `m05_prompt_loader`, or 
 uv run streamlit run tests/frontends/run_all.py
 ```
 
-Opens a browser with a sidebar radio group to switch between all five visualizers.
+Opens a browser with a sidebar radio group to switch between all six visualizers.
 
 ### First-run
 
@@ -446,6 +463,56 @@ M06 is organized as a left-to-right runbook:
 
 ---
 
+### M07 — Planning Cascade
+
+**File:** `m07_planning.py`
+**Modules exercised:** `fsm/nodes/node_plan_{global,arc,chapter,scene,beat}.py`, `fsm/planning_loop.py`, `fsm/planning_validators.py`, `fsm/planning_tools.py` (`PlanningToolRegistry`), `fsm/planning_annotations.py` (`compile_planning_constraints`), `fsm/planning_node_support.py` (`persist_loop_outcome`), `fsm/pad_translation.py`, and the 07.00 planning-store helpers in `memory/sqlite_db.py`
+
+An interactive debugger for the five-level planner cascade — the bounded "model proposes, harness disposes" loop. The model is replaced by a **scripted decider**: an editable JSON list of `PlannerAction`s the loop consumes one per turn, so no live model or network is ever contacted (`call_llm` is never reached; the beat level's PAD translation runs with `adapt_fn=None`, the LLM-free static rung). Everything else is production code end-to-end: constraint compilation, the deliberation loop, validator gating, the fallback ladder, tool dispatch through the permission matrix, and persistence through the 07.00 helpers.
+
+#### Run controls
+
+| Control | Type | What it does |
+|---------|------|-------------|
+| **Seed planning stores** | Button | `seed_narrative_data` + `seed_planning_data` — the narrative rows plus the planning surface described under [Synthetic data seeding](#synthetic-data-seeding). Press first. |
+| **Reset temp workspace** | Button | Fresh workspace; also clears the marked conflict annotations and the last run. |
+| `planner level` | Select | `global` / `arc` / `chapter` / `scene` / `beat` — which production node to invoke. Each level anchors on the one above it. |
+| `planning.execution_mode` | Select | `macro_outline_before_draft` or `rolling`; folded into the synthetic state snapshot and the config-shaped object. |
+| `approval gate (macro_outline)` | Toggle | Sets `state['approval_mode']='macro_outline'`; read by the chapter planner at macro-scope completion (arms `awaiting_planning_approval` — the node only sets state, never blocks). |
+| `decider preset` | Select | `valid finalize` (level-shaped, validator-passing plan; the global preset also scripts a think turn and a tool call) or `always-invalid finalize` (no validator accepts it — the ladder demo). |
+| FSM pointer fields | 4 inputs | `arc_id` / `chapter_id` / `scene_id` / `beat_index`. Defaults resolve against the seed: `chapter-1` is planned (scene runs work), `chapter-2` carries the hard-vs-hard conflict, `chapter-3` is the clean unplanned stub. |
+| `scripted decider sequence` | Text area | The JSON list of `PlannerAction`s, strict-validated (`extra='forbid'`) before the run. When the list runs out the decider raises — the loop counts wasted turns to its cap and the fallback ladder takes over. |
+| **Run planner level** | Primary button | Builds the synthetic orchestrator state and executes the real async node with the injected decider. |
+
+#### Output panels
+
+| Panel | Content |
+|-------|---------|
+| Run outcome | Rung taken, active revision, block reason, readiness flags, and the returned orchestrator-state fields (incl. the advanced `fsm_pointer`). |
+| Deliberation trace | Every loop turn in order — think turns, tool calls (executed / refused / cache-reused), revise/finalize validation verdicts, raised conflicts — plus the node's phase records (constraint compilation, PAD grounding, anchor resolution). |
+| Compiled constraints | The planner-ready package for the run's target node: hard vs soft buckets, pinned protections, conflict signals. |
+| Validator results | Pass/fail per configured required check (`config.yaml planning.planner_required_checks[level]`), re-run live via `REQUIRED_CHECK_REGISTRY` against the persisted plan when one exists. |
+| Fallback ladder | The five rungs (`finalized` / `best_valid` / `baseline` / `needs_clarification` / `escalate`) with the taken rung highlighted. |
+| Persisted structures | `PlanningNode` rows created/changed, the `PlanningRevision` with parsed `diff_json`, and the `planning_commit` event-log mirror. |
+| PAD grounding (beat only) | Smoothed PAD target, region key + `pad_regions.json` entry, EWMA alpha from config, translation rung, the prior per-character PAD rows, and the persisted behavioural-constraint string (harness-owned — it overrides whatever the decider claimed). |
+| PlannerToolCallTrace | Every registry call — executed, degraded (not-yet-built store), and rejected (unknown / disallowed tool) — with bounded, redacted arg/result summaries. |
+| Raw planning store | Expander with the snapshot row and full node / annotation / revision tables. |
+
+**Edge cases to exercise:**
+
+- Select the `always-invalid finalize` preset — the loop burns its budget, the ladder falls to `baseline` (the level's deterministic baseline validates), and the invalid plan is never persisted
+- Run `chapter` with the default pointer — the sweep picks the `chapter-2` stub, the compiler detects the seeded hard `pin`/`remove` pair, both annotations are marked `needs_clarification`, and nothing is persisted; re-running stays blocked (the marks survive) until you reset
+- Run a level **without seeding** — the node finds no anchor (`no_planned_scene` / `no_chapter_stubs`) and returns with only a phase trace
+- Script a `call_tool` for a tool outside the level's permission matrix (e.g. `read_beats` at `global`) — refused in the trace; an unknown tool name is rejected *and* traced in PlannerToolCallTrace
+- Script the same `call_tool` twice in one run — the second is served from the intra-loop cache (`reused cached result`) without consuming the tool budget
+- Script only `continue_deliberation` turns — the loop runs to its cap with zero wasted turns, then the ladder decides
+- Set `thresholds.pad_ewma_alpha` in `config.yaml` to `0` or `1` and run `beat` — the smoothed target collapses to the prior (alpha 0) or the scene's proposed affect (alpha 1); the region key and behavioural string follow
+- Run `scene` repeatedly — `ordering` stays monotonic and gapless across ≥2 scenes and colliding `scene_id`s are reallocated (`{chapter_id}_s{n}`)
+- Run `beat` repeatedly — `beat_index` advances 0, 1, 2…; watch `scene_needs_more` flip once the scene's `word_budget` and `runtime.beats_per_scene_min` are both satisfied
+- Edit a finalize plan to include a `prose` field — `no_drafting` fails the finalize at every level (the proposal-surface boundary)
+
+---
+
 ## Debugging Techniques
 
 ### Viewing errors
@@ -548,4 +615,4 @@ if submitted:
 
 ---
 
-*Last updated: 2026-06-27*
+*Last updated: 2026-07-02*

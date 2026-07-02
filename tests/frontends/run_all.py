@@ -1,4 +1,4 @@
-"""Module: M02-M06 (Visualization Test Frontends)
+"""Module: M02-M07 (Visualization Test Frontends)
 Streamlit launcher for completed-module visualizers.
 """
 
@@ -23,6 +23,7 @@ import m03_state
 import m04_inference
 import m05_prompt_loader
 import m06_context_assembly
+import m07_planning
 
 PAGES = {
     "M02 Persistent Memory": m02_memory.render,
@@ -30,6 +31,7 @@ PAGES = {
     "M04 Inference Boundary": m04_inference.render,
     "M05 Prompt Loader": m05_prompt_loader.render,
     "M06 Context Assembly": m06_context_assembly.render,
+    "M07 Planning Cascade": m07_planning.render,
 }
 
 

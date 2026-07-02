@@ -20,7 +20,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from memory import provisional_store, sqlite_db
+from memory import event_log, provisional_store, sqlite_db
 
 UX_CSS = """
 <style>
@@ -638,6 +638,323 @@ def seed_narrative_data(db_path: str | Path, provisional_path: str | Path) -> No
             claim_text=claim_text,
             confidence=confidence,
             status="provisional",
+        )
+
+
+# --- planning-surface seed (M05 visualizer) ---------------------------------
+
+# Stable planning identifiers, mirroring the narrative seed's `arc-1`/`chapter-1`/
+# `scene-1` convention. The planner nodes derive `snap_{project_id}` when no snapshot
+# is in state, so `PLANNING_SNAPSHOT_ID` matches what a run with
+# `project_id=PLANNING_PROJECT_ID` resolves on its own.
+PLANNING_PROJECT_ID = "proj-1"
+PLANNING_SNAPSHOT_ID = "snap_proj-1"
+
+_SEED_GLOBAL_PLAN = {
+    "premise": (
+        "Elena Marchetti leaves a glass-tower marketing career to revive The Paper "
+        "Petal, a failing bookshop in Willow Creek, and falls slowly for Marcus Hale, "
+        "the town's quiet carpenter."
+    ),
+    "central_conflict": (
+        "Elena must decide whether to fight for the failing shop and the fragile new "
+        "life it holds, or retreat to the safe city career that never asked anything "
+        "of her."
+    ),
+    "ending_target": (
+        "Elena chooses to stay; she and Marcus finally say the thing out loud under "
+        "the finished shelves."
+    ),
+    "arcs": [
+        {
+            "arc_id": "arc-1",
+            "title": "The Paper Petal",
+            "function": "establish Elena in Willow Creek and kindle the slow-burn romance",
+            "word_allocation": 50000,
+        },
+        {
+            "arc_id": "arc-2",
+            "title": "Staying",
+            "function": "strain the shop and the romance, then resolve both through Elena's choice",
+            "word_allocation": 30000,
+        },
+    ],
+    "promises": [
+        {
+            "id": "promise-slow-burn",
+            "promise": "The slow-burn between Elena and Marcus will be answered on the page.",
+            "payoff": "In the final chapter they say it out loud under the new shelves.",
+        },
+        {
+            "id": "promise-shop",
+            "promise": "The Paper Petal's survival is genuinely in doubt.",
+            "payoff": "The town rallies and the ledger finally turns as Elena commits.",
+        },
+    ],
+}
+
+_SEED_ARC_PLAN = {
+    "arc_id": "arc-1",
+    "title": "The Paper Petal",
+    "function": "establish Elena in Willow Creek and kindle the slow-burn romance",
+    "character_milestones": [
+        "Elena commits to the shop",
+        "Marcus lets himself be seen",
+    ],
+    "chapters": [
+        {"chapter_id": "chapter-1", "stub": "Opening day: Elena meets the town and Marcus"},
+        {"chapter_id": "chapter-2", "stub": "Growing closer: rain, the book club, and coffee"},
+        {"chapter_id": "chapter-3", "stub": "The misunderstanding: Rosa's visit and the ledger"},
+    ],
+}
+
+_SEED_CHAPTER_1_PLAN = {
+    "chapter_id": "chapter-1",
+    "dramatic_function": (
+        "establish Elena in Willow Creek and put her and Marcus in the same room"
+    ),
+    "expected_emotional_shift": "nervous hope settles into cautious belonging",
+    "pacing": "unhurried, scene-setting, warm",
+    "obligations": {
+        "thread_obligations": [
+            {
+                "thread_id": "thread-belonging",
+                "required_progress": "Elena starts to feel the town might keep her",
+            }
+        ],
+        "causal_prerequisites": ["Elena has signed for the shop and moved to Willow Creek"],
+        "causal_deliverables": ["Elena and Marcus have met and the shelves are commissioned"],
+    },
+    "annotation_outcomes": {},
+    "scene_planning_constraints": [
+        "every scene stays inside Willow Creek's town square"
+    ],
+}
+
+_SEED_SCENE_1_PLAN = {
+    "scene_id": "scene-1",
+    "scene_function": (
+        "Elena opens The Paper Petal for the first time and the town takes notice"
+    ),
+    "setting": "The Paper Petal bookshop, opening morning",
+    "participants": ["char-elena", "char-clara"],
+    "entry_state": "the shop is ready but untested; Elena's heart is hammering",
+    "exit_state": "the first day is survived and Clara's cookies have made it a welcome",
+    "conflict_turn": "excitement collides with the fear of having bet everything",
+    "asserted_facts": [],
+    "continuity_constraints": [],
+    "word_budget": 500,
+    "pad_target": {"pleasure": 0.70, "arousal": 0.55, "dominance": 0.45},
+}
+
+
+def seed_planning_data(db_path: str | Path, *, event_log_path: str | Path | None = None) -> None:
+    """Seed a small, deterministic M05 planning surface through the real 07.00 helpers.
+
+    Layers planning rows on top of the narrative seed (call ``seed_narrative_data``
+    first when narrative rows — committed PAD history, ``Scenes`` word budgets — are
+    wanted; nothing here duplicates it). Everything is written via the 07.00
+    planning-store helpers, no raw SQL. Idempotent: snapshot/node writes upsert by
+    key; annotation/revision inserts are ``ON CONFLICT DO NOTHING``.
+
+    Seeded surface (stable IDs, mirroring ``arc-1``/``chapter-1``/``scene-1``):
+
+    * ``PlanningSnapshot`` ``snap_proj-1`` (project ``proj-1``) — the id the planner
+      nodes derive on their own from ``project_id='proj-1'``.
+    * ``PlanningNode`` rows: ``snap_proj-1:global`` (planned, full global plan JSON in
+      ``purpose``), ``snap_proj-1:arc:arc-1`` (planned, chapter stubs listed),
+      ``snap_proj-1:chapter:chapter-1`` (planned — so the SCENE level can run against
+      pointer ``chapter-1``), ``snap_proj-1:chapter:chapter-2`` and ``:chapter-3``
+      (unplanned stubs — chapter-planner targets), and ``snap_proj-1:scene:scene-1``
+      (planned, with a declared ``pad_target`` — so the BEAT level's PAD pipeline has
+      a scene-declared affect to smooth toward).
+    * ``PlanningAnnotation`` rows: one **soft** global tone preference; one hard
+      constraint on ``chapter-1``; and one deliberate **hard-vs-hard conflict pair**
+      (``pin`` vs ``remove``, both ``priority='hard'``, ``scope='this_node'``) on the
+      ``chapter-2`` stub. The chapter planner picks the first unplanned chapter —
+      ``chapter-2`` — so a default chapter run demonstrates the clarification path;
+      point ``fsm_pointer.chapter_id`` at ``chapter-3`` for a clean chapter run.
+    * ``PlanningRevision`` ``rev-seed-1`` — inserted through the real helper, which
+      also advances the snapshot's ``active_revision_id``.
+
+    When ``event_log_path`` is given, one ``planning_seed`` event is appended so the
+    event-log panel starts non-empty.
+    """
+
+    sqlite_db.create_planning_snapshot(
+        db_path,
+        snapshot_id=PLANNING_SNAPSHOT_ID,
+        project_id=PLANNING_PROJECT_ID,
+        mode="macro_outline_before_draft",
+    )
+
+    global_node = f"{PLANNING_SNAPSHOT_ID}:global"
+    arc_node = f"{PLANNING_SNAPSHOT_ID}:arc:arc-1"
+    chapter_1_node = f"{PLANNING_SNAPSHOT_ID}:chapter:chapter-1"
+    chapter_2_node = f"{PLANNING_SNAPSHOT_ID}:chapter:chapter-2"
+    chapter_3_node = f"{PLANNING_SNAPSHOT_ID}:chapter:chapter-3"
+    scene_1_node = f"{PLANNING_SNAPSHOT_ID}:scene:scene-1"
+
+    sqlite_db.upsert_planning_node(
+        db_path,
+        node_id=global_node,
+        snapshot_id=PLANNING_SNAPSHOT_ID,
+        level="global",
+        status="planned",
+        ordering=0,
+        title="The Paper Petal (global plan)",
+        summary=_SEED_GLOBAL_PLAN["premise"],
+        purpose=json.dumps(_SEED_GLOBAL_PLAN, sort_keys=True),
+    )
+    sqlite_db.upsert_planning_node(
+        db_path,
+        node_id=arc_node,
+        snapshot_id=PLANNING_SNAPSHOT_ID,
+        level="arc",
+        status="planned",
+        parent_id=global_node,
+        ordering=0,
+        title="The Paper Petal",
+        summary=_SEED_ARC_PLAN["function"],
+        purpose=json.dumps(_SEED_ARC_PLAN, sort_keys=True),
+    )
+    sqlite_db.upsert_planning_node(
+        db_path,
+        node_id=chapter_1_node,
+        snapshot_id=PLANNING_SNAPSHOT_ID,
+        level="chapter",
+        status="planned",
+        parent_id=arc_node,
+        ordering=0,
+        title="Opening day: Elena meets the town and Marcus",
+        summary=_SEED_CHAPTER_1_PLAN["dramatic_function"],
+        purpose=json.dumps(_SEED_CHAPTER_1_PLAN, sort_keys=True),
+    )
+    # Unplanned chapter stubs (no `dramatic_function` in purpose), exactly as the arc
+    # planner writes them — these are what `node_plan_chapter` selects as targets.
+    sqlite_db.upsert_planning_node(
+        db_path,
+        node_id=chapter_2_node,
+        snapshot_id=PLANNING_SNAPSHOT_ID,
+        level="chapter",
+        status="planning",
+        parent_id=arc_node,
+        ordering=1,
+        title="Growing closer: rain, the book club, and coffee",
+    )
+    sqlite_db.upsert_planning_node(
+        db_path,
+        node_id=chapter_3_node,
+        snapshot_id=PLANNING_SNAPSHOT_ID,
+        level="chapter",
+        status="planning",
+        parent_id=arc_node,
+        ordering=2,
+        title="The misunderstanding: Rosa's visit and the ledger",
+    )
+    sqlite_db.upsert_planning_node(
+        db_path,
+        node_id=scene_1_node,
+        snapshot_id=PLANNING_SNAPSHOT_ID,
+        level="scene",
+        status="planned",
+        parent_id=chapter_1_node,
+        ordering=0,
+        title="The Paper Petal, opening morning",
+        summary=_SEED_SCENE_1_PLAN["scene_function"],
+        purpose=json.dumps(_SEED_SCENE_1_PLAN, sort_keys=True),
+    )
+
+    # One SOFT preference (reaches every compile via scope='global') ...
+    sqlite_db.insert_planning_annotation(
+        db_path,
+        annotation_id="ann-tone-cozy",
+        snapshot_id=PLANNING_SNAPSHOT_ID,
+        target_node_id=global_node,
+        target_level="global",
+        note_type="tone",
+        scope="global",
+        priority="normal",
+        text="Keep the register cozy and understated; warmth over melodrama.",
+    )
+    # ... one satisfiable HARD constraint on the planned chapter-1 ...
+    sqlite_db.insert_planning_annotation(
+        db_path,
+        annotation_id="ann-hard-slow-burn",
+        snapshot_id=PLANNING_SNAPSHOT_ID,
+        target_node_id=chapter_1_node,
+        target_level="chapter",
+        note_type="constraint",
+        scope="this_node",
+        priority="hard",
+        text="Elena and Marcus must not kiss before the misunderstanding is resolved.",
+    )
+    # ... and a deliberate HARD-vs-HARD conflict pair (pin vs remove on the same node)
+    # on the chapter-2 stub, so the compiler's clarification path is demonstrable.
+    sqlite_db.insert_planning_annotation(
+        db_path,
+        annotation_id="ann-hard-pin-ch2",
+        snapshot_id=PLANNING_SNAPSHOT_ID,
+        target_node_id=chapter_2_node,
+        target_level="chapter",
+        note_type="pin",
+        scope="this_node",
+        priority="hard",
+        text="Keep the book-club chapter exactly where it is.",
+    )
+    sqlite_db.insert_planning_annotation(
+        db_path,
+        annotation_id="ann-hard-remove-ch2",
+        snapshot_id=PLANNING_SNAPSHOT_ID,
+        target_node_id=chapter_2_node,
+        target_level="chapter",
+        note_type="remove",
+        scope="this_node",
+        priority="hard",
+        text="Cut the book-club chapter; fold its beats into the opening chapter.",
+    )
+
+    # One revision, through the real helper — advances `active_revision_id`.
+    sqlite_db.insert_planning_revision(
+        db_path,
+        revision_id="rev-seed-1",
+        snapshot_id=PLANNING_SNAPSHOT_ID,
+        diff_json=json.dumps(
+            {
+                "added_nodes": [
+                    global_node,
+                    arc_node,
+                    chapter_1_node,
+                    chapter_2_node,
+                    chapter_3_node,
+                    scene_1_node,
+                ],
+                "removed_nodes": [],
+                "modified_nodes": [],
+                "annotation_outcomes": [],
+                "note": "initial seeded macro outline",
+            },
+            sort_keys=True,
+        ),
+        change_summary="seeded planning surface (global -> arc-1 -> chapters 1-3, scene-1)",
+    )
+
+    if event_log_path is not None:
+        event_log.write_event(
+            event_log_path,
+            {
+                "event_type": "planning_seed",
+                "snapshot_id": PLANNING_SNAPSHOT_ID,
+                "revision_id": "rev-seed-1",
+                "node_ids": [
+                    global_node,
+                    arc_node,
+                    chapter_1_node,
+                    chapter_2_node,
+                    chapter_3_node,
+                    scene_1_node,
+                ],
+            },
         )
 
 
