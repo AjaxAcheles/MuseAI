@@ -47,9 +47,9 @@ class Settings:
     drafting_model: str = os.environ.get("MUSEAI_DRAFTING_MODEL", "claude-opus-4-8")
     planning_provider: str = field(default_factory=lambda: _provider("MUSEAI_PLANNING_PROVIDER"))
     drafting_provider: str = field(default_factory=lambda: _provider("MUSEAI_DRAFTING_PROVIDER"))
-    # OpenAI-compatible local server (default: Ollama). The OpenAI SDK requires a
-    # non-empty api_key even when the server ignores it.
-    local_base_url: str = os.environ.get("MUSEAI_LOCAL_BASE_URL", "http://localhost:11434/v1")
+    # Local Ollama server. This is the exact URL posted to (its native generate
+    # endpoint) — nothing is appended to the path.
+    local_base_url: str = os.environ.get("MUSEAI_LOCAL_BASE_URL", "http://localhost:11434/api/generate")
     local_api_key: str = os.environ.get("MUSEAI_LOCAL_API_KEY", "ollama")
     db_path: str = os.environ.get("MUSEAI_DB_PATH", "museai.db")
     host: str = os.environ.get("MUSEAI_HOST", "localhost")
