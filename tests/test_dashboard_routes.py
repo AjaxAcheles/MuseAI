@@ -67,8 +67,9 @@ def test_dashboard_renders_expected_anchors(isolated_resources):
             for anchor in (
                 'id="status-ribbon"',
                 'id="run-status"',
-                'id="planning-snapshot-card"',
-                'id="planning-node-card"',
+                'id="project-setup-card"',
+                'id="planning-timeline-card"',
+                'id="approval-card"',
                 'id="block-card"',
                 'id="event-stream-card"',
                 'id="btn-start"',
@@ -136,7 +137,10 @@ def test_control_start_and_stop_return_consistent_json(isolated_resources):
         async with app.test_app() as test_app:
             client = test_app.test_client()
 
-            start = await client.post("/control/start", json={})
+            start = await client.post(
+                "/control/start",
+                json={"premise": "A courier must deliver a letter across a siege."},
+            )
             start_body = await start.get_json()
             assert set(start_body) >= {"ok", "status", "message"}
             assert start_body["ok"] is True

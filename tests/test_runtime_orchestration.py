@@ -28,6 +28,9 @@ _ENDPOINT_ENV_KEYS = (
 
 _SNAPSHOT_ID = "snap_vertical_slice"  # derived from the default project id
 
+# Minimal valid product payload: the premise is required at the manager level.
+_START_PAYLOAD = {"premise": "A keeper must honor a lighthouse vow before the harbor fails."}
+
 
 @pytest.fixture
 def fake_secrets(monkeypatch):
@@ -89,7 +92,7 @@ def test_generation_manager_deterministic_run_completes(resources):
         manager = GenerationManager(resources)
         resources.generation_manager = manager
 
-        started = await manager.start()
+        started = await manager.start(dict(_START_PAYLOAD))
         assert started["ok"] is True
         assert started["status"] == "starting"
 
@@ -128,9 +131,9 @@ def test_duplicate_start_is_rejected_clearly(resources):
         manager = GenerationManager(resources)
         resources.generation_manager = manager
 
-        first = await manager.start()
+        first = await manager.start(dict(_START_PAYLOAD))
         assert first["ok"] is True
-        duplicate = await manager.start()
+        duplicate = await manager.start(dict(_START_PAYLOAD))
         assert duplicate["ok"] is False
         assert "already active" in duplicate["message"]
 
@@ -146,7 +149,7 @@ def test_stop_cancels_a_running_task(resources):
         manager = GenerationManager(resources)
         resources.generation_manager = manager
 
-        await manager.start()
+        await manager.start(dict(_START_PAYLOAD))
         result = await manager.stop()
         assert result["ok"] is True
         assert manager.status()["status"] == "stopped"
@@ -165,11 +168,14 @@ def test_invalid_start_payload_is_rejected(resources):
         manager = GenerationManager(resources)
         resources.generation_manager = manager
 
-        bad_mode = await manager.start({"llm_mode": "bogus"})
+        bad_mode = await manager.start({**_START_PAYLOAD, "llm_mode": "bogus"})
         assert bad_mode["ok"] is False and "llm_mode" in bad_mode["message"]
 
-        bad_key = await manager.start({"config_path": "/etc/passwd"})
+        bad_key = await manager.start({**_START_PAYLOAD, "config_path": "/etc/passwd"})
         assert bad_key["ok"] is False and "Unknown start field" in bad_key["message"]
+
+        no_premise = await manager.start({})
+        assert no_premise["ok"] is False and "premise" in no_premise["message"]
 
         assert manager.status()["running"] is False
 
@@ -183,7 +189,7 @@ def test_missing_live_llm_endpoint_does_not_break_deterministic_path(resources):
     async def scenario():
         manager = GenerationManager(resources)
         resources.generation_manager = manager
-        await manager.start({"llm_mode": "deterministic"})
+        await manager.start({**_START_PAYLOAD, "llm_mode": "deterministic"})
         await manager.join()
         status = manager.status()
         assert status["status"] == "completed"

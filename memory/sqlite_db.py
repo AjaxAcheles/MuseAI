@@ -826,6 +826,20 @@ def get_planning_snapshot(db_path: str | Path, snapshot_id: str) -> dict | None:
     )
 
 
+def get_planning_snapshots(db_path: str | Path) -> list[dict]:
+    """Return all PlanningSnapshot rows, newest-first by ``created_at``.
+
+    ``snapshot_id`` is the deterministic secondary sort so equal timestamps
+    still read back in a stable order. Lets an observer surface find the
+    latest persisted snapshot without tracking ids in memory.
+    """
+    return _read_all(
+        db_path,
+        "SELECT * FROM PlanningSnapshot ORDER BY created_at DESC, snapshot_id DESC",
+        (),
+    )
+
+
 # --- PlanningNode ----------------------------------------------------------------
 # Upsert keyed by node_id so a replanned node updates in place rather than duplicating.
 _PLANNING_NODE_UPSERT = """

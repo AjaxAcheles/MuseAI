@@ -18,13 +18,21 @@ through each node's injectable decider seam:
 Execution modes follow the design: ``macro_outline_before_draft`` plans global
 + all arcs + all chapters as the macro outline, then one scene + one beat
 just-in-time; ``rolling`` plans one global → arc → chapter → scene → beat path.
-Approval blocking uses ``awaiting_planning_approval``/``planning_block_reason``
-only — never ``pause_requested``/``hard_stop_asserted``. No drafting module is
-routed to.
+The run-start mode snapshot is read from state (set by the generation manager
+from the validated start payload, with config as its default) — never from
+config at node time.
+
+The macro-outline approval gate is real: with a generation manager attached the
+runner parks on ``manager.wait_for_approval()`` (cancellable by Stop) and, once
+approved, stamps the PlanningSnapshot ``approved`` and resumes into scene/beat
+planning. Approval blocking uses ``awaiting_planning_approval`` /
+``planning_block_reason`` only — never ``pause_requested`` /
+``hard_stop_asserted``. No drafting module is routed to.
 """
 
 from __future__ import annotations
 
+import datetime as _dt
 from collections import Counter
 from typing import Any, Awaitable, Callable
 
@@ -40,6 +48,8 @@ EmitFn = Callable[[str, dict[str, Any]], Awaitable[None]]
 
 # Vertical-slice model modes. "deterministic" never touches the network.
 LLM_MODES = ("deterministic", "live")
+
+APPROVAL_BLOCK_REASON = "awaiting_macro_approval"
 
 _DETERMINISTIC_RATIONALE = (
     "Deterministic vertical-slice run: no model attached; defer to the "
@@ -65,6 +75,24 @@ def make_deterministic_decider() -> Callable[[Any], PlannerAction]:
     return decider
 
 
+def _utc_now_iso() -> str:
+    return _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _pointer_text(pointer_data: dict[str, Any]) -> str:
+    parts = []
+    for label, key in (
+        ("arc", "arc_id"),
+        ("ch", "chapter_id"),
+        ("scene", "scene_id"),
+        ("beat", "beat_id"),
+    ):
+        value = pointer_data.get(key)
+        if value:
+            parts.append(f"{label} {value}")
+    return " · ".join(parts) if parts else "start of book"
+
+
 def _snapshot_payload(state: dict[str, Any]) -> dict[str, Any] | None:
     """Read the current PlanningSnapshot surface for the UI, or None if absent."""
     snapshot_id = state.get("planning_snapshot_id")
@@ -76,14 +104,17 @@ def _snapshot_payload(state: dict[str, Any]) -> dict[str, Any] | None:
         return None
     nodes = sqlite_db.get_planning_nodes(db_path, snapshot_id)
     revisions = sqlite_db.get_revisions_for_snapshot(db_path, snapshot_id)
+    counts = dict(Counter(node.get("level") for node in nodes))
+    counts_text = ", ".join(f"{level}: {n}" for level, n in sorted(counts.items()))
     return {
         "snapshot_id": snapshot_id,
         "status": snapshot.get("status"),
         "mode": snapshot.get("mode"),
         "active_revision_id": snapshot.get("active_revision_id"),
-        "node_counts": dict(Counter(node.get("level") for node in nodes)),
+        "node_counts": counts,
         "revision_count": len(revisions),
         "macro_outline_ready": bool(state.get("macro_outline_ready")),
+        "message": f"Snapshot {snapshot.get('status')} — {counts_text or 'no nodes yet'}",
     }
 
 
@@ -101,18 +132,25 @@ async def run_planning_vertical_slice(
 ) -> dict[str, Any]:
     """Run the planning cascade for one vertical-slice pass and return the state.
 
-    The returned state is "blocked" when ``planning_block_reason`` is set
-    (approval gate, unresolved hard conflict, or planning escalation); the
-    caller decides how to present that. Exceptions propagate to the caller.
+    The returned state is "blocked" when ``planning_block_reason`` is set and
+    could not be resolved in-run (unresolved hard conflict, escalation, or an
+    approval gate with no manager attached to resume through); the caller
+    decides how to present that. Exceptions propagate to the caller.
     """
     config = state.get("app_config") or state.get("config")
     if config is None:
         raise ValueError("state['app_config'] must carry the typed AppConfig")
 
-    # Snapshot the run's modes from config once, at run start (§1.1 contract:
-    # nodes read these from state, never from config at node time).
-    execution_mode = config.planning.execution_mode
-    approval_mode = config.planning.approval_mode
+    def log(event: str, **fields: Any) -> None:
+        log_fn = getattr(resources, "log", None)
+        if callable(log_fn):
+            log_fn(event, **fields)
+
+    # Run-start mode snapshot: set by the manager from the validated start
+    # payload (config is the payload's default). Fall back to config only when
+    # a bare runner is driven without the manager having set them.
+    execution_mode = state.get("planning_execution_mode") or config.planning.execution_mode
+    approval_mode = state.get("approval_mode") or config.planning.approval_mode
     state["planning_execution_mode"] = execution_mode
     state["approval_mode"] = approval_mode
 
@@ -129,33 +167,51 @@ async def run_planning_vertical_slice(
             "planning_execution_mode": execution_mode,
             "approval_mode": approval_mode,
             "llm_mode": llm_mode,
+            "message": f"Planning started ({execution_mode}, approval {approval_mode}).",
         },
     )
 
     last_snapshot_payload: dict[str, Any] | None = None
 
-    async def run_node(name: str, invoke: Callable[[], Awaitable[dict]]) -> bool:
-        """Invoke one planner node, emit its telemetry, return True if blocked."""
+    async def run_node(
+        name: str, invoke: Callable[[], Awaitable[dict]]
+    ) -> str | None:
+        """Invoke one planner node, emit its telemetry, return its block reason."""
         nonlocal state, last_snapshot_payload
         revision_before = state.get("active_planning_revision_id")
         trace_before = len(state.get("planner_deliberation_trace") or [])
+        log("node_start", node=name)
 
         state = await invoke()
 
         pointer = state.get("fsm_pointer")
         pointer_data = pointer.model_dump() if pointer is not None else {}
-        await emit("pointer_update", pointer_data)
+        await emit(
+            "pointer_update",
+            {**pointer_data, "message": f"Pointer: {_pointer_text(pointer_data)}"},
+        )
+        log("pointer_update", pointer=pointer_data)
 
         trace = state.get("planner_deliberation_trace") or []
         new_records = trace[trace_before:]
         revision_id = state.get("active_planning_revision_id")
+        revision_changed = revision_id != revision_before
         block_reason = state.get("planning_block_reason")
+        if block_reason:
+            node_message = f"{name} blocked: {block_reason}"
+        elif revision_changed:
+            node_message = (
+                f"{name} persisted revision {revision_id} "
+                f"({len(new_records)} deliberation turns)"
+            )
+        else:
+            node_message = f"{name} made no plan change ({len(new_records)} turns)"
         await emit(
             "planning_node",
             {
                 "node": name,
                 "revision_id": revision_id,
-                "revision_changed": revision_id != revision_before,
+                "revision_changed": revision_changed,
                 "deliberation_turns": len(new_records),
                 "actions": [
                     record.get("action_type") or record.get("phase")
@@ -164,38 +220,41 @@ async def run_planning_vertical_slice(
                 ],
                 "block_reason": block_reason,
                 "pointer": pointer_data,
+                "message": node_message,
             },
+        )
+        log(
+            "node_end",
+            node=name,
+            revision_id=revision_id,
+            revision_changed=revision_changed,
+            turns=len(new_records),
+            block_reason=block_reason,
         )
 
         snapshot_payload = _snapshot_payload(state)
         if snapshot_payload is not None and snapshot_payload != last_snapshot_payload:
             last_snapshot_payload = snapshot_payload
             await emit("planning_snapshot", snapshot_payload)
+            log(
+                "snapshot_update",
+                snapshot_id=snapshot_payload["snapshot_id"],
+                status=snapshot_payload["status"],
+                revision_count=snapshot_payload["revision_count"],
+            )
 
-        if block_reason:
+        if block_reason and block_reason != APPROVAL_BLOCK_REASON:
             await emit(
                 "planning_blocked",
                 {
                     "reason": block_reason,
                     "node": name,
-                    "awaiting_approval": bool(state.get("awaiting_planning_approval")),
+                    "awaiting_approval": False,
+                    "message": f"Planning blocked at {name}: {block_reason}",
                 },
             )
-            if state.get("awaiting_planning_approval"):
-                await emit(
-                    "approval_state",
-                    {
-                        "awaiting_approval": True,
-                        "macro_outline_ready": bool(state.get("macro_outline_ready")),
-                        "macro_outline_approved": bool(state.get("macro_outline_approved")),
-                        "note": (
-                            "Approval gate reached. Approval resume is not "
-                            "implemented in this vertical slice."
-                        ),
-                    },
-                )
-            return True
-        return False
+            log("planning_blocked", node=name, reason=block_reason)
+        return block_reason
 
     # --- Level 1 + 2: global, then arcs (one invocation plans all arc slots). --
     if await run_node(
@@ -222,10 +281,13 @@ async def run_planning_vertical_slice(
         for _ in range(max(chapter_stub_count, 1) + 1):
             await _pause_gate(resources)
             revision_before = state.get("active_planning_revision_id")
-            if await run_node(
+            reason = await run_node(
                 "node_plan_chapter",
                 lambda: node_plan_chapter(state, decider=decider),
-            ):
+            )
+            if reason == APPROVAL_BLOCK_REASON:
+                break  # gate handling below
+            if reason:
                 return state
             if state.get("macro_outline_ready"):
                 break
@@ -239,10 +301,64 @@ async def run_planning_vertical_slice(
                 "chapter sweep exceeded the planned chapter count without "
                 "reaching macro-outline readiness"
             )
+
+        # --- Macro-outline approval gate (safe-boundary pause, not a failure).
         if state.get("awaiting_planning_approval"):
-            # Defensive: the chapter node emits its own block reason; this
-            # branch only guards an approval pause without a block reason.
-            return state
+            await emit(
+                "phase_change",
+                {
+                    "phase": "awaiting_approval",
+                    "message": "Macro outline ready — awaiting approval.",
+                },
+            )
+            await emit(
+                "planning_blocked",
+                {
+                    "reason": APPROVAL_BLOCK_REASON,
+                    "node": "node_plan_chapter",
+                    "awaiting_approval": True,
+                    "message": "Macro outline ready; planning paused for approval.",
+                },
+            )
+            await emit(
+                "approval_state",
+                {
+                    "awaiting_approval": True,
+                    "macro_outline_ready": bool(state.get("macro_outline_ready")),
+                    "macro_outline_approved": False,
+                    "message": "Review the macro outline and approve to continue.",
+                },
+            )
+            manager = getattr(resources, "generation_manager", None)
+            if manager is None or not hasattr(manager, "wait_for_approval"):
+                # Bare runner (no manager to resume through): return blocked.
+                return state
+
+            await manager.wait_for_approval()  # cancellable; released by /plan/approve
+
+            state["macro_outline_approved"] = True
+            state["awaiting_planning_approval"] = False
+            state["planning_block_reason"] = None
+            sqlite_db.transition_snapshot_status(
+                state["sqlite_db_path"],
+                state["planning_snapshot_id"],
+                status="approved",
+                approved_at=_utc_now_iso(),
+            )
+            log("approval_applied", snapshot_id=state.get("planning_snapshot_id"))
+            await emit(
+                "approval_state",
+                {
+                    "awaiting_approval": False,
+                    "macro_outline_ready": True,
+                    "macro_outline_approved": True,
+                    "message": "Macro outline approved; resuming into scene/beat planning.",
+                },
+            )
+            await emit(
+                "phase_change",
+                {"phase": "planning", "message": "Resumed just-in-time scene/beat planning."},
+            )
     else:
         await _pause_gate(resources)
         if await run_node(
@@ -265,6 +381,10 @@ async def run_planning_vertical_slice(
     ):
         return state
 
+    await emit(
+        "phase_change",
+        {"phase": "completed", "message": "Planning vertical slice finished."},
+    )
     await emit(
         "done",
         {

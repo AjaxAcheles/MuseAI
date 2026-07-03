@@ -19,11 +19,11 @@ import os
 
 from hypercorn.asyncio import serve
 from hypercorn.config import Config
-from quart import Quart, redirect, url_for
+from quart import Quart, redirect, request, url_for
 
 import core.runtime as runtime
 from core.generation_manager import GenerationManager
-from routes import control, dashboard
+from routes import control, dashboard, plan
 
 logger = logging.getLogger(__name__)
 
@@ -36,19 +36,32 @@ def create_app() -> Quart:
     app = Quart(__name__)
     app.register_blueprint(dashboard.create_blueprint())
     app.register_blueprint(control.create_blueprint())
+    app.register_blueprint(plan.create_blueprint())
 
     @app.before_serving
     async def _init_runtime() -> None:
         resources = runtime.init_resources()
         if resources.generation_manager is None:
             resources.generation_manager = GenerationManager(resources)
+        resources.log("app_startup")
+
+    @app.before_request
+    async def _log_route_call() -> None:
+        # Skip static assets and the long-lived SSE stream (it logs itself).
+        if request.path.startswith("/static") or request.path == "/events":
+            return
+        runtime.get_resources().log(
+            "route_call", method=request.method, path=request.path
+        )
 
     @app.after_serving
     async def _shutdown_runtime() -> None:
         resources = runtime.get_resources()
         manager = resources.generation_manager
-        if manager is not None and manager.status()["running"]:
+        # "active" includes a run parked at the approval gate — stop it too.
+        if manager is not None and manager.status()["active"]:
             await manager.stop()
+        resources.log("app_shutdown")
 
     @app.get("/")
     async def index():

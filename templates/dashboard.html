@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}MuseAI — Dashboard{% endblock %}
+{% block title %}MuseAI — Planning Workbench{% endblock %}
 {% block content %}
 <header id="status-ribbon" class="ribbon">
   <div class="ribbon-left">
@@ -21,14 +21,36 @@
 
 <main class="layout">
   <section class="col col-main">
-    <div class="card" id="planning-snapshot-card">
-      <h2>Planning snapshot</h2>
-      <div id="planning-snapshot-body" class="card-body muted">No planning snapshot yet.</div>
+    <div class="card" id="project-setup-card">
+      <h2>Project setup</h2>
+      <div class="form-grid">
+        <label for="inp-title">Title</label>
+        <input id="inp-title" type="text" maxlength="200" placeholder="Working title (optional)">
+        <label for="inp-premise">Premise <span class="required">*</span></label>
+        <textarea id="inp-premise" rows="3" maxlength="2000"
+          placeholder="One or two sentences: who wants what, and what stands in the way. Required."></textarea>
+        <label for="inp-genre">Genre</label>
+        <input id="inp-genre" type="text" maxlength="200" placeholder="e.g. mystery (optional)">
+        <label for="inp-words">Target words</label>
+        <input id="inp-words" type="number" min="1" step="1000" placeholder="config default">
+        <label for="sel-exec-mode">Execution mode</label>
+        <select id="sel-exec-mode">
+          <option value="macro_outline_before_draft">macro_outline_before_draft</option>
+          <option value="rolling">rolling</option>
+        </select>
+        <label for="sel-approval-mode">Approval mode</label>
+        <select id="sel-approval-mode">
+          <option value="off">off</option>
+          <option value="macro_outline">macro_outline</option>
+        </select>
+      </div>
+      <p class="hint" id="premise-hint">Start is disabled until a premise is entered.</p>
     </div>
 
-    <div class="card" id="planning-node-card">
-      <h2>Latest planning node</h2>
-      <div id="planning-node-body" class="card-body muted">No planner node has run yet.</div>
+    <div class="card card-approval hidden" id="approval-card">
+      <h2>Macro outline approval</h2>
+      <div id="approval-body" class="card-body"></div>
+      <button id="btn-approve" type="button" class="hidden">Approve macro outline</button>
     </div>
 
     <div class="card card-block hidden" id="block-card">
@@ -40,13 +62,30 @@
       <h2>Error</h2>
       <div id="error-body" class="card-body"></div>
     </div>
+
+    <div class="card" id="planning-timeline-card">
+      <h2>Planning timeline</h2>
+      <div id="timeline-meta" class="muted card-meta">No planning snapshot yet.</div>
+      <div id="timeline-body" class="card-body"></div>
+      <h3 class="runtime-heading">Runtime (just-in-time)</h3>
+      <div id="timeline-runtime" class="card-body muted">No scenes or beats planned yet.</div>
+    </div>
+
+    <div class="card hidden" id="node-detail-card">
+      <h2>Node detail <span id="node-detail-title" class="hint-inline"></span></h2>
+      <div id="node-detail-body" class="card-body"></div>
+      <details class="raw-details">
+        <summary>Raw plan JSON (debug)</summary>
+        <pre id="node-detail-raw" class="raw-json"></pre>
+      </details>
+    </div>
   </section>
 
   <section class="col col-side">
     <div class="card" id="controls-card">
       <h2>Controls</h2>
       <div class="controls">
-        <button id="btn-start" type="button">Start</button>
+        <button id="btn-start" type="button" disabled>Start</button>
         <button id="btn-pause" type="button" disabled>Pause</button>
         <button id="btn-resume" type="button" disabled>Resume</button>
         <button id="btn-stop" type="button" disabled>Stop</button>
@@ -58,18 +97,23 @@
     <div class="card" id="stores-card">
       <h2>Store status</h2>
       <ul class="stores">
-        {% for store in stores %}
-        <li>
+        {% for store in stores %}<li>
           <span class="store-name">{{ store.name }}</span>
           <span class="badge badge-{{ store.kind }}">{{ store.kind }}</span>
           <span class="store-note">{{ store.note }}</span>
-        </li>
-        {% endfor %}
+        </li>{% endfor %}
       </ul>
     </div>
 
     <div class="card" id="event-stream-card">
       <h2>Event stream <span class="hint-inline">(last 100)</span></h2>
+      <div class="event-filters" id="event-filters">
+        <button type="button" data-filter="all" class="filter-btn filter-active">all</button>
+        <button type="button" data-filter="status" class="filter-btn">status</button>
+        <button type="button" data-filter="planning" class="filter-btn">planning</button>
+        <button type="button" data-filter="approval" class="filter-btn">approval</button>
+        <button type="button" data-filter="error" class="filter-btn">error</button>
+      </div>
       <div id="event-log" class="event-log" aria-live="polite"></div>
     </div>
   </section>

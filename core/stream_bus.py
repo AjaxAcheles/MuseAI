@@ -8,9 +8,12 @@ subscribers. The bus also maintains a "latest snapshot" of run state so a page
 load / reconnect can render current status immediately without replaying
 history (there is deliberately no global event history list).
 
-Event object shape (every payload is reduced to JSON-safe primitives first):
+Event object shape (every payload is reduced to JSON-safe primitives first;
+``run_id`` identifies the generation run the event belongs to, None outside a
+run):
 
-    {"event": "phase_change", "data": {...}, "timestamp": "2026-07-02T12:00:00Z"}
+    {"event": "phase_change", "data": {...},
+     "timestamp": "2026-07-02T12:00:00Z", "run_id": "a1b2c3d4e5f6"}
 """
 
 from __future__ import annotations
@@ -90,6 +93,7 @@ def format_sse(event: Mapping[str, Any]) -> str:
             "event": event.get("event"),
             "data": event.get("data"),
             "timestamp": event.get("timestamp"),
+            "run_id": event.get("run_id"),
         },
         ensure_ascii=False,
     )
@@ -101,6 +105,7 @@ class StreamBus:
 
     def __init__(self, max_queue_size: int = DEFAULT_MAX_SUBSCRIBER_QUEUE) -> None:
         self._max_queue_size = max_queue_size
+        self._run_id: str | None = None
         self._subscribers: set[asyncio.Queue] = set()
         self._snapshot: dict[str, Any] = {
             "running": False,
@@ -134,6 +139,10 @@ class StreamBus:
         """Number of currently attached subscriber queues (for tests/telemetry)."""
         return len(self._subscribers)
 
+    def set_run_id(self, run_id: str | None) -> None:
+        """Stamp subsequent event envelopes with the active generation run id."""
+        self._run_id = run_id
+
     def _apply_to_snapshot(self, event_type: str, data: Any) -> None:
         mapping = data if isinstance(data, Mapping) else {}
         if event_type == "status":
@@ -155,9 +164,13 @@ class StreamBus:
                 mapping.get("awaiting_approval", False)
             )
         elif event_type == "approval_state":
-            self._snapshot["awaiting_planning_approval"] = bool(
-                mapping.get("awaiting_approval", False)
-            )
+            awaiting = bool(mapping.get("awaiting_approval", False))
+            self._snapshot["awaiting_planning_approval"] = awaiting
+            if not awaiting and self._snapshot.get("planning_block_reason") == (
+                "awaiting_macro_approval"
+            ):
+                # Approval resolved: the gate's block reason is no longer true.
+                self._snapshot["planning_block_reason"] = None
         elif event_type == "done":
             self._snapshot["running"] = False
             if "message" in mapping:
@@ -185,6 +198,7 @@ class StreamBus:
             "event": event_type,
             "data": jsonable(data),
             "timestamp": _utc_now_iso(),
+            "run_id": self._run_id,
         }
         self._apply_to_snapshot(event_type, event["data"])
         for queue in list(self._subscribers):
@@ -213,7 +227,12 @@ class StreamBus:
         """
         queue: asyncio.Queue = asyncio.Queue(maxsize=self._max_queue_size)
         queue.put_nowait(
-            {"event": "status", "data": self.snapshot(), "timestamp": _utc_now_iso()}
+            {
+                "event": "status",
+                "data": self.snapshot(),
+                "timestamp": _utc_now_iso(),
+                "run_id": self._run_id,
+            }
         )
         self._subscribers.add(queue)
         try:

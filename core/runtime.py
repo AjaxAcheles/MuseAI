@@ -29,6 +29,7 @@ from pathlib import Path
 import shutil
 from typing import Any
 
+from core.app_log import get_app_logger, log_app_event
 from core.stream_bus import StreamBus
 from memory.branch_manager import init_snapshot_store
 from memory.chroma_client import init_chroma_store
@@ -84,6 +85,13 @@ class RuntimeResources:
     generation_manager: Any | None = None
     stores: dict[str, StoreHandle] = field(default_factory=dict)
     prompt_loader: Any | None = None
+    logs_dir: Path | None = None
+    app_logger: logging.Logger | None = None
+
+    def log(self, event: str, **fields: Any) -> None:
+        """Write one structured line to the app JSONL log (no-op if unwired)."""
+        if self.app_logger is not None:
+            log_app_event(self.app_logger, event, **fields)
 
 
 def _load_env_file(path: Path) -> None:
@@ -173,7 +181,8 @@ def _build_resources(
         planning_execution_mode=config.planning.execution_mode,
         approval_mode=config.planning.approval_mode,
     )
-    return RuntimeResources(
+    app_logger = get_app_logger(logs_dir / "app.jsonl")
+    resources = RuntimeResources(
         config=config,
         project_root=project_root,
         data_dir=data_dir,
@@ -181,7 +190,17 @@ def _build_resources(
         generation_manager=None,
         stores=stores,
         prompt_loader=PromptLoader(),
+        logs_dir=logs_dir,
+        app_logger=app_logger,
     )
+    resources.log(
+        "runtime_init",
+        data_dir=str(data_dir),
+        stores={name: handle.kind for name, handle in stores.items()},
+        execution_mode=config.planning.execution_mode,
+        approval_mode=config.planning.approval_mode,
+    )
+    return resources
 
 
 def init_resources(

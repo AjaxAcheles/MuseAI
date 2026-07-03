@@ -121,8 +121,108 @@ body {
 .card-block h2 { color: var(--accent-blocked); }
 .card-error { border-color: var(--accent-stop); }
 .card-error h2 { color: var(--accent-stop); }
+.card-approval { border-color: var(--accent-pause); }
+.card-approval h2 { color: var(--accent-pause); }
+.card-meta { font-size: 13px; margin-bottom: 0.4rem; }
 
 .hidden { display: none; }
+
+/* --- project setup form --------------------------------------------------- */
+
+.form-grid {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 0.45rem 0.8rem;
+  align-items: start;
+}
+
+.form-grid label {
+  color: var(--text-muted);
+  font-size: 13px;
+  padding-top: 0.35rem;
+}
+
+.form-grid input,
+.form-grid select,
+.form-grid textarea {
+  background: #171a20;
+  color: var(--text);
+  border: 1px solid var(--panel-edge);
+  border-radius: 6px;
+  padding: 0.35rem 0.5rem;
+  font: inherit;
+  font-size: 14px;
+  width: 100%;
+}
+
+.form-grid textarea { resize: vertical; }
+.form-grid input:focus,
+.form-grid select:focus,
+.form-grid textarea:focus { outline: none; border-color: var(--text-muted); }
+.form-grid :disabled { opacity: 0.5; }
+
+.required { color: var(--accent-stop); }
+
+/* --- planning timeline ----------------------------------------------------- */
+
+.plan-tree, .plan-tree ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.plan-tree ul { padding-left: 1.1rem; border-left: 1px solid var(--panel-edge); }
+
+.plan-node {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: none;
+  border-radius: 4px;
+  padding: 0.2rem 0.4rem;
+  color: var(--text);
+  font-size: 14px;
+  cursor: pointer;
+}
+.plan-node:hover { background: #262b35; border: none; }
+.plan-node.node-selected { background: #2b3040; }
+.plan-node .node-level {
+  display: inline-block;
+  min-width: 4.6em;
+  color: var(--text-muted);
+  font-family: var(--mono);
+  font-size: 11px;
+  text-transform: uppercase;
+}
+.plan-node .node-summary { color: var(--text-muted); font-size: 12px; display: block; padding-left: 5.1em; }
+.plan-node .node-stub { color: var(--accent-pause); font-size: 11px; margin-left: 0.4em; }
+.plan-node .node-current { color: var(--accent-live); font-size: 11px; margin-left: 0.4em; }
+
+.runtime-heading {
+  margin: 0.8rem 0 0.3rem;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+}
+
+/* --- node detail ------------------------------------------------------------ */
+
+.raw-details { margin-top: 0.6rem; }
+.raw-details summary { color: var(--text-muted); font-size: 12px; cursor: pointer; }
+.raw-json {
+  font-family: var(--mono);
+  font-size: 12px;
+  background: #12141a;
+  border: 1px solid var(--panel-edge);
+  border-radius: 6px;
+  padding: 0.6rem;
+  overflow-x: auto;
+  max-height: 320px;
+  overflow-y: auto;
+  white-space: pre;
+}
+.field-value { white-space: pre-wrap; }
 
 /* --- controls ------------------------------------------------------------ */
 
@@ -171,20 +271,44 @@ button:disabled { opacity: 0.4; cursor: not-allowed; }
 
 /* --- event log ------------------------------------------------------------ */
 
+.event-filters { display: flex; gap: 0.35rem; margin-bottom: 0.4rem; flex-wrap: wrap; }
+.filter-btn {
+  font-size: 11px;
+  padding: 0.1rem 0.6rem;
+  border-radius: 999px;
+}
+.filter-btn.filter-active { border-color: var(--accent-live); color: var(--accent-live); }
+
 .event-log {
-  font-family: var(--mono);
   font-size: 12px;
-  max-height: 320px;
+  max-height: 360px;
   overflow-y: auto;
-  overflow-x: auto;
   border-top: 1px solid var(--panel-edge);
   padding-top: 0.4rem;
 }
 
-.event-line { white-space: nowrap; padding: 0.05rem 0; }
-.event-time { color: var(--text-muted); margin-right: 0.5rem; }
-.event-type { display: inline-block; min-width: 10.5em; }
+.event-line { padding: 0.15rem 0; border-bottom: 1px solid #22262e; }
+.event-head { display: flex; gap: 0.6rem; align-items: baseline; }
+.event-time { color: var(--text-muted); font-family: var(--mono); flex: none; }
+.event-type {
+  flex: none;
+  min-width: 9.5em;
+  font-family: var(--mono);
+}
 .event-type-error { color: var(--accent-stop); }
 .event-type-planning_blocked { color: var(--accent-blocked); }
+.event-type-approval_state { color: var(--accent-pause); }
 .event-type-done, .event-type-status { color: var(--accent-live); }
-.event-detail { color: var(--text-muted); }
+.event-message { color: var(--text); min-width: 0; overflow-wrap: anywhere; }
+.event-line details { margin: 0.1rem 0 0 0; }
+.event-line summary { color: var(--text-muted); font-size: 11px; cursor: pointer; }
+.event-json {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-muted);
+  background: #12141a;
+  border-radius: 4px;
+  padding: 0.4rem;
+  overflow-x: auto;
+  white-space: pre;
+}
