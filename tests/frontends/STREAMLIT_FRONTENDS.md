@@ -12,6 +12,7 @@
    - [M05 — Prompt Loader](#m05--prompt-loader)
    - [M06 — Context Assembly & Budgeting](#m06--context-assembly--budgeting)
    - [M07 — Planning Cascade](#m07--planning-cascade)
+   - [M08 — Drafting & Generation](#m08--drafting--generation)
 5. [Debugging Techniques](#debugging-techniques)
 6. [Extending a Frontend for a New Module](#extending-a-frontend-for-a-new-module)
 7. [Streamlit Frontends vs. pytest — When to Use What](#streamlit-frontends-vs-pytest--when-to-use-what)
@@ -47,7 +48,8 @@ These frontends (`tests/frontends/m02_memory.py`, `m03_state.py`, etc.) are **in
 │  m04_inference.py │    no mocks, no stubs           │
 │  m05_prompt_loader│                                 │
 │  m06_context...   │                                 │
-│  m07_planning.py  ┘                                 │
+│  m07_planning.py  │                                 │
+│  m08_drafting.py  ┘                                 │
 ├─────────────────────────────────────────────────────┤
 │  shared.py  (workspace(), seed_narrative_data(),    │
 │              seed_planning_data(), visual_config(),  │
@@ -61,6 +63,7 @@ These frontends (`tests/frontends/m02_memory.py`, `m03_state.py`, etc.) are **in
 │  fsm/planning_tools.py  fsm/planning_annotations.py │
 │  fsm/pad_translation.py                             │
 │  llm/tokenizer.py       llm/gbnf_compiler.py       │
+│  llm/call_llm.py        core/antislop.py            │
 │  prompts/prompt_loader.py                           │
 ├─────────────────────────────────────────────────────┤
 │  Temp workspace  (/tmp/museai_frontends_XXXXX/)     │
@@ -144,7 +147,7 @@ No mocks, no stubs, no monkey-patching. The code running under the UI is the sam
 uv run streamlit run tests/frontends/m02_memory.py
 ```
 
-Replace `m02_memory` with `m03_state`, `m04_inference`, `m05_prompt_loader`, `m06_context_assembly`, or `m07_planning`.
+Replace `m02_memory` with `m03_state`, `m04_inference`, `m05_prompt_loader`, `m06_context_assembly`, `m07_planning`, or `m08_drafting`.
 
 ### Launcher with sidebar navigation
 
@@ -152,7 +155,7 @@ Replace `m02_memory` with `m03_state`, `m04_inference`, `m05_prompt_loader`, `m0
 uv run streamlit run tests/frontends/run_all.py
 ```
 
-Opens a browser with a sidebar radio group to switch between all six visualizers.
+Opens a browser with a sidebar radio group to switch between all seven visualizers.
 
 ### First-run
 
@@ -514,6 +517,47 @@ An interactive debugger for the five-level planner cascade — the bounded "mode
 
 ---
 
+### M08 — Drafting & Generation
+
+**File:** `m08_drafting.py`
+**Modules exercised:** `fsm/nodes/node_draft_prose.py` (`node_draft_prose`), `fsm/nodes/node_assemble_context.py` (`build_context_package`), `core/antislop.py` (`detect_slop`/`resolve_slop`), `llm/call_llm.py` (only when the Live drafter toggle is on), `prompts/prompt_loader.py` (indirectly, via the node's own render call)
+
+An interactive debugger for the single-shot drafting node: context assembly -> template render -> a streamed call through the node's injectable `call_seam` -> the M11 anti-slop black-box contract -> `current_draft_text`. The page never re-implements the node's logic — it observes the production render by capturing the `messages` argument its own injected seam receives (the documented injection point), and re-runs the same `detect_slop`/`resolve_slop` calls against that captured text for display.
+
+**Default path is fully offline**: a **scripted stream** (editable text, chunked and fed through the injected seam) with **zero network**. An explicit **Live drafter endpoint** toggle (off by default) instead leaves `call_seam=None` so the node builds its own real default seam against `config.endpoints.drafter`; any failure there (missing `.env` secrets, unreachable endpoint) shows a warning and automatically falls back to the scripted stream — the page never fakes a backend and never crashes.
+
+#### Run controls
+
+| Control | Type | What it does |
+|---------|------|-------------|
+| **Seed stores** | Button | `seed_narrative_data` -> `seed_planning_data` -> `seed_drafting_beat_plan` (new, additive `shared.py` helper). The last step seeds one planned-but-undrafted beat (`scene-1_b3`, beat_index 3, continuing the narrative seed's committed `beat-0`/`beat-1`/`beat-2`) with a full plan — objective, physical constraints, entry/exit conditions, and a hand-authored PAD behavioural-constraint string — so a draft run has a genuine beat plan without running the planner cascade live. |
+| **Reset temp workspace** | Button | Fresh workspace; also clears the last run. |
+| `arc_id` / `chapter_id` / `scene_id` | Text inputs | Defaults `arc-1`/`chapter-1`/`scene-1`, matching the seed. |
+| `beat to draft` | Select | Lists planned beat-level PlanningNodes under the chosen scene (only `scene-1_b3` exists by default); disabled with a notice if none are seeded yet. |
+| `scripted stream text` | Text area | Chunked into whitespace-bounded pieces (`"".join(chunks) == text` exactly) and streamed through the injected seam one chunk at a time. |
+| **inject failing seam** | Checkbox | The scripted seam emits roughly half its chunks then raises — demonstrates the clean-failure path (error surfaces, `current_draft_text` stays unchanged, partial `streaming_buffer` visible). Ignored in Live mode. |
+| **Live drafter endpoint** | Toggle | Off by default. When on, `call_seam=None` — the node's real default seam calls `config.endpoints.drafter` with secrets from `.env`. On any exception, the page warns and re-runs with the scripted stream instead. |
+| **Run draft** | Primary button | `build_context_package(state)` then `asyncio.run(node_draft_prose(state, call_seam=..., publisher=...))`. |
+
+#### Output panels
+
+| Panel | Content |
+|-------|---------|
+| Assembled context package | Initial/final token metrics, pruned-layer count, the `meta` layer-availability dict, and the full seven-tab raw layer view (`shared.display_package_layers`). |
+| Rendered prompt + live chunk feed | The exact rendered `node_draft_prose.xml.j2` prompt (captured from the seam's `messages` argument — Scripted mode only) and every chunk the injected publisher received, in arrival order. |
+| Anti-slop step + final state | `detect_slop`/`resolve_slop` findings (expected empty) and a resolved-vs-raw equality indicator; `current_draft_text` and `streaming_buffer` side by side, showing the buffer clearing to `""` once the draft completes; any call-seam or live-fallback error. |
+
+**Edge cases to exercise:**
+
+- Toggle **inject failing seam** and run — the error surfaces, `current_draft_text` stays unchanged, and the partial `streaming_buffer` shows what streamed before the failure
+- Run **without seeding** — `build_context_package` hits an uninitialized store and the page shows the SQLite error via `st.error`, never a crash
+- Run with an empty macro-constraints layer (the default seed leaves `macro_constraints` empty) — the template's empty-macro branch renders cleanly
+- Reset the workspace after seeding, then try to run without re-seeding — the beat selector shows "no planned beat found," and **Run draft** is disabled
+- Turn on **Live drafter endpoint** with no `.env` present — the real default seam's config load fails, the page warns, and it falls back to the scripted stream automatically
+- Edit the scripted stream text to include Unicode/emoji — confirm the chunked round-trip still reconstructs the text exactly in `current_draft_text`
+
+---
+
 ## Debugging Techniques
 
 ### Viewing errors
@@ -616,4 +660,4 @@ if submitted:
 
 ---
 
-*Last updated: 2026-07-02*
+*Last updated: 2026-07-03*

@@ -24,6 +24,7 @@ import m04_inference
 import m05_prompt_loader
 import m06_context_assembly
 import m07_planning
+import m08_drafting
 
 PAGES = {
     "M02 Persistent Memory": m02_memory.render,
@@ -32,6 +33,7 @@ PAGES = {
     "M05 Prompt Loader": m05_prompt_loader.render,
     "M06 Context Assembly": m06_context_assembly.render,
     "M07 Planning Cascade": m07_planning.render,
+    "M08 Drafting": m08_drafting.render,
 }
 
 

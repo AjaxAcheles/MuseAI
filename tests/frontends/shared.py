@@ -1036,3 +1036,84 @@ def _upsert_parent_rows(
         "VALUES (?, ?, ?, ?, ?, ?)",
         (scene_id, chapter_id, scene_description, 500, 0, "active"),
     )
+
+
+# --- drafting-node seed extension (M06 visualizer) --------------------------
+
+# `seed_planning_data` seeds planned nodes only through the scene level (global,
+# arc-1, chapter-1, scene-1) — no beat is planned yet. The M06 drafting page needs
+# one planned-but-undrafted beat (a real PlanningNode with an immediate_objective,
+# physical_constraints, and a PAD behavioural-constraint string) to exercise
+# node_draft_prose without running the full planner cascade live. `scene-1` already
+# carries three *committed* beats (beat-0/1/2, beat_index 0-2) from
+# seed_narrative_data, so this beat continues the sequence at beat_index 3.
+_SEED_DRAFTING_BEAT_ID = "scene-1_b3"
+
+_SEED_DRAFTING_BEAT_PLAN = {
+    "beat_id": _SEED_DRAFTING_BEAT_ID,
+    "beat_index": 3,
+    "immediate_objective": (
+        "Elena and Marcus share the shop's first quiet moment together after closing"
+    ),
+    "physical_constraints": [
+        "present: char-elena, char-marcus",
+        "location: The Paper Petal, near the front window, after closing",
+    ],
+    "entry_condition": (
+        "the first day is survived and Clara's cookies have made it a welcome"
+    ),
+    "exit_condition": "Elena notices Marcus notice her, and neither looks away first",
+    "pad_target": {"pleasure": 0.55, "arousal": 0.50, "dominance": 0.45},
+    "behavioral_constraint": (
+        "warm and a little breathless: let silences stretch rather than filling them; "
+        "notice small physical details (hands, the door, the light) before either "
+        "character speaks"
+    ),
+    "asserted_facts": [],
+}
+
+
+def seed_drafting_beat_plan(db_path: str | Path) -> dict[str, Any]:
+    """Seed one planned-but-undrafted beat so the M08 drafting page has a real plan.
+
+    Call after ``seed_narrative_data`` and ``seed_planning_data`` (needs ``scene-1``'s
+    planned scene PlanningNode as a parent). Writes through the real 07.00 helpers —
+    ``upsert_beat_plan`` for the structural ``Beats`` row plus the beat's PAD detail,
+    then ``upsert_planning_node`` to upgrade ``purpose`` to the full plan JSON, exactly
+    the two-write sequence ``node_plan_beat``'s persist function uses. The
+    behavioural-constraint string here is hand-authored seed data (like the scene
+    plan's ``pad_target``), not computed through the PAD translation pipeline — this
+    is a fixture, not a planner run. Idempotent (both writes upsert by key). Returns
+    the seeded plan dict for display.
+    """
+    scene_node = f"{PLANNING_SNAPSHOT_ID}:scene:scene-1"
+    node_id = f"{PLANNING_SNAPSHOT_ID}:beat:{_SEED_DRAFTING_BEAT_ID}"
+    plan = _SEED_DRAFTING_BEAT_PLAN
+    sqlite_db.upsert_beat_plan(
+        db_path,
+        beat_id=_SEED_DRAFTING_BEAT_ID,
+        scene_id="scene-1",
+        beat_index=plan["beat_index"],
+        status="planned",
+        snapshot_id=PLANNING_SNAPSHOT_ID,
+        node_id=node_id,
+        parent_node_id=scene_node,
+        ordering=plan["beat_index"],
+        title=plan["immediate_objective"],
+        pad_constraint=plan["behavioral_constraint"],
+        immediate_objective=plan["immediate_objective"],
+        physical_constraints=json.dumps(plan["physical_constraints"]),
+    )
+    sqlite_db.upsert_planning_node(
+        db_path,
+        node_id=node_id,
+        snapshot_id=PLANNING_SNAPSHOT_ID,
+        level="beat",
+        status="planned",
+        parent_id=scene_node,
+        ordering=plan["beat_index"],
+        title=plan["immediate_objective"],
+        summary=plan["immediate_objective"],
+        purpose=json.dumps(plan, sort_keys=True),
+    )
+    return dict(plan)
