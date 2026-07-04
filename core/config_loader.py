@@ -38,6 +38,9 @@ class EndpointConfig(BaseModel):
     supports_concurrent_critics: bool
     grammar_constraint_strategy: str
     api_key: str  # populated from env at load time, not from config.yaml
+    # Documented-provisional: whether the endpoint can apply inference-side
+    # anti-slop. Currently read by no logic (M11 is a frozen no-op contract).
+    supports_inference_antislop: bool = False
 
     @field_validator("api_key")
     @classmethod

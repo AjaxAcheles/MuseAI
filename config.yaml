@@ -8,6 +8,7 @@ endpoints:
     tokenizer_family: "tiktoken"
     supports_concurrent_critics: false
     grammar_constraint_strategy: "json_schema"
+    supports_inference_antislop: false # documented-provisional; read by no logic
 
   drafter:
     base_url: "http://localhost:11434/v1"
@@ -15,6 +16,7 @@ endpoints:
     tokenizer_family: "tiktoken"
     supports_concurrent_critics: false
     grammar_constraint_strategy: "json_mode"
+    supports_inference_antislop: false # documented-provisional; read by no logic
 
   critic:
     base_url: "http://localhost:11434/v1"
@@ -22,6 +24,7 @@ endpoints:
     tokenizer_family: "tiktoken"
     supports_concurrent_critics: true
     grammar_constraint_strategy: "json_schema"
+    supports_inference_antislop: false # documented-provisional; read by no logic
 
   pad_translator:
     base_url: "http://localhost:11434/v1"
@@ -29,6 +32,7 @@ endpoints:
     tokenizer_family: "tiktoken"
     supports_concurrent_critics: false
     grammar_constraint_strategy: "json_schema"
+    supports_inference_antislop: false # documented-provisional; read by no logic
 
   craft_consultant:
     base_url: "http://localhost:11434/v1"
@@ -36,6 +40,7 @@ endpoints:
     tokenizer_family: "tiktoken"
     supports_concurrent_critics: false
     grammar_constraint_strategy: "json_schema"
+    supports_inference_antislop: false # documented-provisional; read by no logic
 
 thresholds:
   stylometric_drift_threshold: 0.12 # proposed default to be calibrated
