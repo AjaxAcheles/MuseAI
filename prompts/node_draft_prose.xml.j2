@@ -1,0 +1,171 @@
+{# =====================================================================
+   Template: node_draft_prose  (Module M06 — Drafting & Generation)
+   Rendered by prompts/prompt_loader.py (StrictUndefined, autoescape=False).
+
+   Unlike the planner templates, this is NOT a deliberation loop — it is a
+   single-shot generation prompt. The model streams free-text prose; the
+   harness never asks it for JSON, an action, or a self-check here.
+
+   Expected context variables (ALL required — StrictUndefined; omitting any
+   raises). node_draft_prose supplies every variable from the assembled
+   active_context_package plus the active beat plan produced by the planning
+   cascade.
+
+   Context-package layers (node_assemble_context; epistemic status labelled):
+     relational_facts    : dict  — canonical SQLite facts around the active
+                                    pointer, ABSOLUTE TRUTH; includes confirmed
+                                    coreference facts under its own key.
+     epistemic_beliefs    : list — unconfirmed coreference candidates, each
+                                    EXPLICITLY FLAGGED as an assumption, not a
+                                    settled fact; may be empty.
+     summary_context      : dict — RAPTOR summary-tree context; lower
+                                    authority than relational_facts.
+     flavour_passages     : list — optional colour/associative passages;
+                                    lowest authority; may be empty.
+     temporal_context     : dict — temporal/graph context; may be empty while
+                                    that store is stubbed.
+     macro_constraints    : dict — approved macro constraints + compiled
+                                    annotations for the ACTIVE CHAPTER (only
+                                    present in macro mode); may be an empty
+                                    dict when no macro layer applies — the
+                                    section below still renders cleanly.
+
+   Active beat plan (from the planning cascade, computed — never invented
+   here):
+     beat_immediate_objective   : str  — the ONE concrete thing this beat
+                                    accomplishes on the page.
+     beat_physical_constraints  : list — concrete staging/blocking facts the
+                                    prose must obey (who is where, what they
+                                    hold, distances, light, exits, injuries).
+     active_continuity          : dict — the beat's entry_condition,
+                                    exit_condition, and any continuity_facts
+                                    it must respect; the prose must land in
+                                    the exit_condition's state, not before it
+                                    and not past it.
+     pad_behavioral_constraint  : str  — the grounded behavioural-constraint
+                                    string for this beat's affect target,
+                                    COMPUTED BY THE PLANNING PIPELINE. Write
+                                    prose consistent with this register — do
+                                    NOT restate, adjust, or compute affect
+                                    values; that is not this model's job.
+
+   Continuation & sizing (supplied by the node, never hardcoded here):
+     prior_prose_tail     : str  — the tail of the preceding committed prose;
+                                    empty string when this is the scene's
+                                    first beat.
+     scene_entry_state    : str  — the scene's entry state, so the draft has
+                                    a concrete starting point even with no
+                                    prior prose.
+     target_word_count    : int  — target word-count guidance for this beat.
+   ===================================================================== #}
+<drafting_task>
+
+  <role>
+    You are the Drafter for a long-form novel. You turn an assembled context
+    package and one approved beat plan into the beat's prose — nothing else.
+    You do not plan, you do not audit, and you do not decide what happens
+    next; the beat plan below already fixes the objective, staging, and
+    affect. Your only job is to write the beat so it lands exactly where the
+    plan says it must land.
+  </role>
+
+  <drafting_objective>
+    Write the prose for the CURRENT beat only. The prose must:
+      - accomplish the beat's immediate_objective and nothing more — a beat
+        with two objectives is two beats; stop once this one is done.
+      - obey every physical_constraint below as hard staging — do not move a
+        character, object, or condition the constraints have not authorized.
+      - begin from the beat's entry state (the prior prose's tail, or the
+        scene's entry state if there is none) and end at its exit_condition —
+        no earlier, no later.
+      - read consistent with the affect_target's behavioral_constraint below:
+        write a character who would plausibly behave this way, without ever
+        naming, restating, or computing the underlying affect values.
+      - respect canonical relational facts as absolute truth, treat flagged
+        Epistemic Beliefs as unconfirmed (never state one as settled fact),
+        and use summary and flavour context only as background colour, never
+        as a source that can override canonical facts or the beat plan.
+      - honor every hard requirement below over any soft preference; if the
+        macro layer supplies approved constraints or compiled annotations for
+        this chapter, the prose must not contradict them.
+    Output prose only: no outline, no meta-commentary, no headings, no
+    summary of what you wrote, no author's notes.
+  </drafting_objective>
+
+  <context>
+    <canonical_relational_facts note="Absolute truth for this beat, including confirmed coreference facts. Never contradict these.">{{ relational_facts | tojson | xmlsafe }}</canonical_relational_facts>
+    <epistemic_beliefs note="UNCONFIRMED coreference candidates — write around these as open possibilities, never as settled fact.">
+    {% for belief in epistemic_beliefs %}
+      - [UNCONFIRMED ASSUMPTION] {{ belief | tojson | xmlsafe }}
+    {% else %}
+      (none flagged for this beat)
+    {% endfor %}
+    </epistemic_beliefs>
+    <summary_context note="RAPTOR summary-tree background — lower authority than canonical facts.">{{ summary_context | tojson | xmlsafe }}</summary_context>
+    <flavour_passages note="Optional colour only — lowest authority; never overrides canonical facts or the beat plan.">
+    {% for passage in flavour_passages %}
+      - {{ passage | tojson | xmlsafe }}
+    {% else %}
+      (none available for this beat)
+    {% endfor %}
+    </flavour_passages>
+    <temporal_context note="Temporal/graph background for this beat.">{{ temporal_context | tojson | xmlsafe }}</temporal_context>
+  </context>
+
+  <macro_constraints note="Approved macro constraints and compiled annotations for the active chapter. Hard constraints override preferences and must not be contradicted.">
+  {% if macro_constraints %}
+    <hard_requirements>
+    {% for c in macro_constraints.get('hard_annotations', []) %}
+      - {{ c.get('text', c) | xmlsafe }}
+    {% else %}
+      (none)
+    {% endfor %}
+    </hard_requirements>
+    <preferences>
+    {% for c in macro_constraints.get('soft_preferences', []) %}
+      - {{ c.get('text', c) | xmlsafe }}
+    {% else %}
+      (none)
+    {% endfor %}
+    </preferences>
+  {% else %}
+    (no macro constraints for this pass — proceed on the beat plan and continuity context alone)
+  {% endif %}
+  </macro_constraints>
+
+  <beat_plan note="Computed by the planning cascade — write to satisfy this exactly; never revise it.">
+    <immediate_objective>{{ beat_immediate_objective | xmlsafe }}</immediate_objective>
+    <physical_constraints>
+    {% for constraint in beat_physical_constraints %}
+      - {{ constraint | xmlsafe }}
+    {% else %}
+      (none recorded — treat the scene's entry state below as the only staging authority)
+    {% endfor %}
+    </physical_constraints>
+    <active_continuity note="The state this beat starts from and the state it must end in.">{{ active_continuity | tojson | xmlsafe }}</active_continuity>
+  </beat_plan>
+
+  <affect_target note="COMPUTED BY THE PLANNING PIPELINE — write consistent with this register. Do NOT name, restate, or compute affect values in the prose.">
+    <behavioral_constraint>{{ pad_behavioral_constraint | xmlsafe }}</behavioral_constraint>
+  </affect_target>
+
+  <continuation>
+    <prior_prose_tail note="The tail of the preceding committed prose — continue seamlessly from here.">
+    {% if prior_prose_tail %}{{ prior_prose_tail | xmlsafe }}{% else %}(none — this is the scene's first beat; begin from the scene entry state below){% endif %}
+    </prior_prose_tail>
+    <scene_entry_state>{{ scene_entry_state | xmlsafe }}</scene_entry_state>
+  </continuation>
+
+  <generation_parameters>
+    <target_word_count>{{ target_word_count }}</target_word_count>
+  </generation_parameters>
+
+  <output_contract>
+    Write the beat's prose now. Output prose text ONLY: no JSON, no markdown
+    fence, no headings, no outline, no meta-commentary, no restatement of the
+    beat plan, and no author's notes before or after the prose. Aim for the
+    target word count above as guidance, not a hard cutoff — end the beat
+    when its exit_condition is reached, not before and not after.
+  </output_contract>
+
+</drafting_task>
