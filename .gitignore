@@ -1,0 +1,16 @@
+# MuseAI v1
+data/
+logs/
+.env
+__pycache__/
+*.pyc
+
+# uv / build
+.venv/
+*.egg-info/
+dist/
+build/
+
+# keep placeholder dirs tracked
+!data/.gitkeep
+!logs/.gitkeep

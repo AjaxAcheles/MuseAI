@@ -1,0 +1,33 @@
+# MuseAI v1 configuration.
+# Unknown or mistyped keys are FATAL at boot (extra keys are forbidden).
+
+project_id: "museai-v1"
+
+# Web UI / server.
+host: "127.0.0.1"
+port: 8000
+log_level: "INFO"
+
+# Local persistence.
+db_path: "data/museai.db"
+event_log_path: "data/events.jsonl"
+
+# LLM endpoint. Endpoint/model-agnostic: any OpenAI-compatible server works.
+endpoint:
+  # OpenAI example: "https://api.openai.com/v1"
+  base_url: "http://127.0.0.1:1234/v1"
+  # ${VAR} is resolved from the environment (.env is loaded automatically).
+  api_key: "${MUSEAI_API_KEY}"
+  model_name: "your-model-name"
+  # "tiktoken" or "char_heuristic" only.
+  tokenizer_family: "char_heuristic"
+  request_timeout: 60
+  temperature: 0.7
+
+# Generation shape.
+generation:
+  word_count_target: 3000
+  beat_word_target: 600
+  revision_retry_cap: 3
+  max_agent_iterations: 6
+  recent_prose_beats: 4
