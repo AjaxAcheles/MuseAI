@@ -12,6 +12,8 @@ session ritual.
 | v1.04 | The quality loop: web_search, bounded agent loop, audit, continuity critic, revise, mode_selector | done |
 | v1.05 | Commit/router, compiled graph, review boundary, background manager, manuscript export, headless engine checkpoint | done |
 | v1.06 | Async Quart web server, SSE dashboard stream, controls, settings, seed routes, guarded reset | done |
+| v1.07 | UI/UX overhaul, full-codebase audit, and stabilization fixes | done |
+| v1.08 | Repository housekeeping: remove tracked empty placeholder files | done |
 
 Next up: v1 complete
 
@@ -543,3 +545,26 @@ works offline; Chart.js was dropped. The seed page validates JSON live
 
 **Done-check.** `uv run pytest -q` → `293 passed` (283 prior + 10 new
 regression tests covering each fix above).
+
+## v1.08 — done
+
+Repository housekeeping: removed tracked empty placeholder files from the source
+tree. The deleted files were package-marker-only `__init__.py` files under
+`museai/`; Python 3 namespace packages keep imports working without them.
+
+**Files removed**
+
+- `museai/__init__.py`
+- `museai/core/__init__.py`
+- `museai/fsm/__init__.py`
+- `museai/fsm/nodes/__init__.py`
+- `museai/fsm/routers/__init__.py`
+- `museai/fsm/tools/__init__.py`
+- `museai/llm/__init__.py`
+- `museai/memory/__init__.py`
+- `museai/prompts/__init__.py`
+- `museai/seed/__init__.py`
+- `museai/web/__init__.py`
+- `museai/web/routes/__init__.py`
+
+**Done-check.** `uv run pytest -q` → `293 passed`.

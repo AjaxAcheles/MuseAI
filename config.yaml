@@ -24,7 +24,7 @@ endpoint:
   base_url: "http://127.0.0.1:11434/v1"
   # ${VAR} is resolved from the environment (.env is loaded automatically).
   api_key: "${MUSEAI_API_KEY}"
-  model_name: "cryptidbleh/gemma4-claude-opus-4.6:latest"
+  model_name: "openbmb/minicpm5:latest"
   # "tiktoken" or "char_heuristic" only.
   tokenizer_family: "char_heuristic"
   request_timeout: 60
