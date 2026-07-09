@@ -61,7 +61,11 @@ async def stream():
         finally:
             bus.unsubscribe(queue)
 
-    return Response(events(), content_type="text/event-stream")
+    return Response(
+        events(),
+        content_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @bp.post("/generate")
@@ -71,13 +75,26 @@ async def generate():
         return jsonify({"ok": False, "error": "No project is seeded. Load a seed before starting generation."}), 400
 
     manager = get_manager()
-    if manager.status not in {"idle", "done", "stopped"}:
+    if manager.status not in {"idle", "done", "stopped", "error"}:
         return jsonify({"ok": True, "status": manager.status, "message": "Generation is already active."})
     try:
         await manager.start(project_id)
     except GenerationManagerError as exc:
         return jsonify({"ok": False, "error": str(exc), "status": manager.status}), 409
     return jsonify({"ok": True, "status": manager.status, "project_id": project_id})
+
+
+def _word_target() -> int:
+    """The seeded project's word target, falling back to the config default."""
+    cfg = get_config()
+    conn = connect_db(cfg.db_path)
+    try:
+        project = get_project(conn, cfg.project_id)
+        if project is not None and project["word_count_target"]:
+            return int(project["word_count_target"])
+    finally:
+        conn.close()
+    return cfg.generation.word_count_target
 
 
 @bp.get("/status")
@@ -90,5 +107,6 @@ async def status():
             "status": manager.status,
             "pointer": _pointer_dict(),
             "project_word_total": committed_word_count(cfg),
+            "word_target": _word_target(),
         }
     )

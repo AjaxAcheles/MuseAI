@@ -494,3 +494,52 @@ Full suite: `uv run pytest -q` → `283 passed`.
 `uv run python run.py` now serves the browser UI at the configured host/port.
 
 **v1 complete.**
+
+## v1.07 — done
+
+UI/UX overhaul + full-codebase audit and stabilization.
+
+**Front end (rebuilt).** Single "Studio" workspace: one app bar owns navigation
+(Studio / Seed / Settings) with the run-state chip; a single command bar holds
+Generate / Pause–Resume / Stop (state-aware — only valid actions are shown),
+the phase tracker, the beat pointer, and a word-count progress bar. The
+manuscript stream is center stage in serif type; the review banner and the
+manuscript-done card render as workspace states instead of hidden sidebar
+panels. The PAD radar was removed from the UI (engine PAD untouched). Bootstrap
+and `marked` are vendored under `static/vendor/` (plus DOMPurify), so the UI
+works offline; Chart.js was dropped. The seed page validates JSON live
+(mirroring the server rules) with Format / Reset-to-example helpers.
+
+**Bugs fixed in the audit.**
+- XSS: LLM/critic output was injected via `innerHTML` unsanitized; markdown now
+  renders through `marked` + DOMPurify, labels through `textContent`.
+- `settings/save` wrote the *resolved* API key into `config.yaml` in plaintext,
+  destroying the `${MUSEAI_API_KEY}` env reference; the raw on-disk reference
+  is now preserved when the key field is left blank.
+- A rejected seed submit re-rendered with `example_seed=""`, erasing the user's
+  edits; the submitted text now survives the error round-trip.
+- A crash mid-append left a torn last line in `events.jsonl` and
+  `replay_events` raised `JSONDecodeError` during the recovery it exists for;
+  malformed lines are now skipped with a warning.
+- A node exception (e.g. endpoint down) killed the manager task silently and
+  the UI showed "Running" forever; the manager now parks in a new `error`
+  status, publishes the failure, and `/generate` allows a retry from it.
+- `revision_retry_cap: 0` (legal config, "straight to review") crashed every
+  critic pass on `parse_failure_objects`'s `>=1` guard; the call site floors it.
+- `plan_beat` silently attributed PAD to the alphabetically-first character
+  when the model returned an unknown `focal_character_id`; it now resolves
+  names/ids case-insensitively and otherwise attributes to nobody, logged.
+- `web_search` (blocking `ddgs` HTTP, up to 10 s) ran on the event loop and
+  froze SSE streaming during critic searches; sync tools now run via
+  `asyncio.to_thread`.
+- Malformed character `pad` values in a seed surfaced as `AttributeError` /
+  `IntegrityError` (HTTP 500); the loader validates shape and −1..1 range and
+  the web validator checks thread/character required fields (HTTP 400).
+- Stream-bus subscriber queues were unbounded; they now cap at 1024 events,
+  dropping oldest (reconnecting clients re-hydrate from the snapshot).
+- `/status` now includes `word_target`; the SSE response carries
+  `Cache-Control: no-cache`; every fetch in `main.js` handles network and
+  non-JSON failures instead of throwing unhandled rejections.
+
+**Done-check.** `uv run pytest -q` → `293 passed` (283 prior + 10 new
+regression tests covering each fix above).

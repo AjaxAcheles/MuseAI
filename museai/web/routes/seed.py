@@ -28,6 +28,12 @@ def _validate_seed(seed: Any) -> dict[str, Any]:
     for collection in ("threads", "characters"):
         if collection in seed and not isinstance(seed[collection], list):
             raise ValueError(f"seed.{collection} must be a list")
+    for index, thread in enumerate(seed.get("threads") or [], start=1):
+        if not isinstance(thread, dict) or not isinstance(thread.get("description"), str):
+            raise ValueError(f"seed.threads[{index}].description is required")
+    for index, character in enumerate(seed.get("characters") or [], start=1):
+        if not isinstance(character, dict) or not isinstance(character.get("name"), str):
+            raise ValueError(f"seed.characters[{index}].name is required")
     return seed
 
 
@@ -45,11 +51,15 @@ async def _seed_payload() -> dict[str, Any]:
     return _validate_seed(parsed)
 
 
+def _example_seed() -> str:
+    example_path = Path("seeds/example.json")
+    return example_path.read_text(encoding="utf-8") if example_path.is_file() else ""
+
+
 @bp.get("/seed")
 async def seed():
-    example_path = Path("seeds/example.json")
-    example = example_path.read_text(encoding="utf-8") if example_path.is_file() else ""
-    return await render_template("seed.html", example_seed=example)
+    example = _example_seed()
+    return await render_template("seed.html", example_seed=example, seed_text=example)
 
 
 @bp.post("/seed/submit")
@@ -60,7 +70,17 @@ async def submit():
     except (KeyError, TypeError, ValueError) as exc:
         if request.is_json:
             return jsonify({"ok": False, "error": str(exc)}), 400
-        return await render_template("seed.html", error=str(exc), example_seed=""), 400
+        # Re-render with the submitted text intact so the user's edits survive.
+        form = await request.form
+        return (
+            await render_template(
+                "seed.html",
+                error=str(exc),
+                example_seed=_example_seed(),
+                seed_text=form.get("seed_json", ""),
+            ),
+            400,
+        )
     if request.is_json:
         return jsonify({"ok": True, "project_id": seed_doc["project"]["id"]})
     return redirect(url_for("dashboard.dashboard"))

@@ -1,54 +1,120 @@
 (function () {
   "use strict";
 
-  const cssVar = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
   const fmt = new Intl.NumberFormat();
   const controllers = new Set();
-
-  function postJSON(url, payload = {}) {
-    const controller = new AbortController();
-    controllers.add(controller);
-    return fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-      signal: controller.signal,
-    }).finally(() => controllers.delete(controller));
-  }
 
   window.addEventListener("beforeunload", () => {
     controllers.forEach((controller) => controller.abort());
   });
 
+  /** POST JSON and always resolve to an {ok, ...} object — never throws. */
+  async function postJSON(url, payload = {}) {
+    const controller = new AbortController();
+    controllers.add(controller);
+    try {
+      const response = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+        signal: controller.signal,
+      });
+      const body = await response.json().catch(() => null);
+      if (!body || typeof body !== "object") {
+        return { ok: false, error: `Unexpected response (HTTP ${response.status}).` };
+      }
+      return body;
+    } catch (err) {
+      if (err && err.name === "AbortError") return { ok: false, error: "Request cancelled.", aborted: true };
+      return { ok: false, error: "Network error — is the MuseAI server running?" };
+    } finally {
+      controllers.delete(controller);
+    }
+  }
+
+  async function getJSON(url) {
+    try {
+      const response = await fetch(url);
+      const body = await response.json().catch(() => null);
+      return body && typeof body === "object" ? body : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Render untrusted markdown (LLM output) into an element, sanitized. */
+  function renderMarkdownInto(el, text) {
+    const source = String(text || "");
+    if (window.marked && window.DOMPurify) {
+      el.innerHTML = window.DOMPurify.sanitize(window.marked.parse(source));
+    } else {
+      el.textContent = source;
+    }
+  }
+
+  function setInlineResult(el, message, ok) {
+    if (!el) return;
+    el.textContent = message || "";
+    el.classList.toggle("is-error", ok === false);
+    el.classList.toggle("is-ok", ok === true);
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* Dashboard                                                           */
+  /* ------------------------------------------------------------------ */
+
+  const RUN_UI = {
+    idle: { label: "Idle", pulse: "pulse-idle", generate: "Generate", pauseResume: null, stop: false },
+    running: { label: "Running", pulse: "pulse-running", generate: null, pauseResume: "pause", stop: true },
+    paused: { label: "Paused", pulse: "pulse-paused", generate: null, pauseResume: "resume", stop: true },
+    review: { label: "Awaiting review", pulse: "pulse-review", generate: null, pauseResume: null, stop: true },
+    stopped: { label: "Stopped", pulse: "pulse-stopped", generate: "Generate", pauseResume: null, stop: false },
+    done: { label: "Done", pulse: "pulse-done", generate: "Generate again", pauseResume: null, stop: false },
+    error: { label: "Error", pulse: "pulse-stopped", generate: "Retry", pauseResume: null, stop: false },
+  };
+
   function initDashboard() {
     const stream = document.getElementById("manuscript-stream");
     if (!stream) return;
 
-    const wordCounter = document.getElementById("word-counter");
-    const beatIdentifier = document.getElementById("beat-identifier");
-    const pulse = document.getElementById("run-pulse");
-    const runLabel = document.getElementById("run-status-label");
-    const criticSummary = document.getElementById("critic-summary");
-    const criticReasoning = document.getElementById("critic-reasoning");
-    const criticTools = document.getElementById("critic-tools");
-    const reviewPanel = document.getElementById("review-panel");
-    const reviewText = document.getElementById("review-text");
-    const reviewMeta = document.getElementById("review-meta");
-    const padEmpty = document.getElementById("pad-empty");
-    const controlResult = document.getElementById("control-result");
+    const el = (id) => document.getElementById(id);
+    const wordCounter = el("word-counter");
+    const wordFill = el("word-progress-fill");
+    const beatIdentifier = el("beat-identifier");
+    const pulse = el("run-pulse");
+    const runLabel = el("run-status-label");
+    const runNotice = el("run-notice");
+    const generateButton = el("generate-button");
+    const pauseResumeButton = el("pause-resume-button");
+    const stopButton = el("stop-button");
+    const criticSummary = el("critic-summary");
+    const criticBody = el("critic-body");
+    const criticReasoning = el("critic-reasoning");
+    const criticTools = el("critic-tools");
+    const reviewBanner = el("review-banner");
+    const reviewText = el("review-text");
+    const reviewMeta = el("review-meta");
+    const doneCard = el("done-card");
+
     let currentBeat = null;
+    let currentStatus = "idle";
     let autoScroll = true;
     const beatText = new Map();
+    const MAX_TOOL_CARDS = 8;
 
     stream.addEventListener("scroll", () => {
       const distance = stream.scrollHeight - stream.scrollTop - stream.clientHeight;
       autoScroll = distance < 80;
     });
 
-    const radar = initRadar();
-
     function scrollIfNeeded() {
       if (autoScroll) stream.scrollTop = stream.scrollHeight;
+    }
+
+    function notice(message) {
+      if (!runNotice) return;
+      runNotice.textContent = message || "";
+      runNotice.hidden = !message;
     }
 
     function setPhase(phase) {
@@ -57,20 +123,49 @@
       });
     }
 
-    function setRunStatus(status) {
-      const normalized = status || "idle";
-      if (runLabel) runLabel.textContent = normalized[0].toUpperCase() + normalized.slice(1);
-      if (!pulse) return;
-      pulse.className = "pulse-dot";
-      if (normalized === "running" || normalized === "done" || normalized === "review") pulse.classList.add("pulse-running");
-      else if (normalized === "paused") pulse.classList.add("pulse-paused");
-      else if (normalized === "stopped") pulse.classList.add("pulse-stopped");
-      else pulse.classList.add("pulse-idle");
+    function applyRunState(status) {
+      const ui = RUN_UI[status] || RUN_UI.idle;
+      currentStatus = status in RUN_UI ? status : "idle";
+      if (runLabel) runLabel.textContent = ui.label;
+      if (pulse) pulse.className = `pulse-dot ${ui.pulse}`;
+
+      if (generateButton) {
+        generateButton.hidden = ui.generate === null;
+        if (ui.generate !== null) {
+          generateButton.textContent = ui.generate;
+          generateButton.disabled = false;
+        }
+      }
+      if (pauseResumeButton) {
+        pauseResumeButton.hidden = ui.pauseResume === null;
+        if (ui.pauseResume !== null) {
+          pauseResumeButton.dataset.runAction = ui.pauseResume;
+          pauseResumeButton.textContent = ui.pauseResume === "pause" ? "Pause" : "Resume";
+          pauseResumeButton.disabled = false;
+        }
+      }
+      if (stopButton) {
+        stopButton.hidden = !ui.stop;
+        stopButton.disabled = false;
+      }
+
+      if (currentStatus !== "review" && reviewBanner) reviewBanner.hidden = true;
+      if (currentStatus === "running") {
+        if (doneCard) doneCard.hidden = true;
+      }
+      if (currentStatus === "idle") setPhase(null);
     }
 
-    function renderMarkdown(text) {
-      if (window.marked) return window.marked.parse(text || "");
-      return (text || "").replace(/[&<>]/g, (ch) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[ch]));
+    function setBeatIdentifier(text) {
+      if (beatIdentifier) beatIdentifier.textContent = text;
+    }
+
+    function setWordProgress(count, target) {
+      if (wordCounter) wordCounter.textContent = `${fmt.format(count || 0)} / ${fmt.format(target || 0)} words`;
+      if (wordFill) {
+        const pct = target > 0 ? Math.min(100, (count / target) * 100) : 0;
+        wordFill.style.width = `${pct}%`;
+      }
     }
 
     function ensureBeat(beatId, label) {
@@ -81,184 +176,347 @@
         block = document.createElement("div");
         block.className = "beat-block";
         block.dataset.beatId = id;
-        block.innerHTML = `<div class="beat-label">${label || id}</div><div class="beat-prose"></div>`;
+        const labelEl = document.createElement("div");
+        labelEl.className = "beat-label";
+        labelEl.textContent = label || id;
+        const proseEl = document.createElement("div");
+        proseEl.className = "beat-prose";
+        block.append(labelEl, proseEl);
         stream.appendChild(block);
+      } else if (label) {
+        block.querySelector(".beat-label").textContent = label;
       }
       currentBeat = id;
       return block;
     }
 
+    function showReview(data) {
+      if (!reviewBanner) return;
+      reviewBanner.hidden = false;
+      if (reviewText) reviewText.value = data.best_seen_draft || "";
+      if (reviewMeta) {
+        const failures = Array.isArray(data.failures) ? data.failures.length : 0;
+        const best = data.best_seen_failure_count;
+        reviewMeta.textContent =
+          `The draft failed its quality gate ${failures ? `with ${failures} open issue(s)` : ""}` +
+          `${best != null ? ` — best attempt had ${best} failure(s)` : ""}. ` +
+          "Edit it if needed, then accept or regenerate.";
+      }
+      reviewBanner.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    }
+
     const handlers = {
       hydration(snapshot) {
-        Object.entries(snapshot || {}).forEach(([type, data]) => dispatch(type, data));
+        const entries = Object.entries(snapshot || {});
+        // Apply run_status last: it decides which panels are visible.
+        entries.sort(([a], [b]) => (a === "run_status") - (b === "run_status"));
+        entries.forEach(([type, data]) => {
+          if (type !== "hydration") dispatch(type, data);
+        });
       },
       run_status(data) {
-        setRunStatus(data.status);
-        if (data.status === "idle") setPhase("Idle");
+        applyRunState(data.status || "idle");
+        if (data.status === "error" && data.error) notice(`Run failed: ${data.error}`);
       },
       phase_change(data) {
         setPhase(data.phase);
       },
       chapters_planned(data) {
-        if (beatIdentifier) beatIdentifier.textContent = `${data.arc_id || "Arc"} · Ch ${data.active_chapter_id || "—"} · Beat —`;
+        setBeatIdentifier(`${data.arc_id || "Arc"} · Ch ${data.active_chapter_id || "—"} · Beat —`);
       },
       beats_planned(data) {
-        const active = (data.beats || []).find((beat) => beat.id === data.active_beat_id) || (data.beats || [])[0];
-        if (beatIdentifier && active) beatIdentifier.textContent = `${data.chapter_id || "Chapter"} · Beat ${active.ordering}`;
-      },
-      pad_update(data) {
-        const pad = data.target_pad || {};
-        radar.data.datasets[0].data = [pad.pleasure || 0, pad.arousal || 0, pad.dominance || 0];
-        radar.update();
-        if (padEmpty) padEmpty.textContent = `${data.character_id || "Character"} · ${data.beat_id || "beat"}`;
+        const beats = Array.isArray(data.beats) ? data.beats : [];
+        const active = beats.find((beat) => beat.id === data.active_beat_id) || beats[0];
+        if (active) setBeatIdentifier(`${data.chapter_id || "Chapter"} · Beat ${active.ordering}`);
       },
       beat_start(data) {
-        const label = `Beat ${data.ordering || "—"} · ${data.beat_id || "unknown"}`;
-        ensureBeat(data.beat_id, label);
+        ensureBeat(data.beat_id, `Beat ${data.ordering ?? "—"} · ${data.beat_id || "unknown"}`);
         beatText.set(data.beat_id, "");
         scrollIfNeeded();
       },
       token(data) {
         const beatId = data.beat_id || currentBeat || "unknown-beat";
-        const block = ensureBeat(beatId, beatId);
+        const block = ensureBeat(beatId);
         const next = (beatText.get(beatId) || "") + (data.text || "");
         beatText.set(beatId, next);
-        block.querySelector(".beat-prose").innerHTML = renderMarkdown(next);
+        renderMarkdownInto(block.querySelector(".beat-prose"), next);
         scrollIfNeeded();
       },
+      revision(data) {
+        const block = ensureBeat(data.beat_id, `Revised · ${data.beat_id || "unknown"}`);
+        beatText.set(data.beat_id, data.text || "");
+        renderMarkdownInto(block.querySelector(".beat-prose"), data.text || "");
+      },
       audit(data) {
-        if (criticSummary) criticSummary.textContent = data.failures?.length ? `${data.failures.length} audit issue(s)` : "Programmatic audit clean";
+        const failures = Array.isArray(data.failures) ? data.failures.length : 0;
+        if (criticSummary) {
+          criticSummary.textContent = failures
+            ? `Programmatic audit found ${failures} issue(s).`
+            : "Programmatic audit clean.";
+        }
       },
       critic_tool(data) {
         if (!criticTools) return;
-        const args = data.arguments || {};
-        const results = Array.isArray(data.result) ? data.result : [];
-        const preview = results.slice(0, 2).map((item) => `${item.title || "Result"}: ${item.snippet || item.url || ""}`).join("\n");
+        if (criticBody) criticBody.hidden = false;
         const card = document.createElement("div");
         card.className = "critic-tool";
-        card.innerHTML = `<strong>${data.tool || "web_search"}</strong><div class="text-muted small">${args.query || "No query"}</div><pre class="small mb-0">${preview || "No results returned."}</pre>`;
+        const name = document.createElement("strong");
+        name.textContent = data.tool || "web_search";
+        const query = document.createElement("div");
+        query.className = "critic-tool-query";
+        query.textContent = (data.arguments && data.arguments.query) || "No query";
+        const results = Array.isArray(data.result) ? data.result : [];
+        const preview = document.createElement("pre");
+        preview.textContent = results.length
+          ? results.slice(0, 2).map((item) => `${item.title || "Result"}: ${item.snippet || item.url || ""}`).join("\n")
+          : "No results returned.";
+        card.append(name, query, preview);
         criticTools.prepend(card);
+        while (criticTools.children.length > MAX_TOOL_CARDS) criticTools.lastChild.remove();
       },
       critic_reasoning(data) {
+        if (criticBody) criticBody.hidden = false;
         if (criticReasoning) criticReasoning.textContent = data.text || "Critic returned no text.";
       },
       critic_summary(data) {
-        if (criticSummary) criticSummary.textContent = data.summary || "Critic complete";
-      },
-      revision(data) {
-        const block = ensureBeat(data.beat_id, `Revised ${data.beat_id}`);
-        beatText.set(data.beat_id, data.text || "");
-        block.querySelector(".beat-prose").innerHTML = renderMarkdown(data.text || "");
+        if (criticSummary) criticSummary.textContent = data.summary || "Critic complete.";
       },
       word_count(data) {
-        if (wordCounter) wordCounter.textContent = `${fmt.format(data.word_count || 0)} / ${fmt.format(data.target || 0)} words`;
+        setWordProgress(data.word_count || 0, data.target || 0);
       },
       pointer_update(data) {
         const pointer = data.fsm_pointer || {};
-        if (beatIdentifier) beatIdentifier.textContent = `Arc ${pointer.arc_id || "—"} · Ch ${pointer.chapter_id || "—"} · Beat ${(pointer.beat_index ?? "—")}`;
+        setBeatIdentifier(`Arc ${pointer.arc_id || "—"} · Ch ${pointer.chapter_id || "—"} · Beat ${pointer.beat_index ?? "—"}`);
       },
       review_needed(data) {
-        reviewPanel?.classList.remove("d-none");
-        if (reviewText) reviewText.value = data.best_seen_draft || "";
-        if (reviewMeta) reviewMeta.textContent = `${(data.failures || []).length} issue(s); best failure count ${data.best_seen_failure_count ?? "unknown"}.`;
+        showReview(data || {});
       },
       manuscript_ready(data) {
-        setRunStatus("done");
-        if (criticSummary) criticSummary.textContent = `Manuscript ready: ${data.path || "export complete"}`;
+        applyRunState("done");
+        if (doneCard) {
+          doneCard.hidden = false;
+          const words = document.getElementById("done-words");
+          const path = document.getElementById("done-path");
+          if (words) words.textContent = `${fmt.format(data.word_count || 0)} words`;
+          if (path) path.textContent = data.path || "—";
+        }
       },
     };
 
     function dispatch(type, data) {
       const handler = handlers[type];
-      if (handler) handler(data || {});
-    }
-
-    function addSse(type) {
-      events.addEventListener(type, (event) => dispatch(type, JSON.parse(event.data || "{}")));
+      if (!handler) return;
+      try {
+        handler(data || {});
+      } catch (err) {
+        console.error(`MuseAI: handler for '${type}' failed`, err);
+      }
     }
 
     const events = new EventSource("/stream");
-    Object.keys(handlers).forEach(addSse);
-
-    document.getElementById("generate-button")?.addEventListener("click", async () => {
-      const response = await postJSON("/generate");
-      const body = await response.json();
-      setRunStatus(body.status || "idle");
-      if (!body.ok && criticSummary) criticSummary.textContent = body.error;
-    });
-
-    document.querySelectorAll("[data-control-action]").forEach((button) => {
-      button.addEventListener("click", async () => {
-        const action = button.dataset.controlAction;
-        const response = await postJSON(`/control/${action}`);
-        const body = await response.json();
-        if (controlResult) controlResult.textContent = body.ok ? `Status: ${body.status}` : body.error;
-        setRunStatus(body.status);
+    Object.keys(handlers).forEach((type) => {
+      events.addEventListener(type, (event) => {
+        let data = {};
+        try {
+          data = JSON.parse(event.data || "{}");
+        } catch {
+          return;
+        }
+        dispatch(type, data);
       });
+    });
+    events.onerror = () => notice("Live connection lost — reconnecting…");
+    events.onopen = () => notice("");
+
+    async function runAction(button, action) {
+      button.disabled = true;
+      const body = await postJSON(action === "generate" ? "/generate" : `/control/${action}`);
+      if (body.aborted) return;
+      if (!body.ok) {
+        notice(body.error || "Request failed.");
+        applyRunState(body.status || currentStatus);
+        return;
+      }
+      notice(action === "pause" && body.status === "running" ? "Pausing at the next safe boundary…" : "");
+      applyRunState(body.status || "idle");
+    }
+
+    document.querySelectorAll("[data-run-action]").forEach((button) => {
+      button.addEventListener("click", () => runAction(button, button.dataset.runAction));
     });
 
     document.getElementById("review-accept")?.addEventListener("click", () => submitReview("accept"));
     document.getElementById("review-regenerate")?.addEventListener("click", () => submitReview("regenerate"));
 
     async function submitReview(decision) {
-      const response = await postJSON("/control/review", { decision, edited_text: reviewText?.value || "" });
-      const body = await response.json();
-      document.getElementById("review-result").textContent = body.ok ? `Review resolved: ${body.status}` : body.error;
-      if (body.ok) reviewPanel?.classList.add("d-none");
+      const result = document.getElementById("review-result");
+      const body = await postJSON("/control/review", { decision, edited_text: reviewText?.value || "" });
+      if (body.aborted) return;
+      setInlineResult(result, body.ok ? "" : body.error, body.ok);
+      if (body.ok) applyRunState(body.status || "running");
     }
-  }
 
-  function initRadar() {
-    const canvas = document.getElementById("pad-radar");
-    if (!canvas || !window.Chart) return { data: { datasets: [{ data: [null, null, null] }] }, update() {} };
-    const color = cssVar("--color-accent-info");
-    return new Chart(canvas, {
-      type: "radar",
-      data: {
-        labels: ["Pleasure", "Arousal", "Dominance"],
-        datasets: [{ label: "Target PAD", data: [null, null, null], borderColor: color, backgroundColor: "transparent" }],
-      },
-      options: { scales: { r: { min: -1, max: 1, ticks: { stepSize: 0.5 } } } },
+    // The manager is the source of truth at page load; the SSE snapshot may
+    // predate a server restart.
+    getJSON("/status").then((body) => {
+      if (!body || !body.ok) return;
+      applyRunState(body.status || "idle");
+      if (typeof body.project_word_total === "number") {
+        setWordProgress(body.project_word_total, body.word_target || 0);
+      }
+      const pointer = body.pointer;
+      if (pointer && (pointer.arc_id || pointer.chapter_id)) {
+        setBeatIdentifier(`Arc ${pointer.arc_id || "—"} · Ch ${pointer.chapter_id || "—"} · Beat ${pointer.beat_index ?? "—"}`);
+      }
     });
   }
+
+  /* ------------------------------------------------------------------ */
+  /* Seed                                                                */
+  /* ------------------------------------------------------------------ */
+
+  function validateSeed(raw) {
+    if (!raw.trim()) return { ok: false, message: "Paste seed JSON to validate it.", neutral: true };
+    let seed;
+    try {
+      seed = JSON.parse(raw);
+    } catch (err) {
+      return { ok: false, message: `Malformed JSON: ${err.message}` };
+    }
+    if (typeof seed !== "object" || seed === null || Array.isArray(seed)) {
+      return { ok: false, message: "Seed must be a JSON object." };
+    }
+    const project = seed.project;
+    if (typeof project !== "object" || project === null || typeof project.id !== "string" || !project.id) {
+      return { ok: false, message: "seed.project.id (a string) is required." };
+    }
+    if (!Array.isArray(seed.arcs) || seed.arcs.length === 0) {
+      return { ok: false, message: "seed.arcs must be a non-empty list." };
+    }
+    for (let i = 0; i < seed.arcs.length; i += 1) {
+      const arc = seed.arcs[i];
+      if (typeof arc !== "object" || arc === null || typeof arc.description !== "string") {
+        return { ok: false, message: `seed.arcs[${i + 1}].description is required.` };
+      }
+    }
+    for (const collection of ["threads", "characters"]) {
+      if (collection in seed && !Array.isArray(seed[collection])) {
+        return { ok: false, message: `seed.${collection} must be a list.` };
+      }
+    }
+    const characters = Array.isArray(seed.characters) ? seed.characters.length : 0;
+    const threads = Array.isArray(seed.threads) ? seed.threads.length : 0;
+    return {
+      ok: true,
+      message: `Valid seed — project “${project.id}”, ${seed.arcs.length} arc(s), ${characters} character(s), ${threads} thread(s).`,
+    };
+  }
+
+  function initSeed() {
+    const editor = document.getElementById("seed_json");
+    if (!editor) return;
+    const validation = document.getElementById("seed-validation");
+    const submit = document.getElementById("seed-submit");
+    const example = document.getElementById("seed-example")?.dataset.example || "";
+    let timer = null;
+
+    function runValidation() {
+      const verdict = validateSeed(editor.value);
+      if (validation) {
+        validation.textContent = verdict.message;
+        validation.classList.toggle("is-ok", verdict.ok);
+        validation.classList.toggle("is-error", !verdict.ok && !verdict.neutral);
+      }
+      if (submit) submit.disabled = !verdict.ok;
+      return verdict;
+    }
+
+    editor.addEventListener("input", () => {
+      clearTimeout(timer);
+      timer = setTimeout(runValidation, 250);
+    });
+
+    document.getElementById("seed-format")?.addEventListener("click", () => {
+      const verdict = runValidation();
+      if (!verdict.ok) return;
+      editor.value = JSON.stringify(JSON.parse(editor.value), null, 2);
+      runValidation();
+    });
+
+    document.getElementById("seed-reset")?.addEventListener("click", () => {
+      if (example) editor.value = example;
+      runValidation();
+    });
+
+    runValidation();
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* Settings                                                            */
+  /* ------------------------------------------------------------------ */
 
   function initSettings() {
     const page = document.getElementById("settings-page");
     if (!page) return;
-    const baseConfig = JSON.parse(page.dataset.config || "{}");
+    let baseConfig = {};
+    try {
+      baseConfig = JSON.parse(page.dataset.config || "{}");
+    } catch {
+      baseConfig = {};
+    }
     const result = document.getElementById("settings-save-result");
     const endpointResult = document.getElementById("endpoint-test-result");
 
-    function buildConfig() {
-      const cfg = structuredClone(baseConfig);
-      cfg.endpoint.base_url = document.getElementById("setting-base-url").value;
-      cfg.endpoint.model_name = document.getElementById("setting-model-name").value;
-      cfg.endpoint.api_key = document.getElementById("setting-api-key").value;
-      cfg.endpoint.tokenizer_family = document.getElementById("setting-tokenizer").value;
+    function readGenerationValues() {
+      const values = {};
+      let firstError = null;
       document.querySelectorAll(".generation-setting").forEach((input) => {
         const key = input.dataset.generationKey;
-        const value = input.step === "1" || Number.isInteger(Number(input.value)) ? Number.parseInt(input.value, 10) : Number.parseFloat(input.value);
-        cfg.generation[key] = value;
+        const raw = input.value.trim();
+        const value = raw === "" ? NaN : Number(raw);
+        const min = Number(input.min);
+        const max = Number(input.max);
+        const bad = !Number.isFinite(value) || value < min || value > max;
+        input.classList.toggle("is-invalid", bad);
+        if (bad && !firstError) {
+          const label = document.querySelector(`label[for="${input.id}"]`);
+          firstError = `${label ? label.textContent : key} must be a number between ${input.min} and ${input.max}.`;
+        }
+        values[key] = value;
       });
-      return cfg;
+      return { values, error: firstError };
     }
 
     document.getElementById("save-settings")?.addEventListener("click", async () => {
-      const response = await postJSON("/settings/save", buildConfig());
-      const body = await response.json();
-      if (result) result.textContent = body.ok ? "Settings saved." : body.error;
+      const { values, error } = readGenerationValues();
+      if (error) {
+        setInlineResult(result, error, false);
+        return;
+      }
+      const cfg = structuredClone(baseConfig);
+      cfg.endpoint.base_url = document.getElementById("setting-base-url").value.trim();
+      cfg.endpoint.model_name = document.getElementById("setting-model-name").value.trim();
+      cfg.endpoint.api_key = document.getElementById("setting-api-key").value;
+      cfg.endpoint.tokenizer_family = document.getElementById("setting-tokenizer").value;
+      Object.assign(cfg.generation, values);
+
+      setInlineResult(result, "Saving…");
+      const body = await postJSON("/settings/save", cfg);
+      if (body.aborted) return;
+      setInlineResult(result, body.ok ? "Settings saved." : body.error, body.ok);
     });
 
     document.getElementById("test-endpoint")?.addEventListener("click", async () => {
-      if (endpointResult) endpointResult.textContent = "Testing…";
-      const response = await postJSON("/settings/test_endpoint");
-      const body = await response.json();
-      if (endpointResult) endpointResult.textContent = body.ok ? `OK: ${body.model}` : body.error;
+      setInlineResult(endpointResult, "Testing…");
+      const body = await postJSON("/settings/test_endpoint");
+      if (body.aborted) return;
+      setInlineResult(endpointResult, body.ok ? `Connected — model responded: ${body.model}` : body.error, body.ok);
     });
   }
 
   document.addEventListener("DOMContentLoaded", () => {
     initDashboard();
+    initSeed();
     initSettings();
   });
 })();

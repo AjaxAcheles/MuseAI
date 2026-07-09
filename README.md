@@ -51,10 +51,11 @@ uv run python run.py
 
 Then:
 
-1. Open `/seed`, review or edit the example seed JSON, and submit it.
-2. Return to `/dashboard` and click **Generate**. Prose streams live by beat;
-   the PAD radar, critic panel, word counter, and review controls update from
-   real server-sent events.
+1. Open `/seed`, review or edit the example seed JSON (it validates live as you
+   type), and submit it.
+2. Return to the Studio (`/dashboard`) and click **Generate**. Prose streams
+   live by beat; the phase tracker, word-count progress, critic panel, and
+   review controls update from real server-sent events.
 3. If generation parks for review, edit the draft if needed and choose
    **Accept** or **Regenerate**.
 4. When the run completes, MuseAI exports a Markdown manuscript under

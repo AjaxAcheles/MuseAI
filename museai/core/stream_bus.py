@@ -15,6 +15,13 @@ import asyncio
 from typing import Any
 
 
+# Per-subscriber backlog cap. A subscriber that stops draining (a stalled SSE
+# connection) must not grow its queue for the whole run; beyond the cap the
+# oldest events are dropped — a reconnecting client re-hydrates from
+# ``last_snapshot`` anyway.
+_MAX_QUEUE_EVENTS = 1024
+
+
 class StreamBus:
     """A simple fan-out bus: one publisher, many subscriber queues."""
 
@@ -27,11 +34,19 @@ class StreamBus:
         event = {"type": event_type, "data": data}
         self.last_snapshot[event_type] = data
         for queue in list(self._subscribers):
-            queue.put_nowait(event)
+            while True:
+                try:
+                    queue.put_nowait(event)
+                    break
+                except asyncio.QueueFull:
+                    try:
+                        queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        break
 
     def subscribe(self) -> asyncio.Queue[dict[str, Any]]:
         """Register a new subscriber and return its queue."""
-        queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+        queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=_MAX_QUEUE_EVENTS)
         self._subscribers.add(queue)
         return queue
 

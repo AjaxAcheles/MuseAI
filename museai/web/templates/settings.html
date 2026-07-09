@@ -3,63 +3,71 @@
 {% block title %}MuseAI Settings{% endblock %}
 
 {% block content %}
-<div id="settings-page" data-config='{{ config_json | safe }}'>
-  <div class="d-flex align-items-center justify-content-between gap-3 mb-4">
-    <div>
-      <h1 class="h3 mb-1">Settings</h1>
-      <p class="text-muted mb-0">Endpoint and generation values are validated strictly before save.</p>
-    </div>
-    <a class="btn btn-outline-light" href="/dashboard">Dashboard</a>
-  </div>
+<div id="settings-page" class="page-wide" data-config="{{ config_json }}">
+  <header class="page-header">
+    <h1 class="page-title">Settings</h1>
+    <p class="page-subtitle">Values are validated strictly before saving; an invalid value never reaches <code>config.yaml</code>.</p>
+  </header>
 
-  <div class="row g-4">
-    <section class="col-lg-6">
-      <div class="panel">
-        <h2 class="h5 mb-3">Endpoint</h2>
-        <div class="mb-3">
-          <label class="form-label" for="setting-base-url">Base URL</label>
-          <input id="setting-base-url" class="form-control" value="{{ settings.endpoint.base_url }}">
-        </div>
-        <div class="mb-3">
-          <label class="form-label" for="setting-model-name">Model name</label>
-          <input id="setting-model-name" class="form-control" value="{{ settings.endpoint.model_name }}">
-        </div>
-        <div class="mb-3">
-          <label class="form-label" for="setting-api-key">API key</label>
-          <input id="setting-api-key" class="form-control" type="password" placeholder="{{ 'Key is configured; leave blank to keep it' if settings.endpoint.api_key_present else 'Paste API key' }}">
-          <div class="form-text">Presence: {{ "configured" if settings.endpoint.api_key_present else "not configured" }}</div>
-        </div>
-        <div class="mb-3">
-          <label class="form-label" for="setting-tokenizer">Tokenizer</label>
-          <select id="setting-tokenizer" class="form-select">
-            <option value="tiktoken" {% if settings.endpoint.tokenizer_family == "tiktoken" %}selected{% endif %}>OpenAI-compatible (tiktoken)</option>
-            <option value="char_heuristic" {% if settings.endpoint.tokenizer_family == "char_heuristic" %}selected{% endif %}>Character heuristic (÷4)</option>
-          </select>
-        </div>
-        <button id="test-endpoint" class="btn btn-info" type="button">Test Connection</button>
-        <p id="endpoint-test-result" class="small text-muted mt-3 mb-0" aria-live="polite"></p>
+  <div class="settings-grid">
+    <section class="panel">
+      <header class="panel-header">
+        <h2 class="panel-title">Endpoint</h2>
+        <p class="panel-subtitle">Any OpenAI-compatible server, local or hosted.</p>
+      </header>
+      <div class="field">
+        <label class="form-label" for="setting-base-url">Base URL</label>
+        <input id="setting-base-url" class="form-control" value="{{ settings.endpoint.base_url }}">
+      </div>
+      <div class="field">
+        <label class="form-label" for="setting-model-name">Model name</label>
+        <input id="setting-model-name" class="form-control" value="{{ settings.endpoint.model_name }}">
+      </div>
+      <div class="field">
+        <label class="form-label" for="setting-api-key">API key</label>
+        <input id="setting-api-key" class="form-control" type="password" autocomplete="off"
+               placeholder="{{ 'Configured — leave blank to keep the current key' if settings.endpoint.api_key_present else 'Paste API key' }}">
+        <p class="form-text">
+          {% if settings.endpoint.api_key_present %}A key is configured. Leaving this blank keeps it unchanged.{% else %}No key is configured yet.{% endif %}
+        </p>
+      </div>
+      <div class="field">
+        <label class="form-label" for="setting-tokenizer">Tokenizer</label>
+        <select id="setting-tokenizer" class="form-select">
+          <option value="tiktoken" {% if settings.endpoint.tokenizer_family == "tiktoken" %}selected{% endif %}>OpenAI-compatible (tiktoken)</option>
+          <option value="char_heuristic" {% if settings.endpoint.tokenizer_family == "char_heuristic" %}selected{% endif %}>Character heuristic (÷4)</option>
+        </select>
+      </div>
+      <div class="panel-actions">
+        <button id="test-endpoint" class="btn btn-outline-light" type="button">Test connection</button>
+        <span id="endpoint-test-result" class="inline-result" aria-live="polite"></span>
       </div>
     </section>
 
-    <section class="col-lg-6">
-      <div class="panel">
-        <h2 class="h5 mb-3">Generation</h2>
-        {% for key, label, min, max, step in [
-          ("word_count_target", "Word count target", 500, 200000, 500),
-          ("beat_word_target", "Beat word target", 100, 5000, 50),
-          ("revision_retry_cap", "Revision retry cap", 0, 10, 1),
-          ("max_agent_iterations", "Max agent iterations", 1, 20, 1),
-          ("recent_prose_beats", "Recent prose beats", 0, 20, 1),
-          ("context_token_budget", "Context token budget", 500, 200000, 500),
-          ("passive_voice_threshold", "Passive voice threshold", 0, 1, 0.01)
-        ] %}
-        <div class="mb-3">
-          <label class="form-label" for="setting-{{ key }}">{{ label }}</label>
-          <input id="setting-{{ key }}" class="form-control generation-setting" data-generation-key="{{ key }}" type="number" min="{{ min }}" max="{{ max }}" step="{{ step }}" value="{{ settings.generation[key] }}">
-        </div>
-        {% endfor %}
-        <button id="save-settings" class="btn btn-success" type="button">Save</button>
-        <p id="settings-save-result" class="small text-muted mt-3 mb-0" aria-live="polite"></p>
+    <section class="panel">
+      <header class="panel-header">
+        <h2 class="panel-title">Generation</h2>
+        <p class="panel-subtitle">Targets and caps for the draft → audit → revise loop.</p>
+      </header>
+      {% for key, label, min, max, step, hint in [
+        ("word_count_target", "Word count target", 500, 200000, 500, "Total manuscript length to aim for."),
+        ("beat_word_target", "Beat word target", 100, 5000, 50, "Words drafted per beat."),
+        ("revision_retry_cap", "Revision retry cap", 0, 10, 1, "Failed audits before parking for human review."),
+        ("max_agent_iterations", "Max agent iterations", 1, 20, 1, "Critic tool-use loop ceiling."),
+        ("recent_prose_beats", "Recent prose beats", 0, 20, 1, "Prior beats included in drafting context."),
+        ("context_token_budget", "Context token budget", 500, 200000, 500, "Soft ceiling on assembled prompt size."),
+        ("passive_voice_threshold", "Passive voice threshold", 0, 1, 0.01, "Proportion (0–1) of passive sentences tolerated per beat.")
+      ] %}
+      <div class="field">
+        <label class="form-label" for="setting-{{ key }}">{{ label }}</label>
+        <input id="setting-{{ key }}" class="form-control generation-setting" data-generation-key="{{ key }}"
+               type="number" min="{{ min }}" max="{{ max }}" step="{{ step }}" value="{{ settings.generation[key] }}">
+        <p class="form-text">{{ hint }}</p>
+      </div>
+      {% endfor %}
+      <div class="panel-actions">
+        <button id="save-settings" class="btn btn-accent" type="button">Save settings</button>
+        <span id="settings-save-result" class="inline-result" aria-live="polite"></span>
       </div>
     </section>
   </div>

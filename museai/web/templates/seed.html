@@ -3,26 +3,30 @@
 {% block title %}MuseAI Seed{% endblock %}
 
 {% block content %}
-<div class="row justify-content-center">
-  <section class="col-xl-9">
-    <div class="panel">
-      <div class="d-flex align-items-center justify-content-between gap-3 mb-3">
-        <div>
-          <h1 class="h3 mb-1">Load Seed</h1>
-          <p class="text-muted mb-0">Submit project metadata, arcs, threads, and characters with PAD values.</p>
-        </div>
-        <a class="btn btn-outline-light" href="/dashboard">Dashboard</a>
+<div class="page-narrow">
+  <header class="page-header">
+    <h1 class="page-title">Load a seed</h1>
+    <p class="page-subtitle">Project metadata, arcs, threads, and characters. Reloading a seed is safe — writes are idempotent upserts.</p>
+  </header>
+
+  {% if error %}<p class="alert alert-danger" role="alert">{{ error }}</p>{% endif %}
+
+  <form id="seed-form" method="post" action="/seed/submit" class="panel">
+    <div class="seed-toolbar">
+      <label class="seed-label" for="seed_json">Seed JSON</label>
+      <div class="seed-toolbar-actions">
+        <button id="seed-format" class="btn btn-sm btn-outline-light" type="button">Format</button>
+        <button id="seed-reset" class="btn btn-sm btn-outline-light" type="button">Reset to example</button>
       </div>
-      {% if error %}<p class="alert alert-danger" role="alert">{{ error }}</p>{% endif %}
-      <form id="seed-form" method="post" action="/seed/submit">
-        <label class="form-label" for="seed_json">Seed JSON</label>
-        <textarea id="seed_json" name="seed_json" class="form-control font-monospace" rows="24">{{ example_seed }}</textarea>
-        <div class="d-flex align-items-center gap-3 mt-3">
-          <button class="btn btn-success" type="submit">Load seed</button>
-          <span class="text-muted small">The example seed is safe to reload; writes are idempotent upserts.</span>
-        </div>
-      </form>
     </div>
-  </section>
+    <textarea id="seed_json" name="seed_json" class="form-control seed-editor" rows="22"
+              spellcheck="false" autocomplete="off">{{ seed_text }}</textarea>
+    <p id="seed-validation" class="seed-validation" aria-live="polite"></p>
+    <div class="seed-submit-row">
+      <button id="seed-submit" class="btn btn-accent" type="submit">Load seed</button>
+    </div>
+  </form>
+
+  <div id="seed-example" hidden data-example="{{ example_seed }}"></div>
 </div>
 {% endblock %}

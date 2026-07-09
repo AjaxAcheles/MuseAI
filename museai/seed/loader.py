@@ -37,6 +37,29 @@ from museai.core.runtime import init_resources
 _DEFAULT_PAD = {"pleasure": 0.0, "arousal": 0.0, "dominance": 0.0}
 
 
+def _validated_pad(character: dict, char_id: str) -> dict[str, float]:
+    """Return a character's PAD dict, validated to floats in -1..1.
+
+    The DB CHECK constraint would reject bad values anyway, but as an opaque
+    IntegrityError mid-transaction; failing here gives the caller a clear
+    ValueError before any write happens.
+    """
+    pad = character.get("pad", _DEFAULT_PAD)
+    if not isinstance(pad, dict):
+        raise ValueError(f"characters[{char_id}].pad must be an object")
+    validated = {}
+    for axis in ("pleasure", "arousal", "dominance"):
+        value = pad.get(axis, 0.0)
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            raise ValueError(f"characters[{char_id}].pad.{axis} must be a number")
+        if not -1.0 <= value <= 1.0:
+            raise ValueError(
+                f"characters[{char_id}].pad.{axis} must be between -1 and 1, got {value}"
+            )
+        validated[axis] = float(value)
+    return validated
+
+
 def load_seed(seed: dict, config: AppConfig) -> dict[str, int]:
     """Write a seed into SQLite. Returns a per-table row count."""
     project = seed["project"]
@@ -97,13 +120,13 @@ def load_seed(seed: dict, config: AppConfig) -> dict[str, int]:
                 )
                 counts["characters"] += 1
 
-                pad = character.get("pad", _DEFAULT_PAD)
+                pad = _validated_pad(character, char_id)
                 upsert_character_emotions(
                     conn,
                     character_id=char_id,
-                    pleasure=pad.get("pleasure", 0.0),
-                    arousal=pad.get("arousal", 0.0),
-                    dominance=pad.get("dominance", 0.0),
+                    pleasure=pad["pleasure"],
+                    arousal=pad["arousal"],
+                    dominance=pad["dominance"],
                 )
                 counts["character_emotions"] += 1
     finally:

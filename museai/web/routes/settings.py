@@ -74,18 +74,45 @@ async def settings():
     )
 
 
+def _raw_api_key_on_disk(path: Path) -> str | None:
+    """Return the unresolved ``endpoint.api_key`` string from config.yaml.
+
+    The in-memory config holds the *resolved* secret (a ``${VAR}`` reference is
+    expanded at load). Persisting that resolved value would write the secret in
+    plaintext and destroy the env reference, so saves must reuse the raw string.
+    """
+    if not path.is_file():
+        return None
+    try:
+        raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except yaml.YAMLError:
+        return None
+    if not isinstance(raw, dict) or not isinstance(raw.get("endpoint"), dict):
+        return None
+    key = raw["endpoint"].get("api_key")
+    return key if isinstance(key, str) else None
+
+
 @bp.post("/settings/save")
 async def save():
+    path = Path(current_app.config["MUSEAI_CONFIG_PATH"])
     try:
         body = await _payload()
-        if isinstance(body.get("endpoint"), dict) and body["endpoint"].get("api_key") == "":
+        keep_existing_key = (
+            isinstance(body.get("endpoint"), dict) and body["endpoint"].get("api_key") == ""
+        )
+        if keep_existing_key:
             body["endpoint"]["api_key"] = get_config().endpoint.api_key
         validated = AppConfig(**body)
     except (ValidationError, ValueError) as exc:
         return jsonify({"ok": False, "error": str(exc)}), 400
 
-    path = Path(current_app.config["MUSEAI_CONFIG_PATH"])
-    path.write_text(yaml.safe_dump(validated.model_dump(), sort_keys=False), encoding="utf-8")
+    persisted = validated.model_dump()
+    if keep_existing_key:
+        raw_key = _raw_api_key_on_disk(path)
+        if raw_key:
+            persisted["endpoint"]["api_key"] = raw_key
+    path.write_text(yaml.safe_dump(persisted, sort_keys=False), encoding="utf-8")
     try:
         reloaded = load_config(path)
     except ConfigError as exc:

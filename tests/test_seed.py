@@ -61,3 +61,33 @@ def test_load_seed_is_idempotent(config_factory):
     conn.close()
     assert n_arcs == 2
     assert n_chars == 2
+
+
+def test_load_seed_rejects_malformed_pad(config_factory):
+    """A non-dict or out-of-range pad must fail cleanly, not as a DB error."""
+    import pytest
+
+    config = config_factory()
+    init_resources(config)
+    base = {
+        "project": {"id": "p1"},
+        "arcs": [{"description": "An arc."}],
+    }
+
+    with pytest.raises(ValueError, match="pad must be an object"):
+        load_seed(
+            {**base, "characters": [{"name": "Mara", "pad": "very happy"}]},
+            config,
+        )
+
+    with pytest.raises(ValueError, match="between -1 and 1"):
+        load_seed(
+            {**base, "characters": [{"name": "Mara", "pad": {"pleasure": 2.0}}]},
+            config,
+        )
+
+    with pytest.raises(ValueError, match="must be a number"):
+        load_seed(
+            {**base, "characters": [{"name": "Mara", "pad": {"arousal": "high"}}]},
+            config,
+        )

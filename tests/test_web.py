@@ -162,3 +162,92 @@ async def test_control_review_forwards_decision_to_manager(config_factory, tmp_p
         assert manager.reviews == [("accept", "Edited draft.")]
     finally:
         await _close_started_app(test_app)
+
+async def test_seed_submit_error_preserves_user_text(config_factory, tmp_path):
+    """A rejected seed must re-render with the submitted text, not erase it."""
+    app, test_app = await _started_app(config_factory(), tmp_path)
+    try:
+        bad_seed = '{"project": {"id": "p1"}, "arcs": []}'
+        response = await app.test_client().post(
+            "/seed/submit", form={"seed_json": bad_seed}
+        )
+        assert response.status_code == 400
+        body = await response.get_data(as_text=True)
+        assert "seed.arcs must be a non-empty list" in body
+        assert "&#34;p1&#34;" in body or '"p1"' in body  # submitted text survives
+    finally:
+        await _close_started_app(test_app)
+
+
+async def test_settings_save_preserves_env_reference_on_disk(
+    config_factory, tmp_path, monkeypatch
+):
+    """Saving with a blank key must keep the raw ${VAR} reference in config.yaml,
+    never the resolved secret."""
+    import yaml
+
+    monkeypatch.setenv("TEST_MUSEAI_KEY", "sekrit-value")
+    config = config_factory()
+    config_path = tmp_path / "config.yaml"
+
+    on_disk = config.model_dump()
+    on_disk["endpoint"]["api_key"] = "${TEST_MUSEAI_KEY}"
+    config_path.write_text(yaml.safe_dump(on_disk, sort_keys=False), encoding="utf-8")
+
+    app = create_app(config_path=config_path, test_config=config)
+    test_app = app.test_app()
+    await test_app.__aenter__()
+    try:
+        payload = config.model_dump()
+        payload["endpoint"]["api_key"] = ""  # "keep the current key"
+        response = await app.test_client().post("/settings/save", json=payload)
+        assert response.status_code == 200
+
+        persisted = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert persisted["endpoint"]["api_key"] == "${TEST_MUSEAI_KEY}"
+        assert "sekrit-value" not in config_path.read_text(encoding="utf-8")
+        assert "test-key" not in config_path.read_text(encoding="utf-8")
+    finally:
+        await _close_started_app(test_app)
+
+
+async def test_status_reports_project_word_target(config_factory, tmp_path):
+    config = config_factory()
+    app, test_app = await _started_app(config, tmp_path)
+    app_module.manager = MockManager()
+    conn = connect_db(config.db_path)
+    try:
+        with conn:
+            upsert_project(
+                conn,
+                id=config.project_id,
+                genre="mystery",
+                premise="A premise.",
+                word_count_target=5000,
+            )
+    finally:
+        conn.close()
+    try:
+        response = await app.test_client().get("/status")
+        body = await response.get_json()
+        assert body["ok"] is True
+        assert body["word_target"] == 5000
+    finally:
+        await _close_started_app(test_app)
+
+
+async def test_stream_bus_drops_oldest_when_subscriber_stalls():
+    from museai.core.stream_bus import _MAX_QUEUE_EVENTS, StreamBus
+
+    stalled_bus = StreamBus()
+    queue = stalled_bus.subscribe()
+    try:
+        overflow = 5
+        for i in range(_MAX_QUEUE_EVENTS + overflow):
+            await stalled_bus.publish("token", {"i": i})
+
+        assert queue.qsize() == _MAX_QUEUE_EVENTS
+        first = queue.get_nowait()
+        assert first["data"]["i"] == overflow  # the oldest were dropped
+    finally:
+        stalled_bus.unsubscribe(queue)

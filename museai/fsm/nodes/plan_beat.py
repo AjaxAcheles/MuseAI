@@ -176,6 +176,14 @@ async def plan_beat(state: OrchestratorState) -> dict:
         planned = parse_json_array(response.text, what="beats")
 
         known_character_ids = {character["id"] for character in characters}
+        # Models often answer with a character's *name* (or a lowercased id)
+        # instead of the seeded id; resolve those before giving up. A focal id
+        # that cannot be resolved becomes "" — attributing the PAD to an
+        # arbitrary character would silently corrupt that character's state.
+        character_lookup = {character["id"].casefold(): character["id"] for character in characters}
+        character_lookup.update(
+            {character["name"].strip().casefold(): character["id"] for character in characters}
+        )
         beats: list[dict] = []
         for ordering, item in enumerate(planned, start=1):
             intent = str(item.get("intent") or "").strip()
@@ -185,7 +193,15 @@ async def plan_beat(state: OrchestratorState) -> dict:
             target_pad = _target_pad(item, ordering)
             focal = str(item.get("focal_character_id") or "").strip()
             if focal not in known_character_ids:
-                focal = next(iter(sorted(known_character_ids)), "")
+                resolved = character_lookup.get(focal.casefold(), "")
+                if focal and not resolved:
+                    logger.warning(
+                        "node=plan_beat beat %d names unknown focal character %r; "
+                        "PAD will not be attributed",
+                        ordering,
+                        focal,
+                    )
+                focal = resolved
 
             spec = {
                 "intent": intent,

@@ -86,8 +86,10 @@ async def adversarial_critics(state: OrchestratorState) -> dict:
 
     # A StructuredOutputError propagates: an unreadable critic is a failure of
     # the critic, not a clean draft.
+    # revision_retry_cap=0 is a legal config (no revisions, straight to review),
+    # but the parser's retry_cap is a message-formatting budget with a floor of 1.
     failures = parse_failure_objects(
-        response.text, retry_cap=config.generation.revision_retry_cap
+        response.text, retry_cap=max(1, config.generation.revision_retry_cap)
     )
 
     # `audit`'s programmatic failures are already in state; the draft's true

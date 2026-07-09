@@ -57,13 +57,30 @@ def append_event(path: str | Path, event: dict) -> None:
 
 
 def replay_events(path: str | Path) -> Iterator[dict]:
-    """Yield events in append order. A missing log yields nothing."""
+    """Yield events in append order. A missing log yields nothing.
+
+    A line that does not parse as a JSON object is skipped with a warning
+    rather than aborting replay: a crash mid-append leaves a torn final line,
+    and recovery must survive exactly that case.
+    """
     p = Path(path)
     if not p.exists():
         return
     with open(p, "r", encoding="utf-8") as fh:
-        for line in fh:
+        for line_number, line in enumerate(fh, start=1):
             line = line.strip()
             if not line:
                 continue
-            yield json.loads(line)
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                get_fsm_logger().warning(
+                    "event_log_line_skipped line=%d reason=malformed_json", line_number
+                )
+                continue
+            if not isinstance(event, dict):
+                get_fsm_logger().warning(
+                    "event_log_line_skipped line=%d reason=not_an_object", line_number
+                )
+                continue
+            yield event

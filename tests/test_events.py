@@ -28,3 +28,22 @@ def test_append_creates_parent_dir(tmp_path):
     append_event(path, {"type": "x"})
     assert path.exists()
     assert list(replay_events(path)) == [{"type": "x"}]
+
+
+def test_replay_skips_torn_final_line(tmp_path):
+    """A crash mid-append leaves a torn line; recovery must survive it."""
+    path = tmp_path / "events.jsonl"
+    append_event(path, {"type": "beat_commit", "beat_id": "b0"})
+    with open(path, "a", encoding="utf-8") as fh:
+        fh.write('{"type": "beat_commit", "beat_id": "b1", "word_co')
+
+    assert list(replay_events(path)) == [{"type": "beat_commit", "beat_id": "b0"}]
+
+
+def test_replay_skips_non_object_lines(tmp_path):
+    path = tmp_path / "events.jsonl"
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write('"just a string"\n')
+        fh.write('{"type": "ok"}\n')
+
+    assert list(replay_events(path)) == [{"type": "ok"}]

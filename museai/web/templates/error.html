@@ -1,14 +1,20 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-bs-theme="dark">
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>MuseAI Error</title>
+    <title>MuseAI — Error</title>
+    <link href="{{ url_for('static', filename='vendor/bootstrap.min.css') }}" rel="stylesheet">
+    <link href="{{ url_for('static', filename='css/theme.css') }}" rel="stylesheet">
   </head>
   <body>
-    <main>
-      <h1>Request failed</h1>
-      <p>Status {{ status }}: {{ message }}</p>
+    <main class="app-main error-page">
+      <div class="panel error-panel">
+        <p class="error-status">{{ status }}</p>
+        <h1 class="page-title">Request failed</h1>
+        <p class="page-subtitle">{{ message }}</p>
+        <a class="btn btn-accent" href="/dashboard">Back to the studio</a>
+      </div>
     </main>
   </body>
 </html>

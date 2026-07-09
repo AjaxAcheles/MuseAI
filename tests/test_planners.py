@@ -424,3 +424,31 @@ def test_quantize_axis_bands(value, expected):
 
 def test_pad_key_orders_axes_pleasure_arousal_dominance():
     assert pad_key(0.8, 0.0, -0.8) == "pos_neu_neg"
+
+
+async def test_plan_beat_resolves_focal_character_by_name(seeded, monkeypatch):
+    """A focal id given as a character *name* resolves to the seeded id; an
+    unknown one attributes PAD to nobody rather than an arbitrary character."""
+    _seed_active_chapter(seeded)
+    beats = json.dumps([
+        {"ordering": 1, "intent": "Named by name.",
+         "focal_character_id": "Mara",
+         "target_pad": {"pleasure": 0.1, "arousal": 0.1, "dominance": 0.1}},
+        {"ordering": 2, "intent": "Named by nobody known.",
+         "focal_character_id": "the-mysterious-stranger",
+         "target_pad": {"pleasure": 0.1, "arousal": 0.1, "dominance": 0.1}},
+    ])
+
+    async def fake_call_llm(endpoint, messages, **kwargs):
+        return _response(beats)
+
+    monkeypatch.setattr(plan_beat_module, "call_llm", fake_call_llm)
+    await plan_beat(_state())
+
+    conn = connect_db(seeded.db_path)
+    rows = get_beats_for_chapter(conn, chapter_id_for(ARC_ID, 1))
+    conn.close()
+
+    specs = [json.loads(row["beat_spec"]) for row in rows]
+    assert specs[0]["focal_character_id"] == "char-mara"
+    assert specs[1]["focal_character_id"] == ""

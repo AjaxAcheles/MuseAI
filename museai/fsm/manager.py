@@ -20,7 +20,7 @@ from museai.fsm.nodes.deps import set_node_config
 from museai.fsm.state import FSM_Pointer, OrchestratorState, accumulate_or_reset, make_initial_state
 from museai.memory.db import connect_db
 
-RunStatus = Literal["idle", "running", "paused", "review", "stopped", "done"]
+RunStatus = Literal["idle", "running", "paused", "review", "stopped", "done", "error"]
 ReviewDecision = Literal["accept", "regenerate"]
 
 
@@ -209,6 +209,18 @@ class GenerationManager:
             self.status = "stopped"
             await bus.publish("run_status", {"status": self.status})
             raise
+        except Exception as exc:  # noqa: BLE001 - a dead run must never look "running"
+            self.status = "error"
+            log_node_event(
+                "manager",
+                event="run_failed",
+                entry_point=entry_point,
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            await bus.publish(
+                "run_status",
+                {"status": self.status, "error": f"{type(exc).__name__}: {exc}"},
+            )
 
     def _merge_delta(self, delta: dict) -> None:
         assert self.state is not None

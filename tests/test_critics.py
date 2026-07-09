@@ -287,3 +287,15 @@ class TestEvents:
         summary = next(e["data"] for e in events if e["type"] == "critic_summary")
         assert summary["summary"] == "3 issues found"
         assert summary["total_failures"] == 3
+
+
+async def test_critic_accepts_zero_revision_retry_cap(
+    config_factory, patched_loop, monkeypatch
+):
+    """revision_retry_cap=0 is legal config (straight to review); the critic
+    must still be able to parse its findings."""
+    set_node_config(config_factory(revision_retry_cap=0, max_agent_iterations=6))
+    patched_loop(CLEAN_RESPONSE)
+
+    delta = await adversarial_critics(state_with())
+    assert "critic_failures" not in delta

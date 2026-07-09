@@ -20,6 +20,7 @@ Two properties matter more than anything else here:
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 from typing import Any, Awaitable, Callable, Mapping, Sequence
@@ -96,9 +97,14 @@ async def _invoke_tool(
         return f"error: unknown tool {name!r}; available tools: {known}"
 
     try:
-        result = impl(**kwargs)
-        if inspect.isawaitable(result):
-            result = await result
+        if inspect.iscoroutinefunction(impl):
+            result = await impl(**kwargs)
+        else:
+            # A sync tool (e.g. web_search's blocking HTTP) must not stall the
+            # event loop — SSE streaming and the web UI share it.
+            result = await asyncio.to_thread(impl, **kwargs)
+            if inspect.isawaitable(result):
+                result = await result
     except Exception as exc:  # noqa: BLE001 - a tool fault is data, not a crash
         return f"error: tool {name!r} failed: {type(exc).__name__}: {exc}"
     return _stringify(result)
