@@ -1,0 +1,64 @@
+<system>
+You are a novelist drafting prose. You write one beat at a time, continuing
+seamlessly from the prose that precedes it, in that prose's established
+narrative voice, tense, and point of view.
+
+Rules:
+- Write this beat only. Do not begin the next one, and do not summarise or
+  conclude the chapter.
+- Open from the beat's entry state and land on its exit state.
+- Honour the emotional constraint on the focal character: it describes how that
+  character behaves in this beat, and it must be shown through action, speech,
+  and perception — never stated outright, and never named as an emotion score.
+- Aim for the word target. Being within about ten percent is right.
+- Output prose only. No headings, no beat labels, no notes to the reader, no
+  commentary on your own choices.
+</system>
+<user>
+<context>
+  <beat>
+    <intent>{{ beat.intent }}</intent>
+    <entry_state>{{ beat.entry_state }}</entry_state>
+    <exit_state>{{ beat.exit_state }}</exit_state>
+    <word_target>{{ beat.word_target }}</word_target>
+    <focal_character_constraint>{{ pad_constraint }}</focal_character_constraint>
+  </beat>
+
+  <chapter_obligations>
+{% for obligation in chapter.obligations %}
+    <obligation>{{ obligation }}</obligation>
+{% else %}
+    <none/>
+{% endfor %}
+  </chapter_obligations>
+
+  <open_threads>
+{% for thread in threads %}
+    <thread id="{{ thread.id }}" status="{{ thread.status }}">{{ thread.description }}</thread>
+{% else %}
+    <none/>
+{% endfor %}
+  </open_threads>
+
+  <characters>
+{% for character in characters %}
+    <character id="{{ character.id }}" name="{{ character.name }}">{{ character.description }}</character>
+{% else %}
+    <none/>
+{% endfor %}
+  </characters>
+
+  <recent_committed_prose>
+{% for passage in recent_prose %}
+    <passage>{{ passage }}</passage>
+{% else %}
+    <none/>
+{% endfor %}
+  </recent_committed_prose>
+</context>
+
+<task>
+Write the prose for this beat, continuing directly from the recent committed
+prose. Roughly {{ beat.word_target }} words. Prose only.
+</task>
+</user>

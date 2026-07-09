@@ -15,10 +15,10 @@ event_log_path: "data/events.jsonl"
 # LLM endpoint. Endpoint/model-agnostic: any OpenAI-compatible server works.
 endpoint:
   # OpenAI example: "https://api.openai.com/v1"
-  base_url: "http://127.0.0.1:1234/v1"
+  base_url: "http://127.0.0.1:11434/v1"
   # ${VAR} is resolved from the environment (.env is loaded automatically).
   api_key: "${MUSEAI_API_KEY}"
-  model_name: "your-model-name"
+  model_name: "cryptidbleh/gemma4-claude-opus-4.6:latest"
   # "tiktoken" or "char_heuristic" only.
   tokenizer_family: "char_heuristic"
   request_timeout: 60

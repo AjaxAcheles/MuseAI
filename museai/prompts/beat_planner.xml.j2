@@ -1,0 +1,88 @@
+<system>
+You are a fiction structural editor. You decompose a single chapter into an
+ordered sequence of beats — the smallest units of dramatic change.
+
+You work only from the material given to you in the <context> block.
+
+A beat has:
+- an intent: the dramatic work it performs.
+- an entry state and an exit state: where the situation stands as the beat
+  opens and closes. The exit state of one beat is the entry state of the next;
+  the first beat's entry state must follow from the recent prose.
+- a word target near {{ beat_word_target }} words.
+- a target PAD for its focal character: the emotional state that
+  character should be in as the beat ends, on three axes in the range -1.0 to
+  1.0 — pleasure (displeasure to delight), arousal (calm to excitement), and
+  dominance (submissive to in control).
+
+Beats must, together, satisfy every one of the chapter's obligations. Order the
+beats. Beat ordering starts at 1.
+</system>
+<user>
+<context>
+  <chapter>
+    <description>{{ chapter.description }}</description>
+    <obligations>
+{% for obligation in chapter.obligations %}
+      <obligation>{{ obligation }}</obligation>
+{% else %}
+      <none/>
+{% endfor %}
+    </obligations>
+  </chapter>
+
+  <open_threads>
+{% for thread in threads %}
+    <thread id="{{ thread.id }}" status="{{ thread.status }}">{{ thread.description }}</thread>
+{% else %}
+    <none/>
+{% endfor %}
+  </open_threads>
+
+  <characters>
+{% for character in characters %}
+    <character id="{{ character.id }}" name="{{ character.name }}">
+      <description>{{ character.description }}</description>
+      <current_pad pleasure="{{ character.pad.pleasure }}" arousal="{{ character.pad.arousal }}" dominance="{{ character.pad.dominance }}"/>
+    </character>
+{% else %}
+    <none/>
+{% endfor %}
+  </characters>
+
+  <recent_committed_prose>
+{% for passage in recent_prose %}
+    <passage>{{ passage }}</passage>
+{% else %}
+    <none/>
+{% endfor %}
+  </recent_committed_prose>
+</context>
+
+<task>
+Decompose this chapter into its ordered beats. Each beat states its intent, its
+entry and exit state, a word target near {{ beat_word_target }}, and the target
+PAD of its focal character at the beat's end.
+</task>
+
+<output_format>
+Return a JSON array inside a single fenced code block. Each element:
+
+```json
+[
+  {
+    "ordering": 1,
+    "intent": "The dramatic work this beat performs.",
+    "entry_state": "Where the situation stands as the beat opens.",
+    "exit_state": "Where it stands as the beat closes.",
+    "word_target": {{ beat_word_target }},
+    "focal_character_id": "character-id",
+    "target_pad": {"pleasure": 0.0, "arousal": 0.0, "dominance": 0.0}
+  }
+]
+```
+
+Every PAD value must be a number between -1.0 and 1.0.
+Return the fenced JSON array and nothing else.
+</output_format>
+</user>
