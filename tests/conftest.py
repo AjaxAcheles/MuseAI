@@ -14,6 +14,7 @@ _GENERATION_DEFAULTS = dict(
     max_agent_iterations=6,
     recent_prose_beats=4,
     context_token_budget=8000,
+    passive_voice_threshold=0.25,
 )
 
 

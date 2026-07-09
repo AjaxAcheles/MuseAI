@@ -12,6 +12,9 @@ log_level: "INFO"
 db_path: "data/museai.db"
 event_log_path: "data/events.jsonl"
 
+# Seconds the continuity critic's web_search tool waits on a search engine.
+web_search_timeout: 10
+
 # LLM endpoint. Endpoint/model-agnostic: any OpenAI-compatible server works.
 endpoint:
   # OpenAI example: "https://api.openai.com/v1"
@@ -32,3 +35,4 @@ generation:
   max_agent_iterations: 6
   recent_prose_beats: 4
   context_token_budget: 8000
+  passive_voice_threshold: 0.25

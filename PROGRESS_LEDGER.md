@@ -9,11 +9,11 @@ session ritual.
 | v1.01 | Skeleton, rules, config, logging, stream bus, FSM state, persistence, events, reconcile, runtime, seed loader | done |
 | v1.02 | LLM boundary: tokenizer, async adapter client, streaming, retry, tool-calling, prompt rendering, structured output | done |
 | v1.03 | FSM nodes: chapter planner, beat planner, deterministic PAD table, context assembly, prose drafter | done |
-| v1.04 | (reserved) | pending |
+| v1.04 | The quality loop: web_search, bounded agent loop, audit, continuity critic, revise, mode_selector | done |
 | v1.05 | (reserved) | pending |
 | v1.06 | (reserved) | pending |
 
-Next up: v1.04
+Next up: v1.05
 
 ## v1.01 — done
 
@@ -202,3 +202,141 @@ hold contiguous ordered rows with the first of each `active`, that both beats'
 `pad_constraint` came from the static table, that `current_draft_text` is
 non-empty and equals the streamed tokens joined, and that the phase changes fire
 in order: `Planning` → `Drafting` → `Auditing`.
+
+## v1.04 — done
+
+The whole quality loop, built in two passes: first the critic's one tool, the
+reusable agent loop, and the deterministic audit gate; then the single agentic
+continuity critic, the revision node, and the router that closes the loop —
+including the interactive-review branch.
+
+`draft → audit → critics → mode_selector → {commit | revise | review}` now
+composes end to end.
+
+**Files produced / implemented**
+
+- Tools: `museai/fsm/tools/web_search.py`, `museai/fsm/tools/loop.py`
+- FSM nodes: `museai/fsm/nodes/audit.py`, `museai/fsm/nodes/critics.py`,
+  `museai/fsm/nodes/revise.py`
+- Router: `museai/fsm/routers/mode_selector.py`
+- Prompts: `museai/prompts/reviser.xml.j2` (a fifth template — see below)
+- Config: **new `generation.passive_voice_threshold`** (the audit gate) and
+  **new top-level `web_search_timeout`** (seconds the search tool waits) in
+  `museai/core/config.py`, `config.yaml`, `config.example.yaml`. Omitting
+  `passive_voice_threshold` is fatal at boot; a value outside `0..1` is too.
+- Tests: `tests/test_web_search.py`, `tests/test_agent_loop.py`,
+  `tests/test_audit.py`, `tests/test_critics.py`, `tests/test_revise.py`,
+  `tests/test_mode_selector.py`, `tests/test_slice_quality.py`,
+  `tests/test_prompts.py` (reviser coverage), `tests/conftest.py` (new key)
+
+**Design notes**
+
+- **`web_search` never raises.** It runs inside a loop a model drives, and a
+  tool that throws would abort a draft over a rate limit or a transient DNS
+  failure. A blank query, a timeout, a broken upstream scraper, an unreadable
+  `config.yaml`, an empty result set — all collapse to `[]` plus one INFO line
+  in `fsm.log`. The model reads "no results" and writes around it, which is what
+  a critic should do with a fact it cannot confirm. The config read is inside
+  the `try` for exactly this reason.
+- `ddgs` needs no credential, which is why it is the whole tool surface. There
+  is no headless browser, no page fetcher, no API key, and no second tool.
+- Rows are normalized to `{"title", "url", "snippet"}`. `ddgs` spells them
+  `href`/`body` but some of its engines emit `url`/`snippet`, so both are
+  accepted rather than pinning the tool to one scraper's vocabulary. A row with
+  no URL is dropped: a citation the critic cannot follow is not evidence.
+- **`run_agent_loop` is generic** — endpoint, messages, tool schemas, a
+  name→callable registry. It carries no continuity or critic specifics. This is
+  the seam future tools plug into.
+- The loop is bounded and *always* terminates with a plain answer. After
+  `max_iterations` tool-enabled turns that each came back asking for another
+  tool, it makes one final `call_llm` with `tools` omitted entirely, leaving the
+  endpoint no way to reply but prose. The returned `LLMResponse` therefore never
+  carries pending tool calls.
+- **A tool fault is data, not a crash.** An unknown tool name, an unparseable
+  arguments blob, a bad keyword, or an exception inside a tool all become an
+  error *string* handed back as that call's result. Models recover from being
+  told a tool failed; they cannot recover from a traceback. Only `call_llm` may
+  raise. The caller's `messages` list is never mutated.
+- **The audit node computes no drift or stylometric metric** — those are not in
+  v1, and a number nobody computes is worse than none. It checks one thing:
+  passive-voice density, a proportion of sentences and never a raw count. One
+  passive sentence in a long beat is prose; half the beat is a draft that reads
+  limp. A breach raises exactly one `PASSIVE_VOICE_DENSITY` `FailureObject` for
+  the beat, not one per sentence.
+- The passive detector is a regex, not a parser, and **every ambiguity resolves
+  toward not flagging.** A be/get form plus a past participle (regular `-ed` by
+  shape, irregulars enumerated) with an optional adverb or negation between.
+  Common predicate adjectives (`was tired`, `was worried`) are excused by name —
+  no regex distinguishes them from `was seized` structurally. A missed passive
+  costs one limp sentence; a false one sends the reviser to rewrite prose that
+  was already fine. Sentence over-splitting on `Dr.` can only grow the
+  denominator, so it too errs toward forgiveness.
+- `audit` returns `{'critic_failures': [...]}`. An empty list resets the
+  `accumulate_or_reset` reducer, which is correct for the first check against a
+  fresh draft: the previous cycle's findings describe prose that no longer
+  exists.
+- **One critic, run serially.** No dialogue critic, no pacing critic, no craft
+  consultant, no panel and no concurrency. `adversarial_critics` is one agentic
+  call driving `run_agent_loop` with the one tool.
+- **A critic response that will not parse is a hard error.** `StructuredOutputError`
+  propagates out of `adversarial_critics`. A critic whose findings are unreadable
+  has not found nothing — it has failed — and returning `[]` there would launder
+  a broken critic into a clean pass and commit the draft.
+- **`adversarial_critics` omits `critic_failures` from its delta when clean**
+  rather than returning `[]`. The reducer reads an explicit `[]` as a *reset*, so
+  returning it after a clean continuity pass would silently erase the
+  passive-voice failure `audit` had just found, and the router would commit a
+  draft that failed the audit. Only `revise` is entitled to clear the list.
+  Regression-tested in
+  `test_critics.py::test_a_clean_critic_does_not_erase_programmatic_failures`.
+- `best_seen_draft` scores the draft on **programmatic + critic failures
+  together**, and only a strictly lower count replaces it. The first draft always
+  wins the slot, since `best_seen_failure_count` starts `None`.
+- **`revise_prose` works at the smallest scope that can fix the problem.** Every
+  `offending_text` located (exact `str.find`, then a fuzzy sliding-window scan at
+  difflib ratio ≥ 0.8) → *span mode*: each span is rewritten alone and spliced
+  back, so prose the critic did not fault is never regenerated and cannot drift.
+  Any span unlocated, or two spans overlapping → *full mode*, one rewrite of the
+  beat against the whole failure list. Splices are applied back-to-front so an
+  earlier rewrite cannot shift a later offset.
+- The reviser prompt is budgeted in two tiers: full context, then — if the
+  rendered messages exceed `context_token_budget` — a collapse to the draft, the
+  failures, and the hard constraints (beat spec, `pad_constraint`, chapter
+  obligations). Those three are never dropped; a revision written without them
+  fixes one problem and creates another.
+- **A fifth prompt template, `reviser.xml.j2`.** The build note said to reuse the
+  drafter template in a "revision" framing, but `drafter.xml.j2` has no slot for
+  a draft, a failure list, or a target span, and adding optional variables would
+  have meant guarding them with `is defined` — quietly undoing the
+  `StrictUndefined` posture that makes a mistyped context key fatal. A dedicated
+  template carries the same context and both revision modes. `tests/test_prompts.py`
+  now asserts **five** templates by name, so the no-absent-feature guard still
+  bites.
+- **`mode_selector` is pure and decides nothing.** First match wins: no failures
+  → `commit`; failures under `revision_retry_cap` → `revise`; otherwise
+  `review`. It does not discard the draft, accept it, restore `best_seen_draft`,
+  or set `review_requested` — the review branch is a safe boundary, and the
+  verdict belongs to the human via the web layer. There is no escalation ladder
+  and no drift gate: routing turns on the failure count and the retry count and
+  nothing else.
+
+**Done-check** — `uv run pytest -q` → `264 passed`.
+
+No test opens a socket: `DDGS` is replaced in the `web_search` namespace,
+`call_llm` in the drafter's/reviser's, and `run_agent_loop` in the critic's —
+verified by re-running the new files with `socket.connect`/`create_connection`/
+`getaddrinfo` patched to raise.
+
+`tests/test_slice_quality.py` is the isolation check that the quality loop
+closes. It seeds `seeds/example.json` into a temp DB and walks
+seed → plan → draft → audit → critics → revise → `mode_selector` with real nodes
+and a faked endpoint, applying each delta through the real reducer. Two runs:
+the critic finds one problem, `revise` splices in the repair, the critic returns
+clean, `best_seen_failure_count` falls to 0, and the router reaches `commit`;
+and the critic keeps finding the same problem until `revision_retry_cap` is
+spent, whereupon the router reaches `review` with the draft and
+`best_seen_draft` both intact and `review_requested` still `False`.
+
+**Live check: PASSED.**
+`uv run python -c "from museai.fsm.tools.web_search import web_search; print(len(web_search('Perseid meteor shower peak', 3)))"`
+printed `3` against the real search backend.

@@ -72,6 +72,19 @@ class GenerationConfig(BaseModel):
     # Soft ceiling on the assembled drafting context. Over it, the context node
     # drops the lowest-priority material until the prompt fits.
     context_token_budget: int
+    # Proportion of a beat's sentences that may be passive before the audit node
+    # faults the draft. A proportion, not a count: 0.25 means a quarter.
+    passive_voice_threshold: float
+
+    @field_validator("passive_voice_threshold")
+    @classmethod
+    def _proportion(cls, value: float) -> float:
+        """A threshold outside 0..1 silently disables the gate. Fail at boot."""
+        if not 0.0 <= value <= 1.0:
+            raise ValueError(
+                f"passive_voice_threshold is a proportion in 0..1, got {value}"
+            )
+        return value
 
 
 class AppConfig(BaseModel):
@@ -88,6 +101,8 @@ class AppConfig(BaseModel):
     port: int = 8000
     db_path: str = "data/museai.db"
     event_log_path: str = "data/events.jsonl"
+    # Seconds the continuity critic's web_search tool waits on a search engine.
+    web_search_timeout: int = 10
 
 
 def load_config(path: str | Path = "config.yaml") -> AppConfig:

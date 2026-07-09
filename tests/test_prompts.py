@@ -15,7 +15,13 @@ from museai.llm.prompts import (
 )
 from museai.llm.structured import StructuredOutputError, parse_failure_objects
 
-TEMPLATES = ["chapter_planner", "beat_planner", "drafter", "continuity_critic"]
+TEMPLATES = [
+    "chapter_planner",
+    "beat_planner",
+    "drafter",
+    "continuity_critic",
+    "reviser",
+]
 
 # Capabilities v1 does not have. No template may hint at any of them.
 FORBIDDEN_PHRASES = [
@@ -64,6 +70,13 @@ BEAT = {
     "word_target": 600,
 }
 RECENT_PROSE = ["The archive smelled of dust and vinegar.", "Vaun had not called."]
+DRAFT_TEXT = "Mira pocketed the ledger. The archive was bright with noon sun."
+FAILURE = {
+    "error_code": "CONTRADICTS_PRIOR_PROSE",
+    "offending_text": "The archive was bright with noon sun.",
+    "suggested_fix": "The prior passage puts this after hours, in the dark.",
+    "critic_source": "continuity_critic",
+}
 
 
 def context_for(template: str) -> dict:
@@ -91,16 +104,47 @@ def context_for(template: str) -> dict:
             **common,
             "chapter": CHAPTER,
             "recent_prose": RECENT_PROSE,
-            "draft_text": "Mira pocketed the ledger. The archive was bright with noon sun.",
+            "draft_text": DRAFT_TEXT,
+        }
+    if template == "reviser":
+        return {
+            **common,
+            "beat": BEAT,
+            "chapter": CHAPTER,
+            "recent_prose": RECENT_PROSE,
+            "pad_constraint": "Guarded, alert, and quietly in control.",
+            "draft_text": DRAFT_TEXT,
+            "failures": [FAILURE],
+            "mode": "span",
+            "span_text": "The archive was bright with noon sun.",
         }
     raise AssertionError(f"no context defined for {template}")
 
 
 class TestTemplatesExist:
-    def test_exactly_the_four_v1_templates_are_present(self):
+    def test_exactly_the_five_v1_templates_are_present(self):
         """No template for an absent feature (no scene planner, no summariser)."""
         found = sorted(p.name for p in PROMPT_DIR.glob("*.xml.j2"))
         assert found == sorted(f"{name}.xml.j2" for name in TEMPLATES)
+
+
+class TestReviserModes:
+    def test_span_mode_asks_for_one_passage(self):
+        text = render("reviser", **context_for("reviser"))
+        assert "<passage_to_rewrite>" in text
+        assert "The archive was bright with noon sun." in text
+
+    def test_full_mode_asks_for_the_whole_beat(self):
+        context = {**context_for("reviser"), "mode": "full", "span_text": ""}
+        text = render("reviser", **context)
+        assert "<passage_to_rewrite>" not in text
+        assert "Rewrite this beat" in text
+
+    def test_both_modes_carry_the_critic_findings(self):
+        for mode in ("span", "full"):
+            text = render("reviser", **{**context_for("reviser"), "mode": mode})
+            assert FAILURE["offending_text"] in text
+            assert FAILURE["suggested_fix"] in text
 
 
 class TestRendering:

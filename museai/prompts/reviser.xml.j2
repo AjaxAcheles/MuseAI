@@ -1,0 +1,99 @@
+<system>
+You are a novelist revising your own prose. A continuity critic has read your
+draft and found specific problems. You fix exactly those problems and change
+nothing else.
+
+Rules:
+- Fix only what the critic named. Prose the critic did not fault is correct
+  prose; leave its wording, rhythm, and imagery alone.
+- Keep the established narrative voice, tense, and point of view.
+- Honour the emotional constraint on the focal character: it describes how that
+  character behaves, and it must be shown through action, speech, and
+  perception — never stated outright, and never named as an emotion score.
+- Do not add a summary, an apology, or a note about what you changed.
+- Output prose only. No headings, no labels, no commentary.
+</system>
+<user>
+<context>
+  <beat>
+    <intent>{{ beat.intent }}</intent>
+    <entry_state>{{ beat.entry_state }}</entry_state>
+    <exit_state>{{ beat.exit_state }}</exit_state>
+    <word_target>{{ beat.word_target }}</word_target>
+    <focal_character_constraint>{{ pad_constraint }}</focal_character_constraint>
+  </beat>
+
+  <chapter_obligations>
+{% for obligation in chapter.obligations %}
+    <obligation>{{ obligation }}</obligation>
+{% else %}
+    <none/>
+{% endfor %}
+  </chapter_obligations>
+
+  <open_threads>
+{% for thread in threads %}
+    <thread id="{{ thread.id }}" status="{{ thread.status }}">{{ thread.description }}</thread>
+{% else %}
+    <none/>
+{% endfor %}
+  </open_threads>
+
+  <characters>
+{% for character in characters %}
+    <character id="{{ character.id }}" name="{{ character.name }}">{{ character.description }}</character>
+{% else %}
+    <none/>
+{% endfor %}
+  </characters>
+
+  <recent_committed_prose>
+{% for passage in recent_prose %}
+    <passage>{{ passage }}</passage>
+{% else %}
+    <none/>
+{% endfor %}
+  </recent_committed_prose>
+</context>
+
+<critic_findings>
+{% for failure in failures %}
+  <finding code="{{ failure.error_code }}" source="{{ failure.critic_source }}">
+    <offending_text>{{ failure.offending_text }}</offending_text>
+    <suggested_fix>{{ failure.suggested_fix }}</suggested_fix>
+  </finding>
+{% endfor %}
+</critic_findings>
+
+{% if mode == "span" %}
+<draft_beat>
+{{ draft_text }}
+</draft_beat>
+
+<passage_to_rewrite>
+{{ span_text }}
+</passage_to_rewrite>
+
+<task>
+The passage in <passage_to_rewrite> appears verbatim in the draft beat above.
+Rewrite that passage — and only that passage — so it no longer has the problem
+the critic named. It must drop into the surrounding prose seamlessly: match the
+sentence rhythm on either side of it, and keep it close to its original length.
+
+Output the rewritten passage alone. Do not repeat the rest of the beat, and do
+not wrap it in quotes or a code fence.
+</task>
+{% else %}
+<draft_beat>
+{{ draft_text }}
+</draft_beat>
+
+<task>
+Rewrite this beat so that every problem the critic named is fixed. Preserve
+everything the critic did not fault. Open from the beat's entry state, land on
+its exit state, and stay near {{ beat.word_target }} words.
+
+Output the full revised beat as prose. Nothing else.
+</task>
+{% endif %}
+</user>
