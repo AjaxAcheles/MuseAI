@@ -20,6 +20,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from museai.core.events import replay_events
+from museai.core.logging_setup import get_fsm_logger
 from museai.memory.db import (
     connect_db,
     delete_commit_intent,
@@ -81,14 +82,17 @@ def _apply_beat_commit(conn, event: dict) -> None:
 def scan_and_recover(db_path: str | Path, event_log_path: str | Path) -> dict:
     """Resolve every pending CommitIntent. Returns a summary dict."""
     summary = {"pending_found": 0, "recovered": [], "cleared": []}
+    logger = get_fsm_logger()
 
     conn = connect_db(db_path)
     try:
         pending = get_pending_intents(conn)
         summary["pending_found"] = len(pending)
         if not pending:
+            logger.info("recovery_scan clean pending=0")
             return summary
 
+        logger.info("recovery_scan pending=%d", len(pending))
         commits = _index_beat_commits(event_log_path)
 
         with conn:
@@ -99,12 +103,30 @@ def scan_and_recover(db_path: str | Path, event_log_path: str | Path) -> dict:
                     _apply_beat_commit(conn, event)
                     mark_commit_committed(conn, intent["id"])
                     summary["recovered"].append(beat_id)
+                    logger.info(
+                        "recovery_recovered beat_id=%s intent_id=%s word_count=%s",
+                        beat_id,
+                        intent["id"],
+                        event.get("word_count"),
+                    )
                 else:
                     delete_commit_intent(conn, intent["id"])
                     if beat_id is not None:
                         set_beat_status(conn, beat_id, "planned")
                     summary["cleared"].append(beat_id)
+                    logger.warning(
+                        "recovery_cleared beat_id=%s intent_id=%s "
+                        "no beat_commit event; beat reset to planned",
+                        beat_id,
+                        intent["id"],
+                    )
     finally:
         conn.close()
 
+    logger.info(
+        "recovery_complete pending=%d recovered=%d cleared=%d",
+        summary["pending_found"],
+        len(summary["recovered"]),
+        len(summary["cleared"]),
+    )
     return summary

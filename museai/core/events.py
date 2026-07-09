@@ -30,9 +30,14 @@ import os
 from pathlib import Path
 from typing import Iterator
 
+from museai.core.logging_setup import get_fsm_logger
+
 
 def append_event(path: str | Path, event: dict) -> None:
-    """Append one event as a JSON line and fsync to durable storage."""
+    """Append one event as a JSON line and fsync to durable storage.
+
+    Logged after the fsync, so a line in ``fsm.log`` means the event is durable.
+    """
     p = Path(path)
     if p.parent and not p.parent.exists():
         p.parent.mkdir(parents=True, exist_ok=True)
@@ -41,6 +46,14 @@ def append_event(path: str | Path, event: dict) -> None:
         fh.write(line + "\n")
         fh.flush()
         os.fsync(fh.fileno())
+
+    get_fsm_logger().info(
+        "event_appended type=%s beat_id=%s word_count=%s bytes=%d",
+        event.get("type"),
+        event.get("beat_id"),
+        event.get("word_count"),
+        len(line),
+    )
 
 
 def replay_events(path: str | Path) -> Iterator[dict]:

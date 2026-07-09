@@ -2,12 +2,16 @@
 
 Two dedicated logs are maintained:
 
-* ``logs/fsm.log``     — FSM / node / event activity.
+* ``logs/fsm.log``     — FSM / node / event activity, and everything else.
 * ``logs/llm_io.log``  — raw LLM request/response I/O.
 
-``get_logger(name)`` returns a general application logger. Log level comes from
-config when configured; rotation sizes/backups are fixed sensible defaults
-(config carries no speculative logging keys).
+The handler lives on the ``museai`` root, so *any* logger obtained through
+:func:`get_logger` lands in ``fsm.log``. ``museai.llm_io`` is the one exception:
+it owns its own handler and does not propagate, which keeps the I/O log
+separate. Nothing under ``museai`` can log into a void.
+
+Log level comes from config when configured; rotation sizes/backups are fixed
+sensible defaults (config carries no speculative logging keys).
 """
 
 from __future__ import annotations
@@ -24,6 +28,7 @@ LOG_DIR = Path("logs")
 _MAX_BYTES = 5 * 1024 * 1024  # 5 MiB per file
 _BACKUP_COUNT = 5
 
+_APP_LOGGER_NAME = "museai"
 _FSM_LOGGER_NAME = "museai.fsm"
 _LLM_LOGGER_NAME = "museai.llm_io"
 
@@ -62,6 +67,11 @@ def configure_logging(config: "AppConfig | None" = None) -> None:
 
     Idempotent: safe to call more than once. Level is taken from ``config``
     when provided, otherwise defaults to ``INFO``.
+
+    ``fsm.log``'s handler is attached to the ``museai`` root rather than to
+    ``museai.fsm``, so a single handler owns the file — two rotating handlers on
+    one path would race each other on rollover — and every application logger
+    reaches it by propagation.
     """
     global _configured
     _ensure_log_dir()
@@ -69,12 +79,13 @@ def configure_logging(config: "AppConfig | None" = None) -> None:
     level_name = (config.log_level if config is not None else "INFO").upper()
     level = getattr(logging, level_name, logging.INFO)
 
-    fsm_logger = _dedicated_logger(_FSM_LOGGER_NAME, "fsm.log")
+    app_logger = _dedicated_logger(_APP_LOGGER_NAME, "fsm.log")
     llm_logger = _dedicated_logger(_LLM_LOGGER_NAME, "llm_io.log")
-    fsm_logger.setLevel(level)
+    app_logger.setLevel(level)
     llm_logger.setLevel(level)
 
-    logging.getLogger("museai").setLevel(level)
+    # Propagates up to the app logger's handler; owns none of its own.
+    logging.getLogger(_FSM_LOGGER_NAME).setLevel(level)
     _configured = True
 
 

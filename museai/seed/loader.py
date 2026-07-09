@@ -23,6 +23,7 @@ import sys
 from pathlib import Path
 
 from museai.core.config import AppConfig, load_config
+from museai.core.logging_setup import get_fsm_logger
 from museai.memory.db import (
     connect_db,
     upsert_arc,
@@ -108,6 +109,12 @@ def load_seed(seed: dict, config: AppConfig) -> dict[str, int]:
     finally:
         conn.close()
 
+    get_fsm_logger().info(
+        "seed_loaded project_id=%s db=%s %s",
+        project_id,
+        config.db_path,
+        " ".join(f"{table}={count}" for table, count in counts.items()),
+    )
     return counts
 
 

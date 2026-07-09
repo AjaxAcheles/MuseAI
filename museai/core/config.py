@@ -69,6 +69,9 @@ class GenerationConfig(BaseModel):
     revision_retry_cap: int
     max_agent_iterations: int
     recent_prose_beats: int
+    # Soft ceiling on the assembled drafting context. Over it, the context node
+    # drops the lowest-priority material until the prompt fits.
+    context_token_budget: int
 
 
 class AppConfig(BaseModel):

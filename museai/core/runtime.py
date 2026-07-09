@@ -41,6 +41,12 @@ def init_resources(config: AppConfig) -> Resources:
     configure_logging(config)
     init_db(config.db_path)
     _ensure_event_log(config.event_log_path)
+    logger.info(
+        "resources_initialized project_id=%s db=%s event_log=%s",
+        config.project_id,
+        config.db_path,
+        config.event_log_path,
+    )
 
     summary = scan_and_recover(config.db_path, config.event_log_path)
     if summary["pending_found"]:

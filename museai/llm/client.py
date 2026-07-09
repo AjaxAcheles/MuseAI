@@ -391,6 +391,7 @@ async def call_llm(
     while attempt < MAX_ATTEMPTS:
         attempt += 1
         emitted = [False]
+        _log_request(safe_url, endpoint, messages, stream, attempt, max_tokens)
         try:
             async with httpx.AsyncClient(timeout=timeout, transport=transport) as client:
                 if stream:
@@ -402,17 +403,18 @@ async def call_llm(
                         client, url, headers, body
                     )
         except LLMCallError as exc:
-            _log_call(
-                safe_url, endpoint, messages, stream, attempt, error=str(exc)
-            )
+            _log_error(safe_url, endpoint, stream, attempt, str(exc))
             raise
         except _RETRYABLE as exc:
             last_error = exc
             if emitted[0]:
                 # Tokens already reached the caller; replaying would double them.
                 message = f"stream failed after emitting tokens: {exc}"
-                _log_call(safe_url, endpoint, messages, stream, attempt, error=message)
+                _log_error(safe_url, endpoint, stream, attempt, message)
                 raise LLMCallError(message) from exc
+            _log_error(
+                safe_url, endpoint, stream, attempt, f"transient: {exc}", retrying=True
+            )
             if attempt < MAX_ATTEMPTS:
                 await asyncio.sleep(backoff[min(attempt - 1, len(backoff) - 1)])
             continue
@@ -421,10 +423,9 @@ async def call_llm(
             messages, endpoint.tokenizer_family, endpoint.model_name
         )
         tokens_out = count_tokens(text, endpoint.tokenizer_family, endpoint.model_name)
-        _log_call(
+        _log_response(
             safe_url,
             endpoint,
-            messages,
             stream,
             attempt,
             text=text,
@@ -445,51 +446,102 @@ async def call_llm(
         )
 
     summary = f"{MAX_ATTEMPTS} attempts failed, last error: {last_error}"
-    _log_call(safe_url, endpoint, messages, stream, attempt, error=summary)
+    _log_error(safe_url, endpoint, stream, attempt, summary)
     raise LLMCallError(summary) from last_error
 
 
-def _log_call(
+def _emit(record: dict[str, Any], *, error: bool = False) -> None:
+    """Write one JSON record to ``logs/llm_io.log``."""
+    logger = get_llm_logger()
+    line = json.dumps(record, ensure_ascii=False, default=str)
+    logger.error(line) if error else logger.info(line)
+
+
+def _truncate(text: str) -> str:
+    if len(text) <= _LOG_CONTENT_PREVIEW_CHARS:
+        return text
+    overflow = len(text) - _LOG_CONTENT_PREVIEW_CHARS
+    return f"{text[:_LOG_CONTENT_PREVIEW_CHARS]}…[+{overflow} chars]"
+
+
+def _log_request(
     safe_url: str,
     endpoint: EndpointConfig,
     messages: Sequence[Mapping[str, Any]],
     stream: bool,
-    attempts: int,
-    *,
-    text: str | None = None,
-    error: str | None = None,
-    tokens_in: int = 0,
-    tokens_out: int = 0,
-    tool_calls: int = 0,
-    finish_reason: str | None = None,
+    attempt: int,
+    max_tokens: int | None,
 ) -> None:
-    """Write one durable JSON record per call to ``logs/llm_io.log``.
+    """Record a request as it goes out, before the endpoint has answered.
 
-    The URL is stripped of credentials and the API key is never included.
+    Written per attempt, so a retry logs a second request. The URL is stripped of
+    credentials and the API key is never included.
     """
-    record: dict[str, Any] = {
-        "url": safe_url,
-        "model": endpoint.model_name,
-        "stream": stream,
-        "attempts": attempts,
-        "messages": _safe_messages(messages),
-        "tokens_in": tokens_in,
-        "tokens_out": tokens_out,
-        "tool_calls": tool_calls,
-        "finish_reason": finish_reason,
-    }
-    if error is not None:
-        record["error"] = error
-    else:
-        record["text"] = (
-            text
-            if text is None or len(text) <= _LOG_CONTENT_PREVIEW_CHARS
-            else f"{text[:_LOG_CONTENT_PREVIEW_CHARS]}…[+{len(text) - _LOG_CONTENT_PREVIEW_CHARS} chars]"
-        )
+    _emit(
+        {
+            "event": "request",
+            "url": safe_url,
+            "model": endpoint.model_name,
+            "stream": stream,
+            "attempt": attempt,
+            "max_tokens": max_tokens,
+            "messages": _safe_messages(messages),
+        }
+    )
 
-    logger = get_llm_logger()
-    line = json.dumps(record, ensure_ascii=False, default=str)
-    if error is not None:
-        logger.error(line)
-    else:
-        logger.info(line)
+
+def _log_response(
+    safe_url: str,
+    endpoint: EndpointConfig,
+    stream: bool,
+    attempt: int,
+    *,
+    text: str,
+    tokens_in: int,
+    tokens_out: int,
+    tool_calls: int,
+    finish_reason: str | None,
+) -> None:
+    """Record one completed response.
+
+    Exactly one record per returned message. A streamed call logs here once, on
+    the assembled text — never per token, which would drown the log in fragments.
+    """
+    _emit(
+        {
+            "event": "response",
+            "url": safe_url,
+            "model": endpoint.model_name,
+            "stream": stream,
+            "attempt": attempt,
+            "tokens_in": tokens_in,
+            "tokens_out": tokens_out,
+            "tool_calls": tool_calls,
+            "finish_reason": finish_reason,
+            "text": _truncate(text),
+        }
+    )
+
+
+def _log_error(
+    safe_url: str,
+    endpoint: EndpointConfig,
+    stream: bool,
+    attempt: int,
+    error: str,
+    *,
+    retrying: bool = False,
+) -> None:
+    """Record a failed attempt, noting whether another one follows."""
+    _emit(
+        {
+            "event": "error",
+            "url": safe_url,
+            "model": endpoint.model_name,
+            "stream": stream,
+            "attempt": attempt,
+            "retrying": retrying,
+            "error": error,
+        },
+        error=True,
+    )

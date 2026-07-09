@@ -528,35 +528,80 @@ class TestLogging:
         yield captured
         logger.removeHandler(handler)
 
-    async def test_success_writes_one_record_without_the_key(self, endpoint, records):
+    @staticmethod
+    def payloads(records) -> list[dict]:
+        return [json.loads(record.getMessage()) for record in records]
+
+    async def test_a_call_writes_one_request_then_one_response(self, endpoint, records):
         transport = httpx.MockTransport(lambda r: json_response(completion("hi there")))
         await call_llm(endpoint, MESSAGES, transport=transport)
 
-        assert len(records) == 1
-        payload = json.loads(records[0].getMessage())
-        assert payload["url"] == "https://example.invalid/v1/chat/completions"
-        assert payload["model"] == "test-model"
-        assert payload["stream"] is False
-        assert payload["attempts"] == 1
-        assert payload["text"] == "hi there"
-        assert payload["tokens_in"] > 0
-        assert payload["tokens_out"] == 2
-        assert payload["messages"][0]["role"] == "user"
-        assert "secret-key-do-not-log" not in records[0].getMessage()
+        request, response = self.payloads(records)
+        assert [request["event"], response["event"]] == ["request", "response"]
 
-    async def test_failure_records_the_error_and_attempt_count(self, endpoint, records):
+        assert request["url"] == "https://example.invalid/v1/chat/completions"
+        assert request["model"] == "test-model"
+        assert request["stream"] is False
+        assert request["attempt"] == 1
+        assert request["messages"][0]["role"] == "user"
+
+        assert response["attempt"] == 1
+        assert response["text"] == "hi there"
+        assert response["tokens_in"] > 0
+        assert response["tokens_out"] == 2
+        assert response["finish_reason"] == "stop"
+
+        for record in records:
+            assert "secret-key-do-not-log" not in record.getMessage()
+
+    async def test_a_streamed_call_logs_once_per_message_not_per_token(
+        self, endpoint, records
+    ):
+        chunks = [content_chunk("one"), content_chunk(" two"), content_chunk(" three")]
+        transport = httpx.MockTransport(lambda r: httpx.Response(200, content=sse(*chunks)))
+
+        seen: list[str] = []
+        await call_llm(
+            endpoint, MESSAGES, stream=True, on_token=seen.append, transport=transport
+        )
+
+        # Three tokens reached the caller; the log still holds exactly two records.
+        assert seen == ["one", " two", " three"]
+        request, response = self.payloads(records)
+        assert request["event"] == "request" and request["stream"] is True
+        assert response["event"] == "response"
+        assert response["text"] == "one two three"
+
+    async def test_each_retry_logs_its_own_request_and_error(self, endpoint, records):
         transport = httpx.MockTransport(lambda r: httpx.Response(500, content=b"boom"))
         with pytest.raises(LLMCallError):
             await call_llm(
                 endpoint, MESSAGES, transport=transport, retry_backoff=NO_BACKOFF
             )
 
-        assert len(records) == 1
-        payload = json.loads(records[0].getMessage())
-        assert payload["attempts"] == MAX_ATTEMPTS
-        assert "error" in payload
-        assert "text" not in payload
-        assert "secret-key-do-not-log" not in records[0].getMessage()
+        payloads = self.payloads(records)
+        requests = [p for p in payloads if p["event"] == "request"]
+        errors = [p for p in payloads if p["event"] == "error"]
+
+        assert len(requests) == MAX_ATTEMPTS
+        assert [p["attempt"] for p in requests] == [1, 2, 3]
+        # One error per failed attempt, plus the final give-up record.
+        assert [p["retrying"] for p in errors] == [True, True, True, False]
+        assert not [p for p in payloads if p["event"] == "response"]
+
+        for record in records:
+            assert "secret-key-do-not-log" not in record.getMessage()
+
+    async def test_a_4xx_logs_one_request_and_one_error(self, endpoint, records):
+        transport = httpx.MockTransport(lambda r: httpx.Response(400, content=b"nope"))
+        with pytest.raises(LLMCallError):
+            await call_llm(endpoint, MESSAGES, transport=transport)
+
+        request, error = self.payloads(records)
+        assert request["event"] == "request"
+        assert error["event"] == "error"
+        assert error["retrying"] is False
+        assert "400" in error["error"]
 
     async def test_url_credentials_and_query_are_stripped(self, records):
         endpoint = EndpointConfig(
@@ -568,10 +613,14 @@ class TestLogging:
         transport = httpx.MockTransport(lambda r: json_response(completion()))
         await call_llm(endpoint, MESSAGES, transport=transport)
 
-        logged = records[0].getMessage()
-        assert "pw" not in logged
-        assert "leak" not in logged
-        assert json.loads(logged)["url"] == "https://example.invalid/v1/chat/completions"
+        for record in records:
+            logged = record.getMessage()
+            assert "pw" not in logged
+            assert "leak" not in logged
+            assert (
+                json.loads(logged)["url"]
+                == "https://example.invalid/v1/chat/completions"
+            )
 
     async def test_long_bodies_are_truncated_in_the_log(self, endpoint, records):
         long_text = "x" * 900
@@ -580,8 +629,8 @@ class TestLogging:
             endpoint, [{"role": "user", "content": "y" * 900}], transport=transport
         )
 
-        payload = json.loads(records[0].getMessage())
-        assert "[+400 chars]" in payload["text"]
-        assert "[+400 chars]" in payload["messages"][0]["content"]
+        request, response = self.payloads(records)
+        assert "[+400 chars]" in request["messages"][0]["content"]
+        assert "[+400 chars]" in response["text"]
         # Truncation is a log concern only; the caller still gets everything.
         assert result.text == long_text

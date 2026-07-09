@@ -1,8 +1,8 @@
-"""Structured-output validation for the continuity critic.
+"""Structured-output validation for JSON that arrives wrapped in prose.
 
 Models return JSON in prose. Sometimes they wrap it in a markdown fence, or
 preface it with "Here are the issues I found:". This module turns whatever came
-back into a validated ``list[FailureObject]``, or fails loudly.
+back into validated Python, or fails loudly.
 
 Two bounded passes, never a loop:
 
@@ -10,9 +10,17 @@ Two bounded passes, never a loop:
 2. **Lenient** — strip markdown fences, then take the first balanced ``[...]``
    or ``{...}`` and parse that.
 
-If both fail, :class:`StructuredOutputError` is raised for the caller to handle
-by re-prompting, up to its own ``retry_cap``. An empty array is a valid, clean
-result — it means the critic found nothing, which is the success case.
+Both entry points share those passes:
+
+* :func:`parse_failure_objects` — the continuity critic's findings, validated
+  into ``list[FailureObject]``. An empty array is a valid, clean result: it means
+  the critic found nothing, which is the success case.
+* :func:`parse_json_array` — the planners' chapter and beat arrays, returned as
+  plain dicts. Here an empty array is *not* valid: a plan with no elements is a
+  failed plan, not an empty one.
+
+If both passes fail, :class:`StructuredOutputError` is raised for the caller to
+handle.
 """
 
 from __future__ import annotations
@@ -158,4 +166,61 @@ def parse_failure_objects(raw_text: str, retry_cap: int) -> list[FailureObject]:
     raise StructuredOutputError(
         f"could not extract JSON failure objects from critic response "
         f"(retry_cap={retry_cap}): {raw_text[:200]!r}"
+    )
+
+
+def _as_object_array(data: Any, what: str) -> list[dict]:
+    """Coerce parsed JSON to a non-empty list of objects."""
+    if isinstance(data, dict):
+        data = [data]
+    if not isinstance(data, list):
+        raise StructuredOutputError(
+            f"expected a JSON array of {what}, got {type(data).__name__}"
+        )
+    if not data:
+        raise StructuredOutputError(f"model returned an empty array of {what}")
+
+    for index, element in enumerate(data):
+        if not isinstance(element, dict):
+            raise StructuredOutputError(
+                f"{what} element {index} is not a JSON object, "
+                f"got {type(element).__name__}"
+            )
+    return list(data)
+
+
+def parse_json_array(raw_text: str, *, what: str) -> list[dict]:
+    """Parse a planner response into a non-empty list of JSON objects.
+
+    Same two bounded passes as :func:`parse_failure_objects`, but the elements
+    stay plain dicts — a chapter and a beat have different shapes, and each
+    planner validates its own fields.
+
+    ``what`` names the thing being parsed ("chapters", "beats") so the raised
+    error says which plan failed. Unlike the critic's parser, an empty array is
+    a hard failure: a plan must contain at least one element, and returning
+    ``[]`` here would let a node silently write nothing.
+    """
+    if not raw_text or not raw_text.strip():
+        raise StructuredOutputError(f"model returned an empty response for {what}")
+
+    # Pass 1: strict.
+    try:
+        return _as_object_array(json.loads(raw_text), what)
+    except StructuredOutputError:
+        raise  # parsed as JSON, but the shape is wrong — a re-prompt won't fix it
+    except json.JSONDecodeError:
+        pass
+
+    # Pass 2: lenient extraction.
+    candidate = _first_balanced_span(_strip_fences(raw_text))
+    if candidate is not None:
+        try:
+            return _as_object_array(json.loads(candidate), what)
+        except json.JSONDecodeError:
+            pass
+
+    raise StructuredOutputError(
+        f"could not extract a JSON array of {what} from the model response: "
+        f"{raw_text[:200]!r}"
     )
