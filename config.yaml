@@ -12,6 +12,9 @@ log_level: "INFO"
 db_path: "data/museai.db"
 event_log_path: "data/events.jsonl"
 
+# Dev-only reset route guard.
+allow_reset: true
+
 # Seconds the continuity critic's web_search tool waits on a search engine.
 web_search_timeout: 10
 

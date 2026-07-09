@@ -1,0 +1,85 @@
+{% extends "base.html" %}
+
+{% block title %}MuseAI Dashboard{% endblock %}
+
+{% block content %}
+<section class="status-ribbon rounded-4 p-3 mb-4 shadow-sm" aria-label="Generation status">
+  <div class="d-flex flex-wrap align-items-center justify-content-between gap-3">
+    <div class="phase-tracker" aria-label="Phase tracker">
+      {% for phase in ["Idle", "Planning", "Drafting", "Auditing", "Committing"] %}
+      <span class="phase-step" data-phase-step="{{ phase }}">{{ phase }}</span>
+      {% endfor %}
+    </div>
+    <div class="d-flex flex-wrap align-items-center gap-3 small">
+      <span id="word-counter" class="metric-pill">0 / 0 words</span>
+      <span id="beat-identifier" class="metric-pill">Arc — · Ch — · Beat —</span>
+      <span id="run-pulse" class="pulse-dot pulse-idle" aria-label="Idle"></span>
+      <span id="run-status-label" class="text-muted">Idle</span>
+    </div>
+  </div>
+</section>
+
+<div class="row g-4">
+  <section class="col-lg-8">
+    <div class="panel h-100">
+      <div class="panel-header d-flex flex-wrap align-items-center justify-content-between gap-2">
+        <div>
+          <h1 class="h3 mb-1">MuseAI Dashboard</h1>
+          <p class="text-muted mb-0">Live draft stream from committed v1 generation events.</p>
+        </div>
+        <div class="d-flex gap-2">
+          <button id="generate-button" class="btn btn-success" type="button">Generate</button>
+          <a class="btn btn-outline-light" href="/seed">Seed</a>
+          <a class="btn btn-outline-light" href="/settings">Settings</a>
+        </div>
+      </div>
+      <div id="manuscript-stream" class="manuscript-stream mt-3" aria-live="polite">
+        <div class="empty-state">Waiting for the next beat…</div>
+      </div>
+    </div>
+  </section>
+
+  <aside class="col-lg-4">
+    <div class="d-grid gap-4">
+      <section class="panel">
+        <div class="panel-header">
+          <h2 class="h5 mb-1">PAD radar</h2>
+          <p id="pad-empty" class="text-muted mb-0">Waiting for PAD update…</p>
+        </div>
+        <canvas id="pad-radar" height="260" aria-label="Pleasure arousal dominance radar"></canvas>
+      </section>
+
+      <section class="panel">
+        <div class="panel-header">
+          <h2 class="h5 mb-1">Continuity critic</h2>
+          <p id="critic-summary" class="text-muted mb-0">Waiting for critic activity…</p>
+        </div>
+        <div id="critic-reasoning" class="critic-box mt-3">No reasoning yet.</div>
+        <div id="critic-tools" class="critic-tools mt-3" aria-label="Web search calls"></div>
+      </section>
+
+      <section class="panel">
+        <h2 class="h5 mb-3">Controls</h2>
+        <div class="d-flex flex-wrap gap-2">
+          <button class="btn btn-warning" data-control-action="pause" type="button">Pause</button>
+          <button class="btn btn-info" data-control-action="resume" type="button">Resume</button>
+          <button class="btn btn-danger" data-control-action="stop" type="button">Stop</button>
+        </div>
+        <p id="control-result" class="small text-muted mt-3 mb-0" aria-live="polite"></p>
+      </section>
+
+      <section id="review-panel" class="panel d-none">
+        <h2 class="h5 mb-2">Human review needed</h2>
+        <p id="review-meta" class="text-muted small">Review the best draft before continuing.</p>
+        <label class="form-label" for="review-text">Best draft</label>
+        <textarea id="review-text" class="form-control" rows="10" placeholder="Best draft appears here when review is active."></textarea>
+        <div class="d-flex gap-2 mt-3">
+          <button id="review-accept" class="btn btn-success" type="button">Accept</button>
+          <button id="review-regenerate" class="btn btn-outline-light" type="button">Regenerate</button>
+        </div>
+        <p id="review-result" class="small text-muted mt-3 mb-0" aria-live="polite"></p>
+      </section>
+    </div>
+  </aside>
+</div>
+{% endblock %}

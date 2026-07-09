@@ -12,6 +12,7 @@ from museai.core.runtime import init_resources
 from museai.core.stream_bus import bus
 from museai.fsm.manager import GenerationManager
 from museai.seed.loader import load_seed
+from museai.web.app import create_app
 
 
 async def _run_headless(seed_path: Path) -> int:
@@ -61,7 +62,10 @@ def main(argv: list[str] | None = None) -> int:
         if args.seed is None:
             raise SystemExit("--headless requires --seed <path>")
         return asyncio.run(_run_headless(args.seed))
-    raise SystemExit("Only --headless is available from run.py in this build.")
+    config = load_config()
+    app = create_app()
+    app.run(host=config.host, port=config.port)
+    return 0
 
 
 if __name__ == "__main__":

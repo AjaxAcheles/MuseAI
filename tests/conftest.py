@@ -43,6 +43,7 @@ def config_factory(tmp_path):
             generation=GenerationConfig(**generation),
             db_path=str(tmp_path / "museai.db"),
             event_log_path=str(tmp_path / "events.jsonl"),
+            allow_reset=True,
         )
         base.update(overrides)
         return AppConfig(**base)

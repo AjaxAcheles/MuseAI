@@ -41,6 +41,31 @@ All thresholds, caps, targets, and endpoint details live in `config.yaml`.
 Configuration is validated strictly at boot: an unknown or mistyped key is a
 fatal error. See `config.example.yaml` for every available key.
 
+## How to run
+
+Start the web UI at the configured `host`/`port`:
+
+```bash
+uv run python run.py
+```
+
+Then:
+
+1. Open `/seed`, review or edit the example seed JSON, and submit it.
+2. Return to `/dashboard` and click **Generate**. Prose streams live by beat;
+   the PAD radar, critic panel, word counter, and review controls update from
+   real server-sent events.
+3. If generation parks for review, edit the draft if needed and choose
+   **Accept** or **Regenerate**.
+4. When the run completes, MuseAI exports a Markdown manuscript under
+   `data/output/<project_id>.md`.
+
+For a non-browser run with the same v1 engine:
+
+```bash
+uv run python run.py --headless --seed seeds/example.json
+```
+
 ## Layout
 
 ```

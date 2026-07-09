@@ -1,1 +1,109 @@
-"""museai.web.routes.settings — settings routes (implemented in a later v1 build)."""
+"""Settings display, validation, persistence, and endpoint test routes."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any
+
+import yaml
+from pydantic import ValidationError
+from quart import Blueprint, current_app, jsonify, render_template, request
+
+from museai.core.config import AppConfig, ConfigError, load_config
+from museai.core.runtime import init_resources
+from museai.llm.client import call_llm
+from museai.web.app import get_config, set_runtime
+
+bp = Blueprint("settings", __name__)
+
+
+def _settings_view(cfg: AppConfig) -> dict[str, Any]:
+    return {
+        "endpoint": {
+            "base_url": cfg.endpoint.base_url,
+            "model_name": cfg.endpoint.model_name,
+            "api_key_present": bool(cfg.endpoint.api_key),
+            "tokenizer_family": cfg.endpoint.tokenizer_family,
+        },
+        "generation": cfg.generation.model_dump(),
+    }
+
+
+def _coerce_scalar(value: str) -> Any:
+    text = value.strip()
+    if text.lower() in {"true", "false"}:
+        return text.lower() == "true"
+    try:
+        return int(text)
+    except ValueError:
+        pass
+    try:
+        return float(text)
+    except ValueError:
+        return value
+
+
+async def _payload() -> dict[str, Any]:
+    if request.is_json:
+        body = await request.get_json()
+        if not isinstance(body, dict):
+            raise ValueError("settings payload must be a JSON object")
+        return body
+
+    form = await request.form
+    cfg = get_config().model_dump()
+    for key, value in form.items():
+        parts = key.split(".")
+        target = cfg
+        for part in parts[:-1]:
+            target = target.setdefault(part, {})
+        target[parts[-1]] = _coerce_scalar(value)
+    return cfg
+
+
+@bp.get("/settings")
+async def settings():
+    cfg = get_config()
+    safe_config = cfg.model_dump()
+    safe_config["endpoint"]["api_key"] = ""
+    return await render_template(
+        "settings.html",
+        settings=_settings_view(cfg),
+        config_json=json.dumps(safe_config, ensure_ascii=False),
+    )
+
+
+@bp.post("/settings/save")
+async def save():
+    try:
+        body = await _payload()
+        if isinstance(body.get("endpoint"), dict) and body["endpoint"].get("api_key") == "":
+            body["endpoint"]["api_key"] = get_config().endpoint.api_key
+        validated = AppConfig(**body)
+    except (ValidationError, ValueError) as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+
+    path = Path(current_app.config["MUSEAI_CONFIG_PATH"])
+    path.write_text(yaml.safe_dump(validated.model_dump(), sort_keys=False), encoding="utf-8")
+    try:
+        reloaded = load_config(path)
+    except ConfigError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+    resources = init_resources(reloaded)
+    set_runtime(reloaded, resources)
+    return jsonify({"ok": True, "settings": _settings_view(reloaded)})
+
+
+@bp.post("/settings/test_endpoint")
+async def test_endpoint():
+    cfg = get_config()
+    try:
+        response = await call_llm(
+            cfg.endpoint,
+            [{"role": "user", "content": "Reply with the single word: ok"}],
+            max_tokens=8,
+        )
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)})
+    return jsonify({"ok": True, "model": response.model_name})

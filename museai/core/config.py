@@ -101,6 +101,8 @@ class AppConfig(BaseModel):
     port: int = 8000
     db_path: str = "data/museai.db"
     event_log_path: str = "data/events.jsonl"
+    # Dev-only reset route guard. Production deployments should set this false.
+    allow_reset: bool = True
     # Seconds the continuity critic's web_search tool waits on a search engine.
     web_search_timeout: int = 10
 

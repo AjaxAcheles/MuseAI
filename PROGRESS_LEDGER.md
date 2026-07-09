@@ -11,9 +11,9 @@ session ritual.
 | v1.03 | FSM nodes: chapter planner, beat planner, deterministic PAD table, context assembly, prose drafter | done |
 | v1.04 | The quality loop: web_search, bounded agent loop, audit, continuity critic, revise, mode_selector | done |
 | v1.05 | Commit/router, compiled graph, review boundary, background manager, manuscript export, headless engine checkpoint | done |
-| v1.06 | (reserved) | pending |
+| v1.06 | Async Quart web server, SSE dashboard stream, controls, settings, seed routes, guarded reset | done |
 
-Next up: v1.06
+Next up: v1 complete
 
 ## v1.01 — done
 
@@ -421,3 +421,76 @@ Headless live run note: `tests/test_slice_headless.py` proves the complete
 headless path with mocked endpoint calls. A real-endpoint
 `uv run python run.py --headless --seed seeds/example.json` run is deferred until
 the configured endpoint is available and approved for a live generation run.
+
+## v1.06 — done
+
+The live web UI is implemented as a narrow async Quart app plus browser UI:
+dashboard, SSE hydration/streaming, generation start/status, manager controls,
+review resolution, guarded development reset, settings view/save/test, seed
+intake, and vanilla-JS telemetry panes. No routes, pages, panels, or controls for
+absent v1 features were added.
+
+**Files produced / implemented**
+
+- Web app factory: `museai/web/app.py`
+- Web routes: `museai/web/routes/{dashboard,control,settings,seed}.py`
+- Templates: `museai/web/templates/{base,dashboard,settings,seed,error}.html`
+- Static UI: `museai/web/static/css/theme.css`, `museai/web/static/js/main.js`
+- Web entry point: `run.py` now serves the Quart app by default and keeps
+  `--headless --seed` for non-browser runs
+- Config: `allow_reset` in `museai/core/config.py`, `config.yaml`, and
+  `config.example.yaml`
+- Tests: `tests/test_web.py`, plus `tests/conftest.py` fixture coverage for the
+  new config key
+
+**Design notes**
+
+- `create_app()` registers only the v1 route surface and configures a clean
+  top-level exception handler so requests return JSON or a plain HTML error page,
+  never a stack-trace page.
+- Startup loads strict config, initializes resources (including recovery), and
+  installs a single module-level `GenerationManager` for the process.
+- `/stream` is a Quart `Response` over an async generator. It subscribes to the
+  core bus, emits a hydration event from `bus.last_snapshot`, streams subsequent
+  bus events, and unsubscribes in `finally` when the client disconnects.
+- `/generate` refuses to start when no project has been seeded and otherwise
+  starts the manager only from idle/done/stopped states.
+- `/status` reports manager status, pointer, and committed project word total
+  from SQLite via `committed_word_count`; it does not derive totals from live
+  token events.
+- `/control/reset` is guarded by `allow_reset`; when false it returns 403 with a
+  clear JSON message.
+- Settings save validates the submitted document through the same Pydantic v2
+  config models with `extra='forbid'`, writes `config.yaml`, reloads it, and
+  rebuilds runtime handles. Endpoint testing uses the single `call_llm` boundary.
+- Seed submission accepts either raw JSON or the form textarea, validates the
+  v1 seed shape, then calls `load_seed`.
+- `base.html` loads Bootstrap 5.3, `marked.js`, and Chart.js from CDNs and keeps
+  project styling in `theme.css` with the required design-token custom
+  properties.
+- `dashboard.html` uses a two-column layout: sticky status ribbon, manuscript
+  stream, real Chart.js PAD radar, critic reasoning/tool panels, controls, and a
+  hidden-until-needed review panel.
+- `main.js` opens one `EventSource('/stream')`, hydrates from the first snapshot,
+  and has handlers for the real bus events only: `run_status`, `phase_change`,
+  `chapters_planned`, `beats_planned`, `pad_update`, `beat_start`, `token`,
+  `audit`, `critic_tool`, `critic_reasoning`, `critic_summary`, `revision`,
+  `word_count`, `pointer_update`, `review_needed`, and `manuscript_ready`. Empty
+  panels stay honest until real events arrive.
+- Settings and review/control actions use vanilla `fetch` with `AbortController`;
+  the UI uses no `localStorage`.
+
+**Done-check** — route micro-check:
+`uv run python -c "import asyncio; from museai.web.app import create_app; app=create_app(); print([r.rule for r in app.url_map.iter_rules()])"`
+→ `['/static/<path:filename>', '/dashboard', '/', '/stream', '/generate',
+'/status', '/control/pause', '/control/resume', '/control/stop',
+'/control/review', '/control/reset', '/settings', '/settings/save',
+'/settings/test_endpoint', '/seed', '/seed/submit']`.
+
+Focused tests: `uv run pytest -q tests/test_web.py` → `6 passed`.
+
+Full suite: `uv run pytest -q` → `283 passed`.
+
+`uv run python run.py` now serves the browser UI at the configured host/port.
+
+**v1 complete.**

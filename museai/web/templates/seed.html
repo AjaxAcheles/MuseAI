@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+
+{% block title %}MuseAI Seed{% endblock %}
+
+{% block content %}
+<div class="row justify-content-center">
+  <section class="col-xl-9">
+    <div class="panel">
+      <div class="d-flex align-items-center justify-content-between gap-3 mb-3">
+        <div>
+          <h1 class="h3 mb-1">Load Seed</h1>
+          <p class="text-muted mb-0">Submit project metadata, arcs, threads, and characters with PAD values.</p>
+        </div>
+        <a class="btn btn-outline-light" href="/dashboard">Dashboard</a>
+      </div>
+      {% if error %}<p class="alert alert-danger" role="alert">{{ error }}</p>{% endif %}
+      <form id="seed-form" method="post" action="/seed/submit">
+        <label class="form-label" for="seed_json">Seed JSON</label>
+        <textarea id="seed_json" name="seed_json" class="form-control font-monospace" rows="24">{{ example_seed }}</textarea>
+        <div class="d-flex align-items-center gap-3 mt-3">
+          <button class="btn btn-success" type="submit">Load seed</button>
+          <span class="text-muted small">The example seed is safe to reload; writes are idempotent upserts.</span>
+        </div>
+      </form>
+    </div>
+  </section>
+</div>
+{% endblock %}
