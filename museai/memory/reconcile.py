@@ -44,11 +44,24 @@ def _index_beat_commits(event_log_path: str | Path) -> dict[str, dict]:
 def _apply_beat_commit(conn, event: dict) -> None:
     """Re-apply a beat_commit event's writes idempotently."""
     pointer = event.get("fsm_pointer") or {}
+    existing = conn.execute(
+        "SELECT * FROM Beats WHERE id=?", (event["beat_id"],)
+    ).fetchone()
+    chapter_id = existing["chapter_id"] if existing is not None else pointer.get("chapter_id")
+    if chapter_id is None:
+        raise ValueError(f"beat_commit event for {event['beat_id']!r} has no chapter_id")
     upsert_beat(
         conn,
         id=event["beat_id"],
-        chapter_id=pointer.get("chapter_id"),
-        ordering=pointer.get("beat_index", 0),
+        chapter_id=str(chapter_id),
+        ordering=(
+            existing["ordering"]
+            if existing is not None
+            else int(pointer.get("beat_index", 0)) + 1
+        ),
+        beat_spec=(existing["beat_spec"] if existing is not None else None),
+        pad_constraint=(existing["pad_constraint"] if existing is not None else None),
+        word_target=(existing["word_target"] if existing is not None else None),
         prose=event.get("prose_delta"),
         word_count=event.get("word_count", 0),
         status="completed",

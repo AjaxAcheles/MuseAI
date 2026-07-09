@@ -10,10 +10,10 @@ session ritual.
 | v1.02 | LLM boundary: tokenizer, async adapter client, streaming, retry, tool-calling, prompt rendering, structured output | done |
 | v1.03 | FSM nodes: chapter planner, beat planner, deterministic PAD table, context assembly, prose drafter | done |
 | v1.04 | The quality loop: web_search, bounded agent loop, audit, continuity critic, revise, mode_selector | done |
-| v1.05 | (reserved) | pending |
+| v1.05 | Commit/router, compiled graph, review boundary, background manager, manuscript export, headless engine checkpoint | done |
 | v1.06 | (reserved) | pending |
 
-Next up: v1.05
+Next up: v1.06
 
 ## v1.01 — done
 
@@ -340,3 +340,84 @@ spent, whereupon the router reaches `review` with the draft and
 **Live check: PASSED.**
 `uv run python -c "from museai.fsm.tools.web_search import web_search; print(len(web_search('Perseid meteor shower peak', 3)))"`
 printed `3` against the real search backend.
+
+## v1.05 — done
+
+The v1 engine now runs headlessly end to end: it plans chapters and beats,
+drafts, audits, runs the single continuity critic, revises or parks for review,
+commits through SQLite plus the append-only event log, routes from SQLite ground
+truth, and exports a single Markdown manuscript from committed prose only.
+
+**Files produced / implemented**
+
+- FSM node: `museai/fsm/nodes/commit.py`
+- FSM router: `museai/fsm/routers/commit_router.py`
+- FSM graph: `museai/fsm/graph.py`
+- FSM manager: `museai/fsm/manager.py`
+- Manuscript export: `museai/fsm/export.py`
+- Headless CLI: `run.py`
+- Recovery hardening: `museai/memory/reconcile.py`
+- Tests: `tests/test_commit.py`, `tests/test_commit_router.py`,
+  `tests/test_graph.py`, `tests/test_review.py`, `tests/test_slice_headless.py`
+
+**Design notes**
+
+- `commit_transaction` writes a pending `CommitIntent` before commit writes,
+  updates the active `Beats` row with committed prose/word count/status, upserts
+  the focal character's current PAD from the beat's target PAD, applies only
+  explicit forward thread-status updates, marks chapter/arc activity or
+  completion, appends a durable `beat_commit` event, and only then flips the
+  intent to `committed`.
+- The transient graph state reset is explicit: retry count, critic failures,
+  best-seen draft/failure count, draft text, streaming buffer, and review request
+  are cleared. The project word-count bus event is computed from completed beats
+  in SQLite, never from the live token stream.
+- `commit_router` is synchronous and queries SQLite for every branch. First match
+  wins: next planned beat in the active chapter → `assemble`; next planned
+  chapter with no beats in the active arc → `plan_beat`; next planned arc →
+  `plan_chapter`; otherwise target/all-complete → `export`. When it advances, it
+  writes the new active row and mutates `state['fsm_pointer']` explicitly.
+- Recovery now preserves existing beat metadata (`beat_spec`, `pad_constraint`,
+  `word_target`, ordering, and chapter) when replaying an appended `beat_commit`
+  event, so a crash after the event append cannot erase planning columns.
+- `build_graph(config)` compiles a `StateGraph` over `OrchestratorState` with
+  the required static edges: `plan_chapter → plan_beat → assemble → draft →
+  audit → critics`, plus `revise → audit`.
+- Conditional routing after `critics` uses `mode_selector`: clean drafts route to
+  `commit`, failures under the cap to `revise`, and exhausted failures to
+  `review`.
+- Conditional routing after `commit` uses `commit_router`: the next planned beat
+  loops to `assemble`, a planned chapter with no beats routes to `plan_beat`, a
+  planned arc routes to `plan_chapter`, and export ends the graph.
+- The `review` node is a safe boundary. It sets `review_requested=True`,
+  publishes `review_needed` with the pointer and `best_seen_draft`, then ends the
+  graph run. There is no hidden wait and no busy-loop.
+- `GenerationManager` owns lifecycle state (`idle|running|paused|review|stopped|done`),
+  starts runs in a background asyncio task, tracks the current
+  `OrchestratorState`, publishes run status to the stream bus, and honors pause
+  and stop requests at safe boundaries between nodes.
+- Review resumption is explicit: `resolve_review("accept")` commits the edited
+  text or `best_seen_draft`; `resolve_review("regenerate")` resets retry/failure
+  review state and resumes at `assemble` to re-draft the same beat.
+- `export_manuscript(config)` writes exactly one Markdown file at
+  `data/output/<project_id>.md`, with light chapter headers and completed beat
+  prose in narrative order. It never exports live stream text, uncommitted drafts,
+  or best-seen review candidates.
+- `run.py --headless --seed <path>` loads config, aligns `config.project_id` with
+  the seed project id, initializes resources, loads the seed, runs the
+  `GenerationManager`, prints the manuscript path on completion, and parks with
+  a clear operator message if human review is required. Headless mode does not
+  auto-accept review drafts.
+- The implementation remains v1-only: no non-v1 stores, snapshots, global
+  replanning, timeline/bible/heatmap artifacts, or implied features were added.
+
+**Done-check** — `uv run python -c "from museai.core.config import load_config; from museai.fsm.graph import build_graph; g=build_graph(load_config()); print('graph compiled')"` → `graph compiled`.
+
+Focused tests: `uv run pytest -q tests/test_slice_headless.py tests/test_graph.py tests/test_review.py` → `6 passed`.
+
+Full suite: `uv run pytest -q` → `277 passed`.
+
+Headless live run note: `tests/test_slice_headless.py` proves the complete
+headless path with mocked endpoint calls. A real-endpoint
+`uv run python run.py --headless --seed seeds/example.json` run is deferred until
+the configured endpoint is available and approved for a live generation run.
