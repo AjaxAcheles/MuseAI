@@ -81,7 +81,7 @@ def _patch_review_endpoint(monkeypatch, *, critic_responses: list[str], drafts: 
         await on_token(draft)
         return _Response(draft)
 
-    async def fake_critic_loop(endpoint, messages, tools, tool_impls, max_iterations, on_event=None):
+    async def fake_critic_loop(endpoint, messages, tools, tool_impls, max_iterations, on_event=None, **kwargs):
         return _Response(scripted_critics.pop(0))
 
     async def fake_revise_llm(endpoint, messages, **kwargs):

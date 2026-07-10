@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from museai.core import chat_log
 from museai.core.config import AppConfig
 from museai.core.logging_setup import configure_logging, get_logger
 from museai.memory.db import init_db
@@ -41,6 +42,7 @@ def init_resources(config: AppConfig) -> Resources:
     configure_logging(config)
     init_db(config.db_path)
     _ensure_event_log(config.event_log_path)
+    chat_log.configure(chat_log.default_path(config.event_log_path))
     logger.info(
         "resources_initialized project_id=%s db=%s event_log=%s",
         config.project_id,
@@ -66,9 +68,13 @@ def init_resources(config: AppConfig) -> Resources:
 
 def reset_resources(config: AppConfig) -> Resources:
     """Delete the DB and event log, then re-initialize. Dev-only."""
-    for path in (config.db_path, config.event_log_path):
+    for path in (
+        config.db_path,
+        config.event_log_path,
+        chat_log.default_path(config.event_log_path),
+    ):
         p = Path(path)
         if p.exists():
             p.unlink()
-    logger.info("reset: removed db and event log")
+    logger.info("reset: removed db, event log, and chat transcript")
     return init_resources(config)

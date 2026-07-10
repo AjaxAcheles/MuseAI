@@ -77,7 +77,26 @@ async def test_dashboard_renders(config_factory, tmp_path):
     try:
         response = await app.test_client().get("/")
         assert response.status_code == 200
-        assert "MuseAI Dashboard" in await response.get_data(as_text=True)
+        body = await response.get_data(as_text=True)
+        assert "MuseAI Dashboard" in body
+        # An unseeded dashboard must offer a way to seed and must not imply it can generate.
+        assert "No seed loaded" in body
+        assert "Load Seed" in body
+        assert "role=\"progressbar\"" in body
+    finally:
+        await _close_started_app(test_app)
+
+
+async def test_seed_page_presents_default_as_short_test_seed(config_factory, tmp_path):
+    app, test_app = await _started_app(config_factory(), tmp_path)
+    try:
+        response = await app.test_client().get("/seed")
+        assert response.status_code == 200
+        body = await response.get_data(as_text=True)
+        assert "Reset to test seed" in body
+        assert "1,500-word manuscript target" in body
+        assert "word_count_target" in body
+        assert "1500" in body
     finally:
         await _close_started_app(test_app)
 
@@ -232,6 +251,18 @@ async def test_status_reports_project_word_target(config_factory, tmp_path):
         body = await response.get_json()
         assert body["ok"] is True
         assert body["word_target"] == 5000
+    finally:
+        await _close_started_app(test_app)
+
+
+async def test_status_reports_no_word_target_before_seed(config_factory, tmp_path):
+    app, test_app = await _started_app(config_factory(), tmp_path)
+    app_module.manager = MockManager()
+    try:
+        response = await app.test_client().get("/status")
+        body = await response.get_json()
+        assert body["ok"] is True
+        assert body["word_target"] is None
     finally:
         await _close_started_app(test_app)
 

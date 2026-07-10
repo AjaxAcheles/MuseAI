@@ -67,16 +67,30 @@ def create_app(
             message = str(exc)
 
         wants_json = (
-            request.path.startswith(("/control", "/settings/save", "/settings/test_endpoint"))
-            or request.path in {"/generate", "/status", "/stream", "/seed/submit"}
+            request.path.startswith(
+                (
+                    "/control",
+                    "/settings/save",
+                    "/settings/test_endpoint",
+                    "/database/",
+                    "/logs/",
+                    "/exports/",
+                    "/chat/",
+                )
+            )
+            or request.path in {"/generate", "/status", "/stream", "/seed/submit", "/committed", "/outline"}
             or request.accept_mimetypes.best == "application/json"
         )
         if wants_json:
             return jsonify({"ok": False, "error": message}), status
         return await render_template("error.html", status=status, message=message), status
 
+    from museai.web.routes.chat import bp as chat_bp
     from museai.web.routes.control import bp as control_bp
     from museai.web.routes.dashboard import bp as dashboard_bp
+    from museai.web.routes.database import bp as database_bp
+    from museai.web.routes.exports import bp as exports_bp
+    from museai.web.routes.logs import bp as logs_bp
     from museai.web.routes.seed import bp as seed_bp
     from museai.web.routes.settings import bp as settings_bp
 
@@ -84,6 +98,10 @@ def create_app(
     app.register_blueprint(control_bp)
     app.register_blueprint(settings_bp)
     app.register_blueprint(seed_bp)
+    app.register_blueprint(database_bp)
+    app.register_blueprint(logs_bp)
+    app.register_blueprint(exports_bp)
+    app.register_blueprint(chat_bp)
 
     if test_config is not None:
         set_runtime(test_config, None)

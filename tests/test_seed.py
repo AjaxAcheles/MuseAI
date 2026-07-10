@@ -20,8 +20,8 @@ def test_example_seed_populates_every_table(config_factory):
     counts = load_seed(seed, config)
 
     assert counts["projects"] == 1
-    assert counts["arcs"] == 2
-    assert counts["threads"] == 3
+    assert counts["arcs"] == 1
+    assert counts["threads"] == 2
     assert counts["characters"] == 2
     assert counts["character_emotions"] == 2
 
@@ -30,13 +30,13 @@ def test_example_seed_populates_every_table(config_factory):
 
     project = db.get_project(conn, pid)
     assert project is not None
-    assert project["word_count_target"] == 40000
+    assert 1000 <= project["word_count_target"] <= 2000
 
     arcs = db.get_arcs(conn, pid)
-    assert [a["status"] for a in arcs] == ["active", "planned"]
+    assert [a["status"] for a in arcs] == ["active"]
 
     threads = db.get_open_threads(conn, pid)
-    assert len(threads) == 3
+    assert len(threads) == 2
 
     characters = db.get_characters(conn, pid)
     assert len(characters) == 2
@@ -59,7 +59,7 @@ def test_load_seed_is_idempotent(config_factory):
     n_arcs = conn.execute("SELECT COUNT(*) AS n FROM Arcs").fetchone()["n"]
     n_chars = conn.execute("SELECT COUNT(*) AS n FROM Characters").fetchone()["n"]
     conn.close()
-    assert n_arcs == 2
+    assert n_arcs == 1
     assert n_chars == 2
 
 

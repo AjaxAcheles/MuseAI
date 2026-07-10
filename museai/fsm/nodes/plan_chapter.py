@@ -115,7 +115,7 @@ async def plan_chapter(state: OrchestratorState) -> dict:
             characters=_character_context(characters),
         )
 
-        response = await call_llm(config.endpoint, messages)
+        response = await call_llm(config.endpoint, messages, agent="chapter_planner", stream=True)
         planned = parse_json_array(response.text, what="chapters")
 
         chapters: list[dict] = []

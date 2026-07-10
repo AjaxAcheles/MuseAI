@@ -28,14 +28,18 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import time
+import uuid
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Mapping, Sequence
 from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 
+from museai.core import chat_log
 from museai.core.config import EndpointConfig
 from museai.core.logging_setup import get_llm_logger
+from museai.core.stream_bus import bus
 from museai.llm.tokenizer import count_message_tokens, count_tokens
 
 # The standard chat-completions path, appended to an endpoint root.
@@ -76,6 +80,9 @@ class LLMResponse:
     tokens_out: int
     tool_calls: list[dict] = field(default_factory=list)
     finish_reason: str | None = None
+    # Chain-of-thought the model exposed, kept apart from `text` so no caller
+    # ever mistakes deliberation for prose. Empty for non-reasoning models.
+    thinking: str = ""
 
 
 class LLMCallError(Exception):
@@ -200,8 +207,112 @@ def _normalise_tool_calls(raw_calls: Any) -> list[dict]:
     return [dict(call) for call in raw_calls]
 
 
-def _parse_response(payload: Mapping[str, Any]) -> tuple[str, list[dict], str | None]:
-    """Extract (text, tool_calls, finish_reason) from a non-streaming response."""
+# OpenAI-compatible endpoints expose chain-of-thought two ways: a dedicated
+# field beside `content` (DeepSeek/vLLM use `reasoning_content`, OpenRouter and
+# some Ollama builds use `reasoning`), or a literal <think>...</think> block
+# opening the content itself (Ollama serving qwen3 / r1 distills). Both are
+# handled; a model that emits neither simply has empty thinking.
+_REASONING_FIELDS = ("reasoning_content", "reasoning")
+_THINK_OPEN = "<think>"
+_THINK_CLOSE = "</think>"
+
+
+def _reasoning_text(container: Mapping[str, Any]) -> str:
+    """The reasoning field of one message or delta, whatever it is called."""
+    for name in _REASONING_FIELDS:
+        value = container.get(name)
+        if isinstance(value, str) and value:
+            return value
+    return ""
+
+
+def _split_think_block(text: str) -> tuple[str, str]:
+    """Split a complete content body into (thinking, response).
+
+    Only a tag opening the body counts — a <think> mid-prose is prose. An
+    unclosed block means the model spent its whole reply deliberating, so it
+    is all thinking and the response is empty.
+    """
+    lead = len(text) - len(text.lstrip())
+    stripped = text[lead:]
+    if not stripped.startswith(_THINK_OPEN):
+        return "", text
+    rest = stripped[len(_THINK_OPEN) :]
+    close = rest.find(_THINK_CLOSE)
+    if close == -1:
+        return rest.strip(), ""
+    return rest[:close].strip(), rest[close + len(_THINK_CLOSE) :].lstrip("\n")
+
+
+class _ThinkTagSplitter:
+    """Route a streamed content sequence into thinking and response pieces.
+
+    Stateful because the tags can arrive split across chunk boundaries: the
+    splitter buffers until it can tell whether the stream opens with
+    ``<think>``, and while inside a block it holds back a tag-sized tail in
+    case ``</think>`` straddles two chunks. ``feed`` returns
+    ``(kind, text)`` pieces; ``flush`` drains whatever a finished stream left
+    buffered.
+    """
+
+    def __init__(self) -> None:
+        self._mode = "start"  # start -> thinking? -> response
+        self._buffer = ""
+
+    def feed(self, text: str) -> list[tuple[str, str]]:
+        pieces: list[tuple[str, str]] = []
+        if self._mode == "response":
+            if text:
+                pieces.append(("response", text))
+            return pieces
+
+        self._buffer += text
+        if self._mode == "start":
+            candidate = self._buffer.lstrip()
+            if _THINK_OPEN.startswith(candidate):
+                return pieces  # still ambiguous; keep buffering
+            if not candidate.startswith(_THINK_OPEN):
+                self._mode = "response"
+                pieces.append(("response", self._buffer))
+                self._buffer = ""
+                return pieces
+            self._mode = "thinking"
+            self._buffer = candidate[len(_THINK_OPEN) :]
+
+        close = self._buffer.find(_THINK_CLOSE)
+        if close != -1:
+            thinking = self._buffer[:close]
+            remainder = self._buffer[close + len(_THINK_CLOSE) :].lstrip("\n")
+            self._mode = "response"
+            self._buffer = ""
+            if thinking:
+                pieces.append(("thinking", thinking))
+            if remainder:
+                pieces.append(("response", remainder))
+            return pieces
+
+        # Hold back one tag-length of tail in case </think> is split.
+        safe = len(self._buffer) - (len(_THINK_CLOSE) - 1)
+        if safe > 0:
+            pieces.append(("thinking", self._buffer[:safe]))
+            self._buffer = self._buffer[safe:]
+        return pieces
+
+    def flush(self) -> list[tuple[str, str]]:
+        buffered, self._buffer = self._buffer, ""
+        if not buffered:
+            return []
+        # A stream that ended mid-block was all deliberation; one that ended
+        # while the opening tag was still ambiguous was ordinary prose.
+        kind = "thinking" if self._mode == "thinking" else "response"
+        self._mode = "response"
+        return [(kind, buffered)]
+
+
+def _parse_response(
+    payload: Mapping[str, Any],
+) -> tuple[str, str, list[dict], str | None]:
+    """Extract (text, thinking, tool_calls, finish_reason) from a response."""
     choices = payload.get("choices")
     if not choices:
         raise LLMCallError(f"response contained no choices: {payload!r}")
@@ -211,8 +322,12 @@ def _parse_response(payload: Mapping[str, Any]) -> tuple[str, list[dict], str | 
 
     # A tool-calling reply legitimately has null content.
     text = message.get("content") or ""
+    thinking = _reasoning_text(message)
+    tagged_thinking, text = _split_think_block(text)
+    if tagged_thinking:
+        thinking = f"{thinking}\n{tagged_thinking}".strip() if thinking else tagged_thinking
     tool_calls = _normalise_tool_calls(message.get("tool_calls"))
-    return text, tool_calls, choice.get("finish_reason")
+    return text, thinking, tool_calls, choice.get("finish_reason")
 
 
 def _accumulate_tool_call_deltas(
@@ -249,21 +364,39 @@ async def _emit_token(on_token: TokenCallback | None, token: str) -> None:
         await result
 
 
+ChatCallback = Callable[[str, str], Awaitable[None]]
+
+
 async def _parse_stream(
     lines: Any,
     on_token: TokenCallback | None,
     emitted: list[bool],
-) -> tuple[str, list[dict], str | None, dict]:
-    """Consume an SSE line stream into (text, tool_calls, finish_reason, raw).
+    on_chat: ChatCallback | None = None,
+) -> tuple[str, str, list[dict], str | None, dict]:
+    """Consume an SSE line stream into (text, thinking, tool_calls, finish_reason, raw).
 
     ``emitted`` is a one-element flag the caller reads to decide whether a
-    mid-stream fault may be retried: once a token has reached ``on_token``,
-    replaying the attempt would duplicate it.
+    mid-stream fault may be retried: once a piece has reached ``on_token`` or
+    ``on_chat``, replaying the attempt would duplicate it. Reasoning — a
+    ``reasoning_content``/``reasoning`` delta or a leading <think> block — is
+    routed to thinking and never reaches ``on_token``, which receives prose only.
     """
     chunks: list[dict] = []
     pieces: list[str] = []
+    thinking_pieces: list[str] = []
+    splitter = _ThinkTagSplitter()
     tool_call_parts: dict[int, dict] = {}
     finish_reason: str | None = None
+
+    async def _route(kind: str, text: str) -> None:
+        emitted[0] = True
+        if kind == "response":
+            pieces.append(text)
+            await _emit_token(on_token, text)
+        else:
+            thinking_pieces.append(text)
+        if on_chat is not None:
+            await on_chat(kind, text)
 
     async for line in lines:
         line = line.strip()
@@ -282,18 +415,29 @@ async def _parse_stream(
         chunks.append(chunk)
         for choice in chunk.get("choices") or []:
             delta = choice.get("delta") or {}
+            reasoning = _reasoning_text(delta)
+            if reasoning:
+                await _route("thinking", reasoning)
             content = delta.get("content")
             if content:
-                pieces.append(content)
-                emitted[0] = True
-                await _emit_token(on_token, content)
+                for kind, piece in splitter.feed(content):
+                    await _route(kind, piece)
             if delta.get("tool_calls"):
                 _accumulate_tool_call_deltas(tool_call_parts, delta["tool_calls"])
             if choice.get("finish_reason"):
                 finish_reason = choice["finish_reason"]
 
+    for kind, piece in splitter.flush():
+        await _route(kind, piece)
+
     tool_calls = [tool_call_parts[i] for i in sorted(tool_call_parts)]
-    return "".join(pieces), tool_calls, finish_reason, {"stream": True, "chunks": chunks}
+    return (
+        "".join(pieces),
+        "".join(thinking_pieces).strip(),
+        tool_calls,
+        finish_reason,
+        {"stream": True, "chunks": chunks},
+    )
 
 
 def _raise_for_status(response: httpx.Response, body: str) -> None:
@@ -317,12 +461,13 @@ async def _attempt_stream(
     body: dict[str, Any],
     on_token: TokenCallback | None,
     emitted: list[bool],
-) -> tuple[str, list[dict], str | None, dict]:
+    on_chat: ChatCallback | None,
+) -> tuple[str, str, list[dict], str | None, dict]:
     async with client.stream("POST", url, headers=headers, json=body) as response:
         if response.status_code >= 400:
             body_text = (await response.aread()).decode(errors="replace")
             _raise_for_status(response, body_text)
-        return await _parse_stream(response.aiter_lines(), on_token, emitted)
+        return await _parse_stream(response.aiter_lines(), on_token, emitted, on_chat)
 
 
 async def _attempt_once(
@@ -330,7 +475,7 @@ async def _attempt_once(
     url: str,
     headers: dict[str, str],
     body: dict[str, Any],
-) -> tuple[str, list[dict], str | None, dict]:
+) -> tuple[str, str, list[dict], str | None, dict]:
     response = await client.post(url, headers=headers, json=body)
     if response.status_code >= 400:
         _raise_for_status(response, response.text)
@@ -340,14 +485,74 @@ async def _attempt_once(
     except ValueError as exc:
         raise LLMCallError(f"response was not valid JSON: {response.text[:500]!r}") from exc
 
-    text, tool_calls, finish_reason = _parse_response(payload)
-    return text, tool_calls, finish_reason, payload
+    text, thinking, tool_calls, finish_reason = _parse_response(payload)
+    return text, thinking, tool_calls, finish_reason, payload
+
+
+def _chat_messages(messages: Sequence[Mapping[str, Any]]) -> list[dict]:
+    """Full-fidelity copies of the outgoing messages for the chat transcript.
+
+    Unlike ``_safe_messages`` nothing is truncated: the View Chat page's whole
+    point is showing exactly what the model was sent. Secrets live in headers,
+    never in message bodies, so there is nothing to strip here.
+    """
+    return [dict(m) for m in messages]
+
+
+async def _chat_start(
+    call_id: str, agent: str, endpoint: EndpointConfig, messages: Sequence[Mapping[str, Any]], stream: bool
+) -> None:
+    data = {
+        "id": call_id,
+        "ts": time.time(),
+        "agent": agent,
+        "model": endpoint.model_name,
+        "stream": stream,
+        "messages": _chat_messages(messages),
+    }
+    chat_log.record({"event": "chat_start", **data})
+    await bus.publish("chat_start", data)
+
+
+async def _chat_end(
+    call_id: str,
+    agent: str,
+    endpoint: EndpointConfig,
+    *,
+    ok: bool,
+    thinking: str = "",
+    text: str = "",
+    tokens_in: int = 0,
+    tokens_out: int = 0,
+    tool_calls: int = 0,
+    finish_reason: str | None = None,
+    attempt: int = 1,
+    error: str | None = None,
+) -> None:
+    data = {
+        "id": call_id,
+        "ts": time.time(),
+        "agent": agent,
+        "model": endpoint.model_name,
+        "ok": ok,
+        "thinking": thinking,
+        "text": text,
+        "tokens_in": tokens_in,
+        "tokens_out": tokens_out,
+        "tool_calls": tool_calls,
+        "finish_reason": finish_reason,
+        "attempt": attempt,
+        "error": error,
+    }
+    chat_log.record({"event": "chat_end", **data})
+    await bus.publish("chat_end", data)
 
 
 async def call_llm(
     endpoint: EndpointConfig,
     messages: Sequence[Mapping[str, Any]],
     *,
+    agent: str = "system",
     stream: bool = False,
     on_token: TokenCallback | None = None,
     temperature: float | None = None,
@@ -361,6 +566,11 @@ async def call_llm(
     retry_backoff: Sequence[float] | None = None,
 ) -> LLMResponse:
     """Call the configured endpoint once, retrying transient faults.
+
+    ``agent`` names who is asking — drafter, beat_planner, critic — purely for
+    the chat transcript and stream; it never reaches the wire. Every call
+    publishes a ``chat_start``/``chat_end`` pair (with ``chat_token`` deltas
+    while streaming) so the View Chat page shows all model traffic.
 
     ``transport`` and ``retry_backoff`` exist so tests can inject a mock
     transport and collapse the backoff sleeps; production callers leave both
@@ -388,6 +598,14 @@ async def call_llm(
     attempt = 0
     last_error: Exception | None = None
 
+    call_id = uuid.uuid4().hex[:12]
+    await _chat_start(call_id, agent, endpoint, messages, stream)
+
+    async def on_chat(kind: str, text: str) -> None:
+        await bus.publish(
+            "chat_token", {"id": call_id, "agent": agent, "kind": kind, "text": text}
+        )
+
     while attempt < MAX_ATTEMPTS:
         attempt += 1
         emitted = [False]
@@ -395,15 +613,16 @@ async def call_llm(
         try:
             async with httpx.AsyncClient(timeout=timeout, transport=transport) as client:
                 if stream:
-                    text, tool_calls, finish_reason, raw = await _attempt_stream(
-                        client, url, headers, body, on_token, emitted
+                    text, thinking, tool_calls, finish_reason, raw = await _attempt_stream(
+                        client, url, headers, body, on_token, emitted, on_chat
                     )
                 else:
-                    text, tool_calls, finish_reason, raw = await _attempt_once(
+                    text, thinking, tool_calls, finish_reason, raw = await _attempt_once(
                         client, url, headers, body
                     )
         except LLMCallError as exc:
             _log_error(safe_url, endpoint, stream, attempt, str(exc))
+            await _chat_end(call_id, agent, endpoint, ok=False, attempt=attempt, error=str(exc))
             raise
         except _RETRYABLE as exc:
             last_error = exc
@@ -411,6 +630,9 @@ async def call_llm(
                 # Tokens already reached the caller; replaying would double them.
                 message = f"stream failed after emitting tokens: {exc}"
                 _log_error(safe_url, endpoint, stream, attempt, message)
+                await _chat_end(
+                    call_id, agent, endpoint, ok=False, attempt=attempt, error=message
+                )
                 raise LLMCallError(message) from exc
             _log_error(
                 safe_url, endpoint, stream, attempt, f"transient: {exc}", retrying=True
@@ -434,6 +656,19 @@ async def call_llm(
             tool_calls=len(tool_calls),
             finish_reason=finish_reason,
         )
+        await _chat_end(
+            call_id,
+            agent,
+            endpoint,
+            ok=True,
+            thinking=thinking,
+            text=text,
+            tokens_in=tokens_in,
+            tokens_out=tokens_out,
+            tool_calls=len(tool_calls),
+            finish_reason=finish_reason,
+            attempt=attempt,
+        )
         return LLMResponse(
             text=text,
             raw=raw,
@@ -443,10 +678,12 @@ async def call_llm(
             tokens_out=tokens_out,
             tool_calls=tool_calls,
             finish_reason=finish_reason,
+            thinking=thinking,
         )
 
     summary = f"{MAX_ATTEMPTS} attempts failed, last error: {last_error}"
     _log_error(safe_url, endpoint, stream, attempt, summary)
+    await _chat_end(call_id, agent, endpoint, ok=False, attempt=attempt, error=summary)
     raise LLMCallError(summary) from last_error
 
 

@@ -9,6 +9,8 @@ starts the next run at either ``commit`` or ``assemble``.
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Literal, cast
 
 from museai.core.config import AppConfig
@@ -18,7 +20,7 @@ from museai.fsm.export import committed_word_count, export_manuscript
 from museai.fsm.graph import GraphEntry, build_graph
 from museai.fsm.nodes.deps import set_node_config
 from museai.fsm.state import FSM_Pointer, OrchestratorState, accumulate_or_reset, make_initial_state
-from museai.memory.db import connect_db
+from museai.memory.db import connect_db, reset_active_beats
 
 RunStatus = Literal["idle", "running", "paused", "review", "stopped", "done", "error"]
 ReviewDecision = Literal["accept", "regenerate"]
@@ -217,10 +219,69 @@ class GenerationManager:
                 entry_point=entry_point,
                 error=f"{type(exc).__name__}: {exc}",
             )
-            await bus.publish(
-                "run_status",
-                {"status": self.status, "error": f"{type(exc).__name__}: {exc}"},
-            )
+            draft_path = self._salvage_failed_run()
+            payload = {"status": self.status, "error": f"{type(exc).__name__}: {exc}"}
+            if draft_path:
+                payload["draft_path"] = draft_path
+            await bus.publish("run_status", payload)
+
+    def _salvage_failed_run(self) -> str | None:
+        """Rescue what a dead run leaves behind: the draft, and the beat's status.
+
+        Never raises. A fault in here would replace the real exception's error
+        message with a misleading one, and the run has already failed — losing the
+        salvage is bad, losing the diagnosis is worse.
+        """
+        draft_path: str | None = None
+        try:
+            draft_path = self._persist_draft()
+        except Exception as exc:  # noqa: BLE001
+            log_node_event("manager", event="draft_salvage_failed", error=str(exc))
+        try:
+            self._reset_active_beat()
+        except Exception as exc:  # noqa: BLE001
+            log_node_event("manager", event="beat_reset_failed", error=str(exc))
+        return draft_path
+
+    def _persist_draft(self) -> str | None:
+        """Write the best draft this run produced to ``data/drafts/``.
+
+        Deliberately a file, not ``Beats.prose``: `/committed`, `get_committed_beats`
+        and `export_manuscript` all select on ``status='completed' AND prose IS NOT
+        NULL``, so an unreviewed draft parked in that column is one status flip away
+        from being shipped as manuscript. A file cannot leak that way.
+        """
+        if self.state is None:
+            return None
+        draft = self.state["best_seen_draft"] or self.state["current_draft_text"]
+        if not draft or not draft.strip():
+            return None
+
+        package = self.state["active_context_package"] or {}
+        beat = package.get("beat") or {}
+        beat_id = beat.get("id") or "unknown-beat"
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+        directory = Path("data/drafts")
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / f"{beat_id}-{stamp}.md"
+        path.write_text(draft, encoding="utf-8")
+
+        log_node_event("manager", event="draft_salvaged", beat_id=beat_id, path=str(path))
+        return str(path)
+
+    def _reset_active_beat(self) -> None:
+        """Return the in-flight beat to ``planned`` so a restart redrafts it."""
+        if self.state is None:
+            return
+        conn = connect_db(self.config.db_path)
+        try:
+            with conn:
+                reset = reset_active_beats(conn, self.state["project_id"])
+        finally:
+            conn.close()
+        if reset:
+            log_node_event("manager", event="active_beats_reset", beats=reset)
 
     def _merge_delta(self, delta: dict) -> None:
         assert self.state is not None

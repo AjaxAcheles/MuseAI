@@ -49,17 +49,51 @@ Start the web UI at the configured `host`/`port`:
 uv run python run.py
 ```
 
-Then:
+The interface has seven tabs: **Dashboard · View Chat · Seed & Plan ·
+Database · Settings · Logs · Exports**. A typical session:
 
-1. Open `/seed`, review or edit the example seed JSON (it validates live as you
-   type), and submit it.
-2. Return to the Studio (`/dashboard`) and click **Generate**. Prose streams
-   live by beat; the phase tracker, word-count progress, critic panel, and
-   review controls update from real server-sent events.
-3. If generation parks for review, edit the draft if needed and choose
+1. Open **Seed & Plan** (`/setup`). Review or edit the example seed JSON — it
+   validates live as you type. Use **Plain Text** to write a premise, **JSON
+   Editor** for the full seed, and **Preview Timeline** to see the story's arcs
+   before committing to them.
+2. Press **Load Seed**. Until this succeeds, **Generate** stays disabled: the
+   engine has no project to work on and the button says so.
+3. Open the **Dashboard**. The seed pill reads "Seed loaded", the story rail
+   renders the arcs, and Generate is now enabled.
+4. Press **Generate**.
+5. Watch the two panels, which never mix:
+   - **Committed Story** shows only prose that passed review and committed. It
+     refreshes when the backend reports a commit.
+   - **Live Activity** shows what the engine is doing right now — the raw draft
+     stream, planner and critic messages, audits, revisions, warnings. Filter it
+     by Planner / Drafter / Critics / Commit / Warnings.
+
+   If a weak model keeps answering the continuity critic with unreadable JSON,
+   the run does not die: the critic is re-prompted (`critic_parse_retries`), and
+   after `critic_degrade_threshold` consecutive unreadable beats an orange banner
+   warns that continuity is no longer being checked. Beats keep committing, but
+   with only the automated passive-voice audit behind them. Fix the model in
+   **Settings** — the banner clears as soon as one reply parses.
+6. If generation parks for review, edit the best-seen draft and choose
    **Accept** or **Regenerate**.
-4. When the run completes, MuseAI exports a Markdown manuscript under
-   `data/output/<project_id>.md`.
+7. Open **View Chat** to watch the models themselves: every prompt any agent
+   sends — chapter planner, beat planner, drafter, critic, reviser — appears as
+   a chat bubble with the outgoing prompt (collapsed, expandable), the model's
+   thinking, and the response streaming in token by token. Filter by agent.
+   History persists in `data/chat.jsonl` and replays on reload.
+8. Use the other tabs as needed:
+   - **Database** — read-only view of every SQLite table and the event log.
+   - **Logs** — the server's `fsm.log` and `llm_io.log`, with credentials
+     stripped, plus the stream events this browser has seen.
+   - **Settings** — endpoint, generation, quality, and runtime configuration.
+   - **Exports** — write the committed manuscript to
+     `data/output/<project_id>.md` and download it.
+
+The run also exports the manuscript automatically when it completes.
+
+Everything the browser loads is served from this machine. There are no CDN
+assets, remote fonts, or remote scripts, so the UI works with the Internet
+disabled. See `museai/web/static/vendor/README.md`.
 
 For a non-browser run with the same v1 engine:
 

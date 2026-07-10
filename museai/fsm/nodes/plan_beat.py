@@ -43,6 +43,60 @@ def beat_id_for(chapter_id: str, ordering: int) -> str:
     return f"{chapter_id}-b{ordering:02d}"
 
 
+# Prefixes models glue onto the value when they echo the schema key back at us,
+# e.g. `"focal_character_id": "character-id=lantern-keeper-char-1"`.
+_FOCAL_PREFIXES = ("focal_character_id", "character_id", "character-id", "id")
+
+
+def resolve_focal_character(raw: str, characters: list) -> str:
+    """Map whatever the planner called the focal character onto a real id.
+
+    Models answer with the seeded id, the character's *name*, a lowercased id, or
+    the schema's placeholder fused to the value. All of those are recoverable.
+
+    Returns ``""`` when nothing resolves **or when more than one character could
+    match**: attributing a beat's target PAD to the wrong character silently
+    corrupts that character's emotional state for the rest of the book, which is
+    strictly worse than attributing it to nobody.
+    """
+    candidate = (raw or "").strip().strip("\"'").strip()
+    if not candidate:
+        return ""
+
+    # Strip a `key=` / `key:` prefix, however the model spelled the key.
+    lowered = candidate.casefold()
+    for prefix in _FOCAL_PREFIXES:
+        for separator in ("=", ":"):
+            token = f"{prefix}{separator}"
+            if lowered.startswith(token):
+                candidate = candidate[len(token) :].strip().strip("\"'").strip()
+                lowered = candidate.casefold()
+                break
+
+    if not candidate:
+        return ""
+
+    known_ids = [character["id"] for character in characters]
+    if candidate in known_ids:
+        return candidate
+
+    by_id = {character["id"].casefold(): character["id"] for character in characters}
+    if lowered in by_id:
+        return by_id[lowered]
+
+    by_name = {character["name"].strip().casefold(): character["id"] for character in characters}
+    if lowered in by_name:
+        return by_name[lowered]
+
+    # Last resort: the real id is buried in a longer string. Only safe when
+    # exactly one known id is in there.
+    embedded = [known for known in known_ids if known.casefold() in lowered]
+    if len(embedded) == 1:
+        return embedded[0]
+
+    return ""
+
+
 def _resolve_chapter(conn: sqlite3.Connection, pointer: FSM_Pointer) -> sqlite3.Row:
     """The chapter the pointer names, or the arc's active chapter."""
     chapters = get_chapters_for_arc(conn, pointer.arc_id)
@@ -172,18 +226,9 @@ async def plan_beat(state: OrchestratorState) -> dict:
             beat_word_target=config.generation.beat_word_target,
         )
 
-        response = await call_llm(config.endpoint, messages)
+        response = await call_llm(config.endpoint, messages, agent="beat_planner", stream=True)
         planned = parse_json_array(response.text, what="beats")
 
-        known_character_ids = {character["id"] for character in characters}
-        # Models often answer with a character's *name* (or a lowercased id)
-        # instead of the seeded id; resolve those before giving up. A focal id
-        # that cannot be resolved becomes "" — attributing the PAD to an
-        # arbitrary character would silently corrupt that character's state.
-        character_lookup = {character["id"].casefold(): character["id"] for character in characters}
-        character_lookup.update(
-            {character["name"].strip().casefold(): character["id"] for character in characters}
-        )
         beats: list[dict] = []
         for ordering, item in enumerate(planned, start=1):
             intent = str(item.get("intent") or "").strip()
@@ -191,17 +236,15 @@ async def plan_beat(state: OrchestratorState) -> dict:
                 raise PlanningError(f"beat {ordering} has no intent")
 
             target_pad = _target_pad(item, ordering)
-            focal = str(item.get("focal_character_id") or "").strip()
-            if focal not in known_character_ids:
-                resolved = character_lookup.get(focal.casefold(), "")
-                if focal and not resolved:
-                    logger.warning(
-                        "node=plan_beat beat %d names unknown focal character %r; "
-                        "PAD will not be attributed",
-                        ordering,
-                        focal,
-                    )
-                focal = resolved
+            raw_focal = str(item.get("focal_character_id") or "").strip()
+            focal = resolve_focal_character(raw_focal, characters)
+            if raw_focal and not focal:
+                logger.warning(
+                    "node=plan_beat beat %d names unknown focal character %r; "
+                    "PAD will not be attributed",
+                    ordering,
+                    raw_focal,
+                )
 
             spec = {
                 "intent": intent,

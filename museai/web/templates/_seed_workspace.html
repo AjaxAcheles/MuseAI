@@ -1,0 +1,60 @@
+{#
+  The seed workspace: Plain Text / JSON Editor / Preview Timeline, plus a validation panel.
+
+  Rendered twice — once on the Seed & Plan page, once inside the Dashboard's Load Seed drawer.
+  `ns` namespaces every id so both copies can coexist on one page. `main.js` binds behaviour by
+  passing the same `ns` to `initSeedWorkspace`.
+#}
+{% macro seed_workspace(ns, seed_text) %}
+<div class="seed-workspace" data-seed-workspace="{{ ns }}">
+  <div class="seed-tabs" data-tab-group role="tablist" aria-label="Seed input mode">
+    <button type="button" class="seed-tab active" role="tab" aria-selected="true"
+            data-tab-target="#{{ ns }}-pane-json">JSON Editor</button>
+    <button type="button" class="seed-tab" role="tab" aria-selected="false"
+            data-tab-target="#{{ ns }}-pane-text">Plain Text</button>
+    <button type="button" class="seed-tab" role="tab" aria-selected="false"
+            data-tab-target="#{{ ns }}-pane-timeline">Preview Timeline</button>
+  </div>
+
+  <div class="tab-pane active show" id="{{ ns }}-pane-json" role="tabpanel">
+    <div class="seed-toolbar">
+      <label class="seed-label" for="{{ ns }}-json">Seed JSON</label>
+      <div class="seed-toolbar-actions">
+        <button type="button" class="btn btn-sm btn-outline-secondary" id="{{ ns }}-format">Format JSON</button>
+        <button type="button" class="btn btn-sm btn-outline-secondary" id="{{ ns }}-validate">Validate JSON</button>
+        <button type="button" class="btn btn-sm btn-outline-secondary" id="{{ ns }}-reset">Reset to test seed</button>
+      </div>
+    </div>
+    <textarea class="form-control seed-editor" id="{{ ns }}-json" name="seed_json" rows="18"
+              spellcheck="false" autocomplete="off">{{ seed_text }}</textarea>
+    <p class="seed-helper">
+      Required: <code>project.id</code> and at least one arc with a <code>description</code>.
+      Optional: <code>genre</code>, <code>premise</code>, <code>word_count_target</code>,
+      <code>threads</code>, <code>characters</code> with a <code>pad</code> of
+      <code>pleasure</code>/<code>arousal</code>/<code>dominance</code> between -1 and 1.
+    </p>
+  </div>
+
+  <div class="tab-pane" id="{{ ns }}-pane-text" role="tabpanel">
+    <label class="seed-label" for="{{ ns }}-premise">Story premise</label>
+    <textarea class="form-control seed-editor" id="{{ ns }}-premise" rows="10"
+              placeholder="A lighthouse keeper receives a letter in her own handwriting…"></textarea>
+    <p class="seed-helper">
+      Plain text becomes the project premise. Apply it, then complete and validate the JSON seed
+      before loading — arcs, threads, and characters must be written out in the JSON editor.
+    </p>
+    <button type="button" class="btn btn-sm btn-outline-secondary" id="{{ ns }}-apply-premise">
+      Apply premise to seed JSON
+    </button>
+  </div>
+
+  <div class="tab-pane" id="{{ ns }}-pane-timeline" role="tabpanel">
+    <div class="timeline-wrap" id="{{ ns }}-timeline"></div>
+  </div>
+
+  <div class="seed-validation-panel">
+    <p class="seed-validation" id="{{ ns }}-validation" role="status" aria-live="polite"></p>
+    <ul class="seed-errors" id="{{ ns }}-errors"></ul>
+  </div>
+</div>
+{% endmacro %}

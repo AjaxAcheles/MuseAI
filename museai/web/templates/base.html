@@ -12,19 +12,38 @@
       <div class="app-bar-inner">
         <a class="brand" href="/dashboard">Muse<span class="brand-accent">AI</span></a>
         <nav class="app-nav" aria-label="Primary">
-          {% for href, label in [("/dashboard", "Studio"), ("/seed", "Seed"), ("/settings", "Settings")] %}
-          <a class="app-nav-link{{ ' active' if request.path == href or (href == '/dashboard' and request.path == '/') else '' }}"
-             href="{{ href }}"{% if request.path == href %} aria-current="page"{% endif %}>{{ label }}</a>
+          {% set tabs = [
+            ("/dashboard", "Dashboard"),
+            ("/chat", "View Chat"),
+            ("/setup", "Seed & Plan"),
+            ("/database", "Database"),
+            ("/settings", "Settings"),
+            ("/logs", "Logs"),
+            ("/exports", "Exports")
+          ] %}
+          {% for href, label in tabs %}
+            {% set is_current = request.path == href
+              or (href == "/dashboard" and request.path == "/")
+              or (href == "/setup" and request.path == "/seed") %}
+            <a class="app-nav-link{{ ' active' if is_current else '' }}"
+               href="{{ href }}"{% if is_current %} aria-current="page"{% endif %}>{{ label }}</a>
           {% endfor %}
         </nav>
         <div class="app-bar-status">{% block appbar_status %}{% endblock %}</div>
       </div>
     </header>
+
     <main class="app-main">
       {% block content %}{% endblock %}
     </main>
+
+    <div class="toast-stack" id="toast-stack" aria-live="polite" aria-atomic="true"></div>
+
     <script src="{{ url_for('static', filename='vendor/marked.min.js') }}"></script>
     <script src="{{ url_for('static', filename='vendor/purify.min.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/ui.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/seed.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/chat.js') }}"></script>
     <script src="{{ url_for('static', filename='js/main.js') }}"></script>
   </body>
 </html>

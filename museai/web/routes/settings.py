@@ -19,14 +19,22 @@ bp = Blueprint("settings", __name__)
 
 
 def _settings_view(cfg: AppConfig) -> dict[str, Any]:
+    """The settings the UI may show. The API key is reported as present, never returned."""
     return {
         "endpoint": {
             "base_url": cfg.endpoint.base_url,
             "model_name": cfg.endpoint.model_name,
             "api_key_present": bool(cfg.endpoint.api_key),
             "tokenizer_family": cfg.endpoint.tokenizer_family,
+            "request_timeout": cfg.endpoint.request_timeout,
+            "temperature": cfg.endpoint.temperature,
         },
         "generation": cfg.generation.model_dump(),
+        "runtime": {
+            "log_level": cfg.log_level,
+            "web_search_timeout": cfg.web_search_timeout,
+            "allow_reset": cfg.allow_reset,
+        },
     }
 
 
@@ -129,6 +137,7 @@ async def test_endpoint():
         response = await call_llm(
             cfg.endpoint,
             [{"role": "user", "content": "Reply with the single word: ok"}],
+            agent="endpoint_test",
             max_tokens=8,
         )
     except Exception as exc:

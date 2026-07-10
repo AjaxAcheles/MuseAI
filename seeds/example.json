@@ -1,45 +1,37 @@
 {
   "project": {
     "id": "lantern-keeper",
-    "genre": "literary mystery",
-    "premise": "A lighthouse keeper on a fog-bound island begins receiving letters addressed to her in her own handwriting, dated years before she was born.",
-    "word_count_target": 40000
+    "genre": "compact literary mystery",
+    "premise": "In one stormy night, a lighthouse keeper receives a letter in her own handwriting that predicts the lamp will fail before dawn unless she admits the truth she has hidden from her apprentice.",
+    "word_count_target": 1500
   },
   "arcs": [
     {
-      "description": "Mara catalogs the impossible letters and, against her instinct for solitude, rows to the mainland to trace the postmarks — pulling a reclusive archivist into her orbit."
-    },
-    {
-      "description": "The letters' origin unravels a family debt tied to the lighthouse itself, forcing Mara to choose between keeping the flame lit and finally leaving the island."
+      "description": "Tell a complete short story in one compact arc: Mara receives the impossible warning, investigates the lantern room with Tomas, confesses that she ignored an earlier safety fault, and chooses to repair the light before dawn rather than preserve her pride."
     }
   ],
   "threads": [
     {
-      "description": "Who is writing the letters, and how do they predate Mara's birth?",
+      "description": "Who wrote the warning letter in Mara's handwriting?",
       "priority_score": 0.9,
       "status": "open"
     },
     {
-      "description": "The lighthouse's automation grant expires at the end of the season, threatening Mara's post.",
-      "priority_score": 0.6,
-      "status": "open"
-    },
-    {
-      "description": "Whether Mara can trust the archivist Idris, who knows more about the island than he admits.",
-      "priority_score": 0.5,
+      "description": "Whether Mara will admit she concealed the cracked lens bracket before it endangers a ship.",
+      "priority_score": 0.8,
       "status": "open"
     }
   ],
   "characters": [
     {
       "name": "Mara Vane",
-      "description": "The island's last human lighthouse keeper; guarded, precise, and quietly afraid of what leaving would cost her.",
-      "pad": {"pleasure": -0.2, "arousal": 0.1, "dominance": 0.3}
+      "description": "The island's meticulous lighthouse keeper; proud of her competence and frightened that one mistake will define her.",
+      "pad": {"pleasure": -0.3, "arousal": 0.4, "dominance": 0.2}
     },
     {
-      "name": "Idris Coll",
-      "description": "A mainland archivist with a personal stake in the lighthouse's history that he is slow to reveal.",
-      "pad": {"pleasure": 0.1, "arousal": -0.1, "dominance": -0.2}
+      "name": "Tomas Reed",
+      "description": "Mara's young apprentice; observant, loyal, and unwilling to let reverence stop him from asking hard questions.",
+      "pad": {"pleasure": -0.1, "arousal": 0.3, "dominance": -0.1}
     }
   ]
 }

@@ -1,0 +1,40 @@
+{% extends "base.html" %}
+
+{% block title %}Logs · MuseAI{% endblock %}
+
+{% block content %}
+<div class="page-wide" id="logs-page">
+  <header class="page-header">
+    <h1 class="page-title">Logs</h1>
+    <p class="page-subtitle">
+      Server log files and the browser's own record of stream events. API keys and bearer tokens
+      are stripped before any log line leaves the server.
+    </p>
+  </header>
+
+  <div class="logs-layout">
+    <section class="panel">
+      <div class="panel-header">
+        <h2 class="panel-title">Server log</h2>
+        <div class="panel-actions">
+          <select class="form-select form-select-sm" id="log-source" aria-label="Log source">
+            {% for source in sources %}
+            <option value="{{ source }}">{{ source }}.log</option>
+            {% endfor %}
+          </select>
+          <button type="button" class="btn btn-sm btn-outline-secondary" id="log-refresh">Refresh</button>
+        </div>
+      </div>
+      <pre class="log-view" id="log-view" tabindex="0"></pre>
+    </section>
+
+    <section class="panel">
+      <div class="panel-header">
+        <h2 class="panel-title">Stream events</h2>
+        <p class="panel-subtitle">Events this browser tab has received since it connected.</p>
+      </div>
+      <div class="log-events" id="log-events"></div>
+    </section>
+  </div>
+</div>
+{% endblock %}

@@ -14,6 +14,10 @@ session ritual.
 | v1.06 | Async Quart web server, SSE dashboard stream, controls, settings, seed routes, guarded reset | done |
 | v1.07 | UI/UX overhaul, full-codebase audit, and stabilization fixes | done |
 | v1.08 | Repository housekeeping: remove tracked empty placeholder files | done |
+| v1.09 | Test-run UI polish and short default seed | done |
+| v1.10 | Frontend rebuild: tabbed local-only UI, committed/live separation, seed gating, story rail, Database/Logs/Exports tabs | done |
+| v1.11 | View Chat tab: every agent's LLM traffic (prompts, thinking, streamed responses) live + replayed; all-agent streaming; committed-story chapter label fix | done |
+| v1.12 | Critic resilience: re-prompt + degrade instead of killing the run; PAD focal-character resolution; crash salvage; test log isolation | done |
 
 Next up: v1 complete
 
@@ -568,3 +572,410 @@ tree. The deleted files were package-marker-only `__init__.py` files under
 - `museai/web/routes/__init__.py`
 
 **Done-check.** `uv run pytest -q` → `293 passed`.
+
+## v1.09 — done
+
+Test-run UI polish and short default seed.
+
+**Changes made**
+
+- Reworked `seeds/example.json` into a compact one-arc literary mystery seed
+  targeting a complete ~1–2k word local test story (`word_count_target: 1500`).
+- Aligned `config.yaml`, `config.example.yaml`, and test fixtures around the
+  short-run defaults (`word_count_target: 1500`, `beat_word_target: 400`) and
+  corrected the example config comment to describe a manuscript target.
+- Improved first-run UI copy: the dashboard empty state now points users to the
+  short test seed, and the seed page labels the reset action as "Reset to test
+  seed" with explicit 1,500-word test-run guidance.
+- Improved dashboard status behaviour: `/status` reports no word target before a
+  project is loaded, then reports the loaded project's target rather than a
+  misleading fallback. The word progress control now has progressbar semantics
+  and renders "No project loaded" before seed load.
+- Reduced awkward wrapping on narrow screens for the app bar, command bar, run
+  metrics, seed toolbar, and review actions; the continuity critic column is
+  narrower on desktop and naturally stacks on smaller viewports.
+- Added/updated regression tests for the short default seed, seed-page copy,
+  dashboard progress semantics, and the pre-seed status response.
+
+**Done-check.** Focused web/seed/slice check:
+`uv run pytest -q tests/test_seed.py tests/test_web.py tests/test_slice_headless.py tests/test_slice_plan_to_draft.py tests/test_slice_quality.py`
+→ `19 passed`.
+
+Full suite: `uv run pytest -q` → `295 passed`.
+
+## v1.10 — done
+
+Frontend rebuild. The UI became a six-tab local-only interface that separates
+committed manuscript from live engine activity, gates generation on a real seed,
+and surfaces the story's shape as a graphic rail. The generation engine was not
+rewritten; every backend change below is additive.
+
+**The four problems this fixed**
+
+1. The Generate button was always enabled. `/generate` rejected an unseeded
+   project server-side, but `/status` carried no seed flag, so the browser could
+   not know until the click failed.
+2. Committed story and raw model output shared one panel: `main.js` appended
+   `token` SSE events straight into the manuscript, so discarded drafts and
+   revisions were displayed as though they had committed.
+3. Arc/chapter/beat structure existed in SQLite but was never shown.
+4. The database, the rotating logs, and the working `export_manuscript()`
+   function were unreachable from the browser.
+
+**Backend changes (additive; no existing route, key, or manager behaviour changed)**
+
+- `museai/memory/db.py`: added `get_committed_beats(conn, project_id)` —
+  `status='completed' AND prose IS NOT NULL`, in arc → chapter → beat order.
+- `museai/web/routes/dashboard.py`: `/status` gained `seed_loaded`,
+  `can_generate`, `project`, `counts`, `last_commit`, and `endpoint`. The five
+  pre-existing keys are unchanged. Added `GET /committed` (committed prose only)
+  and `GET /outline` (rail structure; carries no prose).
+- `museai/web/routes/seed.py`: `GET /setup` alias for the Seed & Plan page;
+  `_example_seed` became the shared `example_seed_text()`.
+- `museai/web/routes/settings.py`: `_settings_view` now also reports the real
+  `request_timeout`, `temperature`, `log_level`, `web_search_timeout`, and
+  `allow_reset` fields. The API key is still reported as present, never returned.
+- New read-only blueprints: `database.py` (`/database`, `/database/records`,
+  `/database/event-log`), `logs.py` (`/logs`, `/logs/tail` with credential
+  redaction), `exports.py` (`/exports`, `POST /exports/manuscript`,
+  `/exports/download`).
+- `museai/web/app.py`: registered the three blueprints and routed their JSON
+  sub-paths through the JSON error handler.
+
+**Frontend**
+
+- Tabs: Dashboard · Seed & Plan · Database · Settings · Logs · Exports.
+- `static/js/ui.js` (new): fetch helpers, Markdown sanitizing, and vanilla
+  controllers for tabs, the offcanvas drawer, and toasts. Bootstrap's CSS is
+  vendored but its JS bundle is not, so these toggle Bootstrap's own class names.
+- `static/js/seed.js` (new): `parseSeedJson`, `formatSeedJson`,
+  `validateSeedClientSide`, `summarizeSeed`, `renderSeedTimeline`,
+  `submitSeedToBackend`, `applyPremise`. Shared by the Seed & Plan page and the
+  Dashboard's Load Seed drawer via the `_seed_workspace.html` macro, so the two
+  surfaces cannot drift.
+- `static/js/main.js` (rewritten): per-page controllers. Committed Story is
+  written *only* from `/committed`. Tokens, revisions, audits, critic messages,
+  and the best-seen review draft are confined to Live Activity. Word count comes
+  from the backend, never from client-side counting.
+- Added a client handler for `pad_update`, which the server has always published
+  from `plan_beat.py` and the old client silently dropped. It renders as a text
+  row in Live Activity — not a chart.
+- Settings has four sections: Endpoint, Generation, Quality, Runtime. No
+  Planning section and no critics/antislop/drift toggles were built, because
+  those config keys do not exist and `AGENTS.md` forbids implying them.
+
+**Local-only asset contract**
+
+- Added `museai/web/static/vendor/README.md` with version, license, and SHA-256
+  for each of the three vendored bundles.
+- Added `tests/test_frontend_assets.py`, which fails the build on any `http://`,
+  `https://`, protocol-relative URL, `cdnjs`, `jsdelivr`, `unpkg`, or Google
+  Fonts reference in a template, stylesheet, or first-party script, and on any
+  `@import`/`@font-face`. It passed against the pre-rebuild tree before any other
+  file was touched, so it locks in an invariant rather than papering over a fix.
+- No new vendored asset was added.
+
+**Files produced**
+
+- New: `museai/web/routes/{database,logs,exports}.py`,
+  `museai/web/templates/{_seed_workspace,database,logs,exports}.html`,
+  `museai/web/static/js/{ui,seed}.js`,
+  `museai/web/static/vendor/README.md`,
+  `tests/{test_frontend_assets,test_dashboard_ui,test_setup_seed_ui,test_database_routes,test_logs_exports}.py`
+- Modified: `museai/memory/db.py`, `museai/web/app.py`,
+  `museai/web/routes/{dashboard,seed,settings}.py`,
+  `museai/web/templates/{base,dashboard,seed,settings}.html`,
+  `museai/web/static/css/theme.css`, `museai/web/static/js/main.js`,
+  `tests/conftest.py`, `tests/test_web.py`, `README.md`
+
+**Test-coupling repaired.** `tests/test_web.py::test_dashboard_renders` asserted
+on the string `"short test seed"`, which the rebuilt dashboard no longer prints.
+It now asserts the unseeded dashboard shows "No seed loaded" and offers "Load
+Seed" — the behaviour the test was actually there to protect.
+
+**Done-check.** Targeted, then full:
+
+```
+uv run pytest tests/test_frontend_assets.py -q   → 27 passed
+uv run pytest tests/test_dashboard_ui.py -q      → 12 passed
+uv run pytest tests/test_setup_seed_ui.py -q     → 11 passed
+uv run pytest tests/test_database_routes.py -q   →  9 passed
+uv run pytest tests/test_logs_exports.py -q      → 12 passed
+uv run pytest tests/test_web.py -q               → 12 passed
+uv run pytest -q                                 → 366 passed
+```
+
+Baseline before this build was `295 passed`. Zero failures, zero skips.
+
+**Manual smoke test.** Ran `uv run python run.py` against an isolated config and
+database. Verified: all eight routes return 200; `/status` reports
+`seed_loaded=false, can_generate=false` and `POST /generate` returns 400 before a
+seed; loading `seeds/example.json` flips both flags and reports 1 arc / 2 threads
+/ 2 characters; `/outline` returns arcs with zero chapters before planning and
+never carries prose; inserting one `completed` beat and one `planned` beat with
+prose showed the committed beat in `/committed` and `/exports` while the planned
+draft appeared in neither; `/database/records?type=Bogus` returns 400 JSON;
+`/logs/tail?source=../../etc/passwd` returns 400; a planted `sk-…` token and the
+configured API key were both replaced with `[REDACTED]` in `/logs/tail`; a full
+settings save round-tripped and left `${MUSEAI_API_KEY}` on disk as a reference
+rather than a resolved secret; `/stream` emitted its `hydration` frame; and every
+`<script>`/`<link>` on all six pages resolved under `/static/` and returned 200.
+
+**Known limitations**
+
+- The seed schema has no chapters or beats, so the seed **Preview Timeline**
+  draws a project node, one node per arc, and thread/character count badges.
+  Chapter and beat nodes appear on the Dashboard rail only after the planners
+  have run and written them to SQLite.
+- The endpoint health dot reads "Configured" from `config.yaml`; it only becomes
+  ok/failed after **Test connection** is pressed. There is no background probe.
+- The Database tab is strictly read-only. No edits, no deletes.
+- Retry/revision count is available only from the `revision` SSE event; it is not
+  exposed on `/status`, so a page reload loses it until the next revision.
+- `export_manuscript` and `committed_word_count` key off `config.project_id`. A
+  seed whose `project.id` differs from the configured `project_id` will load and
+  display, but exports will not find it. This predates the rebuild and was left
+  as-is rather than change engine semantics.
+- Browser console output was not verified programmatically: no headless browser
+  is available in this environment. What was verified instead is that all three
+  scripts parse under `node --check`, that all 84 `byId(...)` lookups in
+  `main.js` resolve against the rendered HTML of the page that owns them, and
+  that every referenced asset returns 200 from the local server.
+
+## v1.11 — done
+
+The View Chat tab plus a committed-story rendering fix. Every prompt the engine
+sends to the model — planner, drafter, critic, reviser, endpoint test — now
+appears in a full-screen chat interface that streams thinking and response
+tokens live and replays history from an on-disk transcript.
+
+**The bug fixed first**
+
+The Committed Story panel appeared to be missing a chapter: planners write
+chapter `ordering` 1-based (`plan_chapter.py` enumerates from 1), but `main.js`
+rendered `Chapter ${ordering + 1}`, labelling seven chapters "Chapter 2" through
+"Chapter 8" with no "Chapter 1". Verified against the live database
+(`love-thy-doppelganger`: 23 committed beats across 7 chapters, all returned by
+`/committed`). The label is now `ordering` as-is. `pointer.beat_index + 1` was
+audited at the same time and is correct — `beat_index` really is 0-based
+(`commit.py` maps it to a 1-based `ordering`).
+
+**Thinking capture (llm/client.py)**
+
+The client previously discarded reasoning. It now captures both formats an
+OpenAI-compatible endpoint may emit, per-call, without faking anything:
+
+- a `reasoning_content` / `reasoning` delta or message field (DeepSeek, vLLM,
+  OpenRouter style);
+- a literal `<think>…</think>` block opening the content (Ollama serving qwen3
+  / r1-distill class models) — handled by a stateful splitter that survives
+  tags split across SSE chunk boundaries. Only a block that *opens* the reply
+  counts; a `<think>` mid-prose stays prose.
+
+Thinking lands in the new `LLMResponse.thinking` and never reaches `on_token`,
+`text`, or token counts, so prose consumers (drafter word counts, JSON parsers)
+see cleaner text than before — think blocks no longer leak into drafts.
+
+**Chat instrumentation (llm/client.py → stream bus + transcript)**
+
+`call_llm` gained an `agent` label and publishes per call: `chat_start` (full
+untruncated prompt messages), `chat_token` (`kind: thinking|response` deltas
+while streaming), and `chat_end` (full thinking + text, token counts, finish
+reason, or the error). Start/end records are also appended to
+`data/chat.jsonl` (`core/chat_log.py`, configured in `init_resources`,
+torn-line-tolerant replay, deleted by reset). Keys travel in HTTP headers, never
+in message bodies, so the transcript carries no credentials — verified by test
+and by smoke.
+
+**All agents stream now**
+
+`plan_chapter`, `plan_beat`, `revise`, and both calls inside the critic's tool
+loop flipped to `stream=True` with agent labels (`chapter_planner`,
+`beat_planner`, `reviser`, `critic`); the drafter and the settings
+`endpoint_test` call were labelled too. `run_agent_loop` passes its `agent`
+through, so each critic turn in the tool loop is its own chat bubble.
+
+**The View Chat page**
+
+`/chat` (nav tab "View Chat") + `/chat/history?limit=` replaying the
+transcript. `templates/chat.html`, `static/js/chat.js`, chat styles in
+`theme.css`. One bubble per call: agent chip, model, time, live state pill;
+prompt collapsed to "Prompt · N messages · ~X tokens" and expandable to the
+full messages; a Thinking section that streams italic and auto-collapses when
+the answer lands; the response streamed as tokens that each fade in (220ms) and
+re-rendered as sanitized Markdown on completion. Filter bar by agent. The SSE
+connection opens before history is fetched and buffers events until history
+renders, so nothing is lost or duplicated across that window; joining mid-call
+shows an honest "Joined mid-call" note instead of a fabricated prompt.
+
+**Files changed**
+
+- Modified: `museai/llm/client.py`, `museai/core/runtime.py`,
+  `museai/fsm/nodes/{plan_chapter,plan_beat,draft_prose,revise,critics}.py`,
+  `museai/fsm/tools/loop.py`, `museai/web/app.py`,
+  `museai/web/routes/settings.py`, `museai/web/templates/base.html`,
+  `museai/web/static/js/main.js`, `museai/web/static/css/theme.css`,
+  `tests/{test_critics,test_review,test_graph,test_slice_quality,test_slice_headless}.py`
+  (fakes updated to accept the new `agent` kwarg).
+- Created: `museai/core/chat_log.py`, `museai/web/routes/chat.py`,
+  `museai/web/templates/chat.html`, `museai/web/static/js/chat.js`,
+  `tests/test_chat.py`.
+
+**Done-check (all actually run)**
+
+- `uv run pytest tests/test_chat.py -q` → `22 passed`.
+- `uv run pytest tests/test_client.py -q` → `41 passed` (unchanged behaviour
+  for existing callers).
+- Full suite: `uv run pytest -q` → `391 passed` (v1.10 baseline was 366).
+- Live smoke against a fake OpenAI-compatible endpoint returning a `<think>`
+  block: `/chat` renders with filters; `/chat/history` empty → test-endpoint
+  call → history holds `chat_start`/`chat_end` with
+  `thinking: "pondering the reply carefully"` split from `text: "ok"`;
+  `chat_start`/`chat_end` observed on `/stream`; `data/chat.jsonl` created; the
+  configured API key appears nowhere in the page, stream, history, or
+  transcript.
+
+**Known limitations**
+
+- `data/chat.jsonl` grows without bound on long runs (full prompts are several
+  KB per call); reset clears it, nothing rotates it.
+- History replay caps at the last 1000 records server-side (200 by default).
+- Once any token (thinking included) has streamed, a mid-stream transient
+  fault is not retried — previously non-streaming planner/critic/reviser calls
+  had all three retry attempts available. The trade is deliberate: replaying a
+  partially-streamed call would duplicate tokens in the chat.
+- Streaming with tools (the critic loop) requires an endpoint that supports
+  `stream: true` alongside `tools`; current Ollama does, very old builds may not.
+- Browser console output still cannot be verified headlessly in this
+  environment; `node --check` passes on all scripts and every `byId` target in
+  `chat.js` resolves against the rendered page.
+
+## v1.12 — done
+
+A live run died and sat dead for 41 minutes. This build makes that failure mode
+survivable, and fixes three latent bugs found while diagnosing it.
+
+**The run-killer**
+
+At 2026-07-10 00:39:10 the continuity critic (`openbmb/minicpm5`) answered with
+the *schema template itself*: the placeholder value `"The exact sentence or
+phrase from the draft."`, `offarming_text` in place of `offending_text`, and no
+`critic_source`. `FailureObject` sets `extra="forbid"`, so `parse_failure_objects`
+raised `StructuredOutputError`, which propagated through `critics.py` into
+`manager.py`'s catch-all and set `status="error"`. Two planned chapters, two
+planned beats, and a finished 336-word draft were discarded; beat `b01` was left
+stuck at `status='active'`.
+
+`parse_failure_objects(raw, retry_cap=3)` advertised `retry_cap` as "the caller's
+re-prompt budget", but nothing ever re-prompted — not the parser, not the node.
+The parameter was dead, and its docstring's claim that "re-prompting won't fix
+the schema" was exactly wrong: a typo'd key and a missing field are what a
+re-prompt fixes.
+
+**What replaces it**
+
+- `parse_failure_objects(raw, *, lenient=False)`. The dead `retry_cap` is gone;
+  the caller owns the budget. The raised error now carries the pydantic
+  validation detail, because that text is what gets fed back to the model.
+- `FailureObject.critic_source` defaults to `"continuity_critic"`. v1 has one
+  critic; making the model echo a constant cost a round-trip and bought nothing.
+- `critics.py` re-prompts up to `generation.critic_parse_retries`, showing the
+  model its own reply and the validation error.
+- Retries exhausted → **the run continues**. `critic_parse_failure_streak` (new,
+  in `OrchestratorState`) increments and spans beats. At
+  `generation.critic_degrade_threshold` the run degrades: element validation
+  loosens (`lenient=True`, unknown keys ignored) and a `critic_health` event
+  fires. One readable reply resets the streak to 0 and clears the degrade.
+- Lenient mode **skips** an element it cannot read rather than defaulting
+  `offending_text` to `""` — an empty needle makes `revise.locate()` return
+  `None`, silently escalating the beat to a whole-draft rewrite off a finding
+  nobody wrote.
+- `lenient_used` is only true when findings were actually recovered. Relaxed
+  parsing that salvaged nothing salvaged nothing, and the banner does not claim
+  otherwise. (A test caught this; the first implementation reported `True`.)
+- Web UI: an orange `#critic-warning` banner (new `--warn` token, distinct from
+  the amber `--run-pause` — a paused run is chosen, a degraded critic is not),
+  plus a one-shot toast on the transition into degraded and a `warnings`-category
+  Live Activity row. The banner states plainly that beats are committing with
+  only the programmatic audit behind them.
+
+**PAD attribution had never worked**
+
+`beat_planner.xml.j2`'s output template showed the literal placeholder
+`"focal_character_id": "character-id"`, so the model answered
+`character-id=love-thy-doppelganger-char-1`, `ch-1`, `cl-2`. None resolved, every
+beat's PAD was dropped, and `CharacterEmotions` still held its seeded values. The
+template now shows a real id from the context, and `resolve_focal_character()`
+normalises a `key=` prefix and quotes before matching exact id → casefolded id →
+casefolded name → unique embedded id. It returns `""` when two ids could match:
+attributing a beat's PAD to the wrong character corrupts that character for the
+rest of the book, which is worse than attributing it to nobody.
+
+**Crash salvage**
+
+`db.reset_active_beats()` returns prose-less `active` beats to `planned`.
+`manager._salvage_failed_run()` writes the best-seen draft to
+`data/drafts/<beat_id>-<utc>.md` and frees the beat, then reports `draft_path` on
+the error `run_status`. The draft goes to a *file*, not `Beats.prose`: `/committed`,
+`get_committed_beats`, and `export_manuscript` all select on `status='completed'
+AND prose IS NOT NULL`, so an unreviewed draft in that column is one status flip
+from being shipped as manuscript. Both salvage steps are individually guarded —
+a fault inside the error handler must never replace the real exception's diagnosis.
+
+**pytest was writing to the live log files**
+
+`LOG_DIR = Path("logs")` is hardcoded, and `get_logger()` auto-configures at
+module import (`runtime.py` builds one at top level), so by the time any fixture
+ran the suite had already opened the app's real `logs/fsm.log` and
+`logs/llm_io.log`. Test traffic (`example.invalid`, `test-model`, fake reconcile
+warnings) was interleaved with the running app's output and shown in the Logs tab.
+`tests/conftest.py` now redirects `LOG_DIR` to a temp directory *before* the first
+museai import, and drops any handler that beat it there.
+
+**Files changed**
+
+- Modified: `museai/core/config.py`, `config.yaml`, `config.example.yaml`,
+  `museai/llm/structured.py`, `museai/fsm/state.py`, `museai/fsm/nodes/critics.py`,
+  `museai/fsm/nodes/plan_beat.py`, `museai/fsm/manager.py`, `museai/memory/db.py`,
+  `museai/prompts/beat_planner.xml.j2`, `museai/web/templates/dashboard.html`,
+  `museai/web/static/js/main.js`, `museai/web/static/css/theme.css`,
+  `tests/conftest.py`, `tests/test_critics.py`, `tests/test_prompts.py`,
+  `tests/test_planners.py`, `tests/test_frontend_assets.py`, `README.md`
+- Created: `tests/test_critic_resilience.py`
+
+**Done-check (all actually run)**
+
+- `uv run pytest tests/test_critic_resilience.py -q` → `22 passed`. The exact
+  production reply is fixtured verbatim in `PRODUCTION_FAILURE`.
+- `uv run pytest tests/test_prompts.py tests/test_critics.py tests/test_planners.py -q`
+  → all pass.
+- Full suite: `uv run pytest -q` → **`426 passed`** (v1.11 baseline was 391).
+- Log isolation verified by byte-diffing `logs/fsm.log` and `logs/llm_io.log`
+  across a full suite run: **0 bytes** added to each.
+- Live smoke against a fake OpenAI-compatible endpoint hard-coded to return the
+  production payload for every critic call, and the malformed
+  `character-id=<id>` for every beat plan:
+  - with `critic_degrade_threshold: 3` the run reached `status: done` instead of
+    `status: error`, committed 1 beat / 180 words, and published
+    `critic_health {streak: 1, degraded: false}`;
+  - `CharacterEmotions` moved from the seeded `(0.4, 0.6, -0.2)` to the beat's
+    target `(0.1, 0.5, -0.2)` — the malformed focal id resolved;
+  - with `critic_degrade_threshold: 1` the same run published
+    `critic_health {streak: 1, degraded: true, lenient_used: false}` and still
+    reached `done`;
+  - zero `unknown focal character` warnings in the smoke window.
+
+**Known limitations**
+
+- Degraded mode commits beats with only the programmatic passive-voice audit
+  behind them. The banner says exactly that; the manuscript is genuinely less
+  checked.
+- `critic_parse_failure_streak` lives in `OrchestratorState`, so it spans beats
+  within a run but resets when the process restarts.
+- `data/drafts/` is never pruned; nothing rotates it.
+- The continuity critic has made **zero tool calls with any real model, ever**
+  (129 gemma + 8 minicpm responses across both log generations). This predates
+  the v1.11 streaming change and is untouched here — `web_search` is wired,
+  tested, and offered to the model, which simply never asks for it. Unexplained.
+- The smoke server exercises the real app, so it writes to the real `logs/`.
+  Only the test suite is isolated.

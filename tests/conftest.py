@@ -2,19 +2,54 @@
 
 from __future__ import annotations
 
-import pytest
+import logging
+import tempfile
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
 
-from museai.core.config import AppConfig, EndpointConfig, GenerationConfig
+# Redirect the rotating log files into a temp directory before anything else
+# imports a museai module. `get_logger()` runs at module import time (e.g.
+# `runtime.py` builds one at top level) and auto-configures the handlers against
+# `LOG_DIR`, so a fixture would be far too late: the test suite would already
+# have opened — and would go on appending to — the real `logs/fsm.log` and
+# `logs/llm_io.log` that the running app writes to.
+from museai.core import logging_setup as _logging_setup  # isort: skip
+
+_logging_setup.LOG_DIR = Path(tempfile.mkdtemp(prefix="museai-test-logs-"))
+
+# Belt and braces: if some earlier import already attached handlers to the real
+# files, drop them and let the next `configure_logging` rebuild against the temp
+# directory.
+for _name in ("museai", "museai.llm_io"):
+    _logger = logging.getLogger(_name)
+    for _handler in [h for h in _logger.handlers if isinstance(h, RotatingFileHandler)]:
+        _logger.removeHandler(_handler)
+        _handler.close()
+_logging_setup._configured = False
+
+import pytest  # noqa: E402
+
+from museai.core.config import AppConfig, EndpointConfig, GenerationConfig  # noqa: E402
+from museai.memory.db import (  # noqa: E402
+    connect_db,
+    upsert_arc,
+    upsert_beat,
+    upsert_chapter,
+    upsert_project,
+)
+from museai.web.app import create_app  # noqa: E402
 
 
 _GENERATION_DEFAULTS = dict(
-    word_count_target=3000,
-    beat_word_target=600,
+    word_count_target=1500,
+    beat_word_target=400,
     revision_retry_cap=3,
     max_agent_iterations=6,
     recent_prose_beats=4,
     context_token_budget=8000,
     passive_voice_threshold=0.25,
+    critic_parse_retries=2,
+    critic_degrade_threshold=3,
 )
 
 
@@ -49,3 +84,98 @@ def config_factory(tmp_path):
         return AppConfig(**base)
 
     return _make
+
+
+class MockManager:
+    """Stands in for GenerationManager so web tests never touch an LLM or the graph."""
+
+    def __init__(self, status: str = "idle") -> None:
+        self.status = status
+        self.state = None
+        self.started: list[str] = []
+        self.reviews: list[tuple[str, str | None]] = []
+
+    async def start(self, project_id: str) -> None:
+        self.started.append(project_id)
+        self.status = "running"
+
+    def pause(self) -> None:
+        self.status = "paused"
+
+    async def resume(self) -> None:
+        self.status = "running"
+
+    def stop(self) -> None:
+        self.status = "stopped"
+
+    async def resolve_review(self, decision: str, edited_text: str | None = None) -> None:
+        self.reviews.append((decision, edited_text))
+        self.status = "running"
+
+
+@pytest.fixture
+async def web_app(tmp_path):
+    """Yield a factory returning a started Quart app; the serving context is torn down after."""
+    started: list = []
+
+    async def _make(config: AppConfig):
+        app = create_app(config_path=tmp_path / "config.yaml", test_config=config)
+        test_app = app.test_app()
+        await test_app.__aenter__()
+        started.append(test_app)
+        return app
+
+    yield _make
+
+    for test_app in started:
+        await test_app.__aexit__(None, None, None)
+
+
+def seed_project(config: AppConfig, *, word_count_target: int = 3000) -> None:
+    """Write the minimum a seeded project needs: one project row and one active arc."""
+    conn = connect_db(config.db_path)
+    try:
+        with conn:
+            upsert_project(
+                conn,
+                id=config.project_id,
+                genre="mystery",
+                premise="A precise premise.",
+                word_count_target=word_count_target,
+            )
+            upsert_arc(
+                conn,
+                id=f"{config.project_id}-arc-1",
+                project_id=config.project_id,
+                ordering=0,
+                description="A first arc.",
+                status="active",
+            )
+    finally:
+        conn.close()
+
+
+def add_beat(config: AppConfig, *, beat_id: str, ordering: int, status: str, prose: str | None, word_count: int = 0) -> None:
+    """Attach a beat (and its chapter, once) to the seeded project's first arc."""
+    conn = connect_db(config.db_path)
+    try:
+        with conn:
+            upsert_chapter(
+                conn,
+                id=f"{config.project_id}-ch-1",
+                arc_id=f"{config.project_id}-arc-1",
+                ordering=0,
+                description="Chapter one.",
+                status="active",
+            )
+            upsert_beat(
+                conn,
+                id=beat_id,
+                chapter_id=f"{config.project_id}-ch-1",
+                ordering=ordering,
+                prose=prose,
+                word_count=word_count,
+                status=status,
+            )
+    finally:
+        conn.close()

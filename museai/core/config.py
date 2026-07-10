@@ -75,6 +75,14 @@ class GenerationConfig(BaseModel):
     # Proportion of a beat's sentences that may be passive before the audit node
     # faults the draft. A proportion, not a count: 0.25 means a quarter.
     passive_voice_threshold: float
+    # How many times the critic is re-prompted when its reply will not parse as
+    # failure objects. Distinct from `revision_retry_cap`, which counts
+    # draft->audit->revise cycles: this counts "say that again, correctly".
+    critic_parse_retries: int
+    # Consecutive beats whose critic output stayed unreadable after every retry
+    # before the run degrades: validation loosens and the UI warns. A weak model
+    # must not silently disable the continuity gate.
+    critic_degrade_threshold: int
 
     @field_validator("passive_voice_threshold")
     @classmethod
@@ -84,6 +92,22 @@ class GenerationConfig(BaseModel):
             raise ValueError(
                 f"passive_voice_threshold is a proportion in 0..1, got {value}"
             )
+        return value
+
+    @field_validator("critic_parse_retries")
+    @classmethod
+    def _non_negative(cls, value: int) -> int:
+        """0 is legal — never re-prompt — but a negative budget is a typo."""
+        if value < 0:
+            raise ValueError(f"critic_parse_retries must be >= 0, got {value}")
+        return value
+
+    @field_validator("critic_degrade_threshold")
+    @classmethod
+    def _positive(cls, value: int) -> int:
+        """A threshold of 0 would degrade before the first failure ever happened."""
+        if value < 1:
+            raise ValueError(f"critic_degrade_threshold must be >= 1, got {value}")
         return value
 
 

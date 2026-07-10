@@ -115,7 +115,7 @@ def patched_loop(monkeypatch):
     calls: list[dict] = []
 
     def _install(text: str):
-        async def fake_loop(endpoint, messages, tools, tool_impls, max_iterations, on_event=None):
+        async def fake_loop(endpoint, messages, tools, tool_impls, max_iterations, on_event=None, **kwargs):
             calls.append(
                 {
                     "messages": messages,
@@ -199,17 +199,24 @@ class TestFailures:
         assert len(delta["critic_failures"]) == 2
         assert delta["best_seen_failure_count"] == 3
 
-    async def test_an_unparseable_response_is_a_hard_error(self, patched_loop):
+    async def test_an_unparseable_response_survives_the_run(self, patched_loop):
+        """A broken critic must not destroy a run; it raises the streak instead.
+
+        It is not laundered into a clean pass either: `critic_health` reports the
+        streak, and the UI warns once it reaches the degrade threshold.
+        """
         patched_loop("I could not find any problems, honestly.")
 
-        with pytest.raises(StructuredOutputError):
-            await adversarial_critics(state_with())
+        delta = await adversarial_critics(state_with())
 
-    async def test_an_empty_response_is_a_hard_error_not_a_clean_pass(self, patched_loop):
+        assert "critic_failures" not in delta  # nothing found, nothing claimed
+        assert delta["critic_parse_failure_streak"] == 1
+
+    async def test_an_empty_response_is_not_a_clean_pass(self, patched_loop):
         patched_loop("   ")
 
-        with pytest.raises(StructuredOutputError):
-            await adversarial_critics(state_with())
+        delta = await adversarial_critics(state_with())
+        assert delta["critic_parse_failure_streak"] == 1
 
 
 class TestBestSeen:
@@ -250,7 +257,7 @@ class TestBestSeen:
 
 class TestEvents:
     async def test_a_tool_call_publishes_a_critic_tool_event(self, monkeypatch):
-        async def fake_loop(endpoint, messages, tools, tool_impls, max_iterations, on_event=None):
+        async def fake_loop(endpoint, messages, tools, tool_impls, max_iterations, on_event=None, **kwargs):
             await on_event(
                 {"tool": "web_search", "arguments": {"query": "perseids"},
                  "result_preview": "August 12"}

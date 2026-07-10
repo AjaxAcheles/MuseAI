@@ -1,75 +1,147 @@
 {% extends "base.html" %}
 
-{% block title %}MuseAI Settings{% endblock %}
+{% block title %}Settings · MuseAI{% endblock %}
 
 {% block content %}
 <div id="settings-page" class="page-wide" data-config="{{ config_json }}">
   <header class="page-header">
     <h1 class="page-title">Settings</h1>
-    <p class="page-subtitle">Values are validated strictly before saving; an invalid value never reaches <code>config.yaml</code>.</p>
+    <p class="page-subtitle">
+      Values are validated strictly before saving; an invalid or unknown key never reaches
+      <code>config.yaml</code>. Saved values take effect immediately for new work — a beat already
+      in flight finishes under the settings it started with.
+    </p>
   </header>
 
   <div class="settings-grid">
+
     <section class="panel">
-      <header class="panel-header">
+      <div class="panel-header">
         <h2 class="panel-title">Endpoint</h2>
         <p class="panel-subtitle">Any OpenAI-compatible server, local or hosted.</p>
-      </header>
+      </div>
+
       <div class="field">
         <label class="form-label" for="setting-base-url">Base URL</label>
-        <input id="setting-base-url" class="form-control" value="{{ settings.endpoint.base_url }}">
+        <input id="setting-base-url" class="form-control dirty-watch" value="{{ settings.endpoint.base_url }}">
       </div>
       <div class="field">
         <label class="form-label" for="setting-model-name">Model name</label>
-        <input id="setting-model-name" class="form-control" value="{{ settings.endpoint.model_name }}">
+        <input id="setting-model-name" class="form-control dirty-watch" value="{{ settings.endpoint.model_name }}">
       </div>
       <div class="field">
         <label class="form-label" for="setting-api-key">API key</label>
-        <input id="setting-api-key" class="form-control" type="password" autocomplete="off"
+        <input id="setting-api-key" class="form-control dirty-watch" type="password" autocomplete="off"
                placeholder="{{ 'Configured — leave blank to keep the current key' if settings.endpoint.api_key_present else 'Paste API key' }}">
         <p class="form-text">
-          {% if settings.endpoint.api_key_present %}A key is configured. Leaving this blank keeps it unchanged.{% else %}No key is configured yet.{% endif %}
+          {% if settings.endpoint.api_key_present %}
+          A key is configured. Leaving this blank keeps it unchanged, and an
+          <code>${ENV_VAR}</code> reference in <code>config.yaml</code> stays a reference.
+          {% else %}No key is configured yet.{% endif %}
         </p>
       </div>
       <div class="field">
         <label class="form-label" for="setting-tokenizer">Tokenizer</label>
-        <select id="setting-tokenizer" class="form-select">
+        <select id="setting-tokenizer" class="form-select dirty-watch">
           <option value="tiktoken" {% if settings.endpoint.tokenizer_family == "tiktoken" %}selected{% endif %}>OpenAI-compatible (tiktoken)</option>
           <option value="char_heuristic" {% if settings.endpoint.tokenizer_family == "char_heuristic" %}selected{% endif %}>Character heuristic (÷4)</option>
         </select>
       </div>
+      <div class="field">
+        <label class="form-label" for="setting-request_timeout">Request timeout (seconds)</label>
+        <input id="setting-request_timeout" class="form-control dirty-watch endpoint-setting"
+               data-endpoint-key="request_timeout" type="number" min="1" max="600" step="1"
+               value="{{ settings.endpoint.request_timeout }}">
+      </div>
+      <div class="field">
+        <label class="form-label" for="setting-temperature">Temperature</label>
+        <input id="setting-temperature" class="form-control dirty-watch endpoint-setting"
+               data-endpoint-key="temperature" type="number" min="0" max="2" step="0.05"
+               value="{{ settings.endpoint.temperature }}">
+      </div>
+
       <div class="panel-actions">
-        <button id="test-endpoint" class="btn btn-outline-light" type="button">Test connection</button>
+        <button id="test-endpoint" class="btn btn-outline-secondary" type="button">Test connection</button>
+        <span class="health-dot" id="endpoint-health-dot" aria-hidden="true"></span>
         <span id="endpoint-test-result" class="inline-result" aria-live="polite"></span>
       </div>
     </section>
 
     <section class="panel">
-      <header class="panel-header">
+      <div class="panel-header">
         <h2 class="panel-title">Generation</h2>
         <p class="panel-subtitle">Targets and caps for the draft → audit → revise loop.</p>
-      </header>
+      </div>
       {% for key, label, min, max, step, hint in [
         ("word_count_target", "Word count target", 500, 200000, 500, "Total manuscript length to aim for."),
         ("beat_word_target", "Beat word target", 100, 5000, 50, "Words drafted per beat."),
         ("revision_retry_cap", "Revision retry cap", 0, 10, 1, "Failed audits before parking for human review."),
         ("max_agent_iterations", "Max agent iterations", 1, 20, 1, "Critic tool-use loop ceiling."),
         ("recent_prose_beats", "Recent prose beats", 0, 20, 1, "Prior beats included in drafting context."),
-        ("context_token_budget", "Context token budget", 500, 200000, 500, "Soft ceiling on assembled prompt size."),
-        ("passive_voice_threshold", "Passive voice threshold", 0, 1, 0.01, "Proportion (0–1) of passive sentences tolerated per beat.")
+        ("context_token_budget", "Context token budget", 500, 200000, 500, "Soft ceiling on assembled prompt size.")
       ] %}
       <div class="field">
         <label class="form-label" for="setting-{{ key }}">{{ label }}</label>
-        <input id="setting-{{ key }}" class="form-control generation-setting" data-generation-key="{{ key }}"
+        <input id="setting-{{ key }}" class="form-control dirty-watch generation-setting" data-generation-key="{{ key }}"
                type="number" min="{{ min }}" max="{{ max }}" step="{{ step }}" value="{{ settings.generation[key] }}">
         <p class="form-text">{{ hint }}</p>
       </div>
       {% endfor %}
-      <div class="panel-actions">
-        <button id="save-settings" class="btn btn-accent" type="button">Save settings</button>
-        <span id="settings-save-result" class="inline-result" aria-live="polite"></span>
+    </section>
+
+    <section class="panel">
+      <div class="panel-header">
+        <h2 class="panel-title">Quality</h2>
+        <p class="panel-subtitle">The programmatic audit gate applied to every draft.</p>
+      </div>
+      <div class="field">
+        <label class="form-label" for="setting-passive_voice_threshold">Passive voice threshold</label>
+        <input id="setting-passive_voice_threshold" class="form-control dirty-watch generation-setting"
+               data-generation-key="passive_voice_threshold" type="number" min="0" max="1" step="0.01"
+               value="{{ settings.generation.passive_voice_threshold }}">
+        <p class="form-text">
+          Proportion (0–1) of passive sentences tolerated per beat. Exceeding it sends the draft to
+          revision.
+        </p>
       </div>
     </section>
+
+    <section class="panel">
+      <div class="panel-header">
+        <h2 class="panel-title">Runtime</h2>
+        <p class="panel-subtitle">Process behaviour. Log level applies to newly written lines.</p>
+      </div>
+      <div class="field">
+        <label class="form-label" for="setting-log_level">Log level</label>
+        <select id="setting-log_level" class="form-select dirty-watch">
+          {% for level in ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] %}
+          <option value="{{ level }}" {% if settings.runtime.log_level == level %}selected{% endif %}>{{ level }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="field">
+        <label class="form-label" for="setting-web_search_timeout">Web search timeout (seconds)</label>
+        <input id="setting-web_search_timeout" class="form-control dirty-watch" type="number" min="1" max="120" step="1"
+               value="{{ settings.runtime.web_search_timeout }}">
+        <p class="form-text">Ceiling on a continuity critic search. A timeout is data, not a crash.</p>
+      </div>
+      <div class="field form-check">
+        <input id="setting-allow_reset" class="form-check-input dirty-watch" type="checkbox"
+               {% if settings.runtime.allow_reset %}checked{% endif %}>
+        <label class="form-check-label" for="setting-allow_reset">Allow database reset</label>
+        <p class="form-text">When enabled, the reset control below wipes the project database and event log.</p>
+      </div>
+      <div class="panel-actions">
+        <button id="reset-project" class="btn btn-outline-danger" type="button"
+                {% if not settings.runtime.allow_reset %}disabled{% endif %}>Reset project data</button>
+        <span id="reset-result" class="inline-result" aria-live="polite"></span>
+      </div>
+    </section>
+  </div>
+
+  <div class="settings-save-bar">
+    <button id="save-settings" class="btn btn-accent" type="button" disabled>Save settings</button>
+    <span id="settings-save-result" class="inline-result" aria-live="polite"></span>
   </div>
 </div>
 {% endblock %}

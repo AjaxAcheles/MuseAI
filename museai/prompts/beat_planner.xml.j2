@@ -76,11 +76,15 @@ Return a JSON array inside a single fenced code block. Each element:
     "entry_state": "Where the situation stands as the beat opens.",
     "exit_state": "Where it stands as the beat closes.",
     "word_target": {{ beat_word_target }},
-    "focal_character_id": "character-id",
+    "focal_character_id": "{{ characters[0].id if characters else 'the-character-id' }}",
     "target_pad": {"pleasure": 0.0, "arousal": 0.0, "dominance": 0.0}
   }
 ]
 ```
+
+"focal_character_id" must be copied verbatim from the id attribute of one
+<character> in the context above. Do not abbreviate it, do not invent a new id,
+and do not prefix it with the field name.
 
 Every PAD value must be a number between -1.0 and 1.0.
 Return the fenced JSON array and nothing else.

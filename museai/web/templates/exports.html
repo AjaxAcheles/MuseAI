@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+
+{% block title %}Exports · MuseAI{% endblock %}
+
+{% block content %}
+<div class="page-narrow" id="exports-page" data-word-count="{{ word_count }}">
+  <header class="page-header">
+    <h1 class="page-title">Exports</h1>
+    <p class="page-subtitle">
+      The manuscript is assembled from committed beat prose in narrative order. Drafts, revisions,
+      and review candidates are never included.
+    </p>
+  </header>
+
+  <section class="panel">
+    <div class="panel-header">
+      <h2 class="panel-title">Committed manuscript</h2>
+      <p class="panel-subtitle">
+        {{ "{:,}".format(word_count) }} committed word{{ "" if word_count == 1 else "s" }} available to export.
+      </p>
+    </div>
+
+    <div class="export-actions">
+      <button type="button" class="btn btn-accent" id="export-run"
+              {% if word_count == 0 %}disabled{% endif %}>Export manuscript</button>
+      <a class="btn btn-outline-secondary{{ '' if existing else ' disabled' }}"
+         id="export-download" href="/exports/download"
+         {% if not existing %}aria-disabled="true" tabindex="-1"{% endif %}>Download</a>
+      <span class="inline-result" id="export-result" role="status" aria-live="polite"></span>
+    </div>
+
+    {% if existing %}
+    <dl class="export-meta">
+      <dt>Last export</dt>
+      <dd><code>{{ existing.path }}</code></dd>
+      <dt>Size</dt>
+      <dd>{{ "{:,}".format(existing.bytes) }} bytes</dd>
+    </dl>
+    {% else %}
+    <div class="empty-state">
+      <p class="empty-state-title">No manuscript has been exported yet</p>
+      <p class="empty-state-hint">
+        {% if word_count == 0 %}
+        Commit at least one beat first — generation writes to the manuscript only after a beat
+        passes review and commits.
+        {% else %}
+        Press <strong>Export manuscript</strong> to write the committed prose to disk.
+        {% endif %}
+      </p>
+    </div>
+    {% endif %}
+  </section>
+</div>
+{% endblock %}

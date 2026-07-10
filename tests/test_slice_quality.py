@@ -123,7 +123,7 @@ def endpoint(monkeypatch):
                 await on_token(token)
             return _Response(DRAFT)
 
-        async def fake_critic_loop(endpoint, messages, tools, tool_impls, max_iterations, on_event=None):
+        async def fake_critic_loop(endpoint, messages, tools, tool_impls, max_iterations, on_event=None, **kwargs):
             return _Response(scripted.pop(0))
 
         async def fake_revise_llm(endpoint, messages, **kwargs):

@@ -33,10 +33,12 @@ endpoint:
 
 # Generation shape.
 generation:
-  word_count_target: 3000      # target words per chapter
-  beat_word_target: 600        # target words per beat
+  word_count_target: 1500      # target words for the default short test manuscript
+  beat_word_target: 400        # target words per beat
   revision_retry_cap: 3        # max draft->audit->revise cycles per beat
   max_agent_iterations: 6      # max tool-loop steps for the continuity critic
   recent_prose_beats: 4        # recent committed beats injected as context
   context_token_budget: 8000   # soft token ceiling on the assembled draft context
   passive_voice_threshold: 0.25  # max proportion of passive sentences per beat
+  critic_parse_retries: 2        # re-prompts when the critic's JSON will not parse
+  critic_degrade_threshold: 3    # consecutive unreadable critics before degrading + warning

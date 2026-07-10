@@ -70,7 +70,9 @@ async def draft_prose(state: OrchestratorState) -> dict:
         pieces.append(token)
         await bus.publish("token", {"beat_id": beat_id, "text": token})
 
-    response = await call_llm(config.endpoint, messages, stream=True, on_token=on_token)
+    response = await call_llm(
+        config.endpoint, messages, agent="drafter", stream=True, on_token=on_token
+    )
 
     draft = "".join(pieces)
     if not draft.strip():

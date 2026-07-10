@@ -33,7 +33,9 @@ class FailureObject(BaseModel):
     error_code: str
     offending_text: str
     suggested_fix: str
-    critic_source: str
+    # v1 has exactly one critic. Requiring the model to echo a constant back
+    # bought nothing and cost a whole re-prompt whenever it forgot.
+    critic_source: str = "continuity_critic"
 
 
 def accumulate_or_reset(
@@ -61,6 +63,9 @@ class OrchestratorState(TypedDict):
     retry_count: int
     best_seen_draft: str | None
     best_seen_failure_count: int | None
+    # Consecutive beats whose critic output stayed unparseable after every retry.
+    # Spans beats within a run; a single readable critic resets it to 0.
+    critic_parse_failure_streak: int
     # set when the revision cap is exhausted; parks at the interactive review state
     review_requested: bool
     pause_requested: bool
@@ -86,6 +91,7 @@ def make_initial_state(
         "retry_count": 0,
         "best_seen_draft": None,
         "best_seen_failure_count": None,
+        "critic_parse_failure_streak": 0,
         "review_requested": False,
         "pause_requested": False,
         "hard_stop_asserted": False,

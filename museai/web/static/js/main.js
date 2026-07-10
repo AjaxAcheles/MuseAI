@@ -1,193 +1,612 @@
-(function () {
-  "use strict";
+/**
+ * Page controllers for MuseAI.
+ *
+ * The load-bearing rule of this file: the Committed Story panel is written *only* from
+ * `GET /committed`. Stream tokens, revisions, critic notes, and best-seen review drafts are
+ * confined to the Live Activity panel, because none of them are manuscript until the commit
+ * node says so.
+ *
+ * `/status` is authoritative. Anything the stream implies about run state is reconciled against
+ * it on load and after a reconnect.
+ */
+"use strict";
 
-  const fmt = new Intl.NumberFormat();
-  const controllers = new Set();
+(function (MuseAI) {
+  const { getJSON, postJSON, renderMarkdownInto, escapeHtml, formatNumber, emptyState, toast, setInlineResult } =
+    MuseAI;
 
-  window.addEventListener("beforeunload", () => {
-    controllers.forEach((controller) => controller.abort());
-  });
+  const byId = (id) => document.getElementById(id);
+  const MAX_ACTIVITY_ENTRIES = 50;
 
-  /** POST JSON and always resolve to an {ok, ...} object — never throws. */
-  async function postJSON(url, payload = {}) {
-    const controller = new AbortController();
-    controllers.add(controller);
-    try {
-      const response = await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-        signal: controller.signal,
-      });
-      const body = await response.json().catch(() => null);
-      if (!body || typeof body !== "object") {
-        return { ok: false, error: `Unexpected response (HTTP ${response.status}).` };
-      }
-      return body;
-    } catch (err) {
-      if (err && err.name === "AbortError") return { ok: false, error: "Request cancelled.", aborted: true };
-      return { ok: false, error: "Network error — is the MuseAI server running?" };
-    } finally {
-      controllers.delete(controller);
-    }
-  }
-
-  async function getJSON(url) {
-    try {
-      const response = await fetch(url);
-      const body = await response.json().catch(() => null);
-      return body && typeof body === "object" ? body : null;
-    } catch {
-      return null;
-    }
-  }
-
-  /** Render untrusted markdown (LLM output) into an element, sanitized. */
-  function renderMarkdownInto(el, text) {
-    const source = String(text || "");
-    if (window.marked && window.DOMPurify) {
-      el.innerHTML = window.DOMPurify.sanitize(window.marked.parse(source));
-    } else {
-      el.textContent = source;
-    }
-  }
-
-  function setInlineResult(el, message, ok) {
-    if (!el) return;
-    el.textContent = message || "";
-    el.classList.toggle("is-error", ok === false);
-    el.classList.toggle("is-ok", ok === true);
-  }
-
-  /* ------------------------------------------------------------------ */
-  /* Dashboard                                                           */
-  /* ------------------------------------------------------------------ */
-
+  /** How each manager status presents in the command bar. Mirrors `RunStatus` in manager.py. */
   const RUN_UI = {
-    idle: { label: "Idle", pulse: "pulse-idle", generate: "Generate", pauseResume: null, stop: false },
-    running: { label: "Running", pulse: "pulse-running", generate: null, pauseResume: "pause", stop: true },
-    paused: { label: "Paused", pulse: "pulse-paused", generate: null, pauseResume: "resume", stop: true },
-    review: { label: "Awaiting review", pulse: "pulse-review", generate: null, pauseResume: null, stop: true },
-    stopped: { label: "Stopped", pulse: "pulse-stopped", generate: "Generate", pauseResume: null, stop: false },
-    done: { label: "Done", pulse: "pulse-done", generate: "Generate again", pauseResume: null, stop: false },
-    error: { label: "Error", pulse: "pulse-stopped", generate: "Retry", pauseResume: null, stop: false },
+    idle: { label: "Idle", pulse: "pulse-idle", generate: true, pauseResume: null, stop: false },
+    running: { label: "Running", pulse: "pulse-running", generate: false, pauseResume: "pause", stop: true },
+    paused: { label: "Paused", pulse: "pulse-paused", generate: false, pauseResume: "resume", stop: true },
+    review: { label: "Review needed", pulse: "pulse-review", generate: false, pauseResume: null, stop: true },
+    stopped: { label: "Stopped", pulse: "pulse-stopped", generate: true, pauseResume: null, stop: false },
+    done: { label: "Done", pulse: "pulse-done", generate: true, pauseResume: null, stop: false },
+    error: { label: "Error", pulse: "pulse-error", generate: true, pauseResume: null, stop: false },
   };
 
-  function initDashboard() {
-    const stream = document.getElementById("manuscript-stream");
-    if (!stream) return;
+  /** Which FSM node is speaking, for the role badge. */
+  const NODE_ROLE = {
+    plan_chapter: "planner",
+    plan_beat: "planner",
+    assemble_context: "system",
+    draft_prose: "drafter",
+    audit: "critic",
+    critics: "critic",
+    revise: "reviser",
+    commit: "committer",
+  };
 
-    const el = (id) => document.getElementById(id);
-    const wordCounter = el("word-counter");
-    const wordFill = el("word-progress-fill");
-    const beatIdentifier = el("beat-identifier");
-    const pulse = el("run-pulse");
-    const runLabel = el("run-status-label");
-    const runNotice = el("run-notice");
-    const generateButton = el("generate-button");
-    const pauseResumeButton = el("pause-resume-button");
-    const stopButton = el("stop-button");
-    const criticSummary = el("critic-summary");
-    const criticBody = el("critic-body");
-    const criticReasoning = el("critic-reasoning");
-    const criticTools = el("critic-tools");
-    const reviewBanner = el("review-banner");
-    const reviewText = el("review-text");
-    const reviewMeta = el("review-meta");
-    const doneCard = el("done-card");
+  /** Activity filter buckets. Every server event maps to exactly one. */
+  const EVENT_CATEGORY = {
+    phase_change: "planner",
+    chapters_planned: "planner",
+    beats_planned: "planner",
+    pad_update: "planner",
+    beat_start: "drafter",
+    token: "drafter",
+    revision: "drafter",
+    audit: "critics",
+    critic_tool: "critics",
+    critic_reasoning: "critics",
+    critic_summary: "critics",
+    critic_health: "warnings",
+    word_count: "commit",
+    pointer_update: "commit",
+    manuscript_ready: "commit",
+    run_status: "commit",
+    review_needed: "warnings",
+  };
 
-    let currentBeat = null;
-    let currentStatus = "idle";
-    let autoScroll = true;
-    const beatText = new Map();
-    const MAX_TOOL_CARDS = 8;
+  /* ========================================================= seed workspace */
 
-    stream.addEventListener("scroll", () => {
-      const distance = stream.scrollHeight - stream.scrollTop - stream.clientHeight;
-      autoScroll = distance < 80;
+  /**
+   * Wire one copy of the seed workspace partial. `ns` matches the macro's namespace, so the
+   * Dashboard drawer and the Seed & Plan page share every behaviour below.
+   */
+  function initSeedWorkspace(ns, options) {
+    const config = options || {};
+    const editor = byId(`${ns}-json`);
+    if (!editor) return null;
+
+    const seedApi = MuseAI.seed;
+    const premise = byId(`${ns}-premise`);
+    const timeline = byId(`${ns}-timeline`);
+    const validation = byId(`${ns}-validation`);
+    const errorList = byId(`${ns}-errors`);
+    const exampleSource = document.querySelector("[data-example]");
+    const exampleSeed = exampleSource ? exampleSource.dataset.example : "";
+
+    let lastValid = null;
+
+    function showErrors(errors) {
+      if (!errorList) return;
+      errorList.innerHTML = errors.map((message) => `<li>${escapeHtml(message)}</li>`).join("");
+    }
+
+    /** Validate the editor's contents; returns the parsed seed or null. Drives every button. */
+    function refresh() {
+      const parsed = seedApi.parseSeedJson(editor.value);
+      if (!parsed.ok) {
+        lastValid = null;
+        setInlineResult(validation, parsed.error, false);
+        showErrors([]);
+        seedApi.renderSeedTimeline(timeline, null);
+        return null;
+      }
+
+      const check = seedApi.validateSeedClientSide(parsed.value);
+      seedApi.renderSeedTimeline(timeline, parsed.value);
+      if (!check.ok) {
+        lastValid = null;
+        setInlineResult(validation, `${check.errors.length} problem${check.errors.length === 1 ? "" : "s"} found.`, false);
+        showErrors(check.errors);
+        return null;
+      }
+
+      lastValid = parsed.value;
+      const summary = seedApi.summarizeSeed(parsed.value);
+      setInlineResult(
+        validation,
+        `Valid seed · ${summary.arcs} arc${summary.arcs === 1 ? "" : "s"} · ` +
+          `${summary.threads} thread${summary.threads === 1 ? "" : "s"} · ` +
+          `${summary.characters} character${summary.characters === 1 ? "" : "s"}`,
+        true
+      );
+      showErrors([]);
+      return parsed.value;
+    }
+
+    let debounce = null;
+    editor.addEventListener("input", () => {
+      window.clearTimeout(debounce);
+      debounce = window.setTimeout(refresh, 200);
     });
 
-    function scrollIfNeeded() {
-      if (autoScroll) stream.scrollTop = stream.scrollHeight;
-    }
-
-    function notice(message) {
-      if (!runNotice) return;
-      runNotice.textContent = message || "";
-      runNotice.hidden = !message;
-    }
-
-    function setPhase(phase) {
-      document.querySelectorAll("[data-phase-step]").forEach((step) => {
-        step.classList.toggle("active", step.dataset.phaseStep === phase);
+    const format = byId(`${ns}-format`);
+    if (format) {
+      format.addEventListener("click", () => {
+        const formatted = seedApi.formatSeedJson(editor.value);
+        if (formatted.ok) editor.value = formatted.value;
+        refresh();
       });
+    }
+
+    const validate = byId(`${ns}-validate`);
+    if (validate) validate.addEventListener("click", refresh);
+
+    const reset = byId(`${ns}-reset`);
+    if (reset) {
+      reset.addEventListener("click", () => {
+        editor.value = exampleSeed;
+        refresh();
+      });
+    }
+
+    const applyPremise = byId(`${ns}-apply-premise`);
+    if (applyPremise && premise) {
+      applyPremise.addEventListener("click", () => {
+        const text = premise.value.trim();
+        if (!text) {
+          setInlineResult(validation, "Write a premise before applying it.", false);
+          return;
+        }
+        const parsed = seedApi.parseSeedJson(editor.value);
+        const base = parsed.ok ? parsed.value : {};
+        editor.value = JSON.stringify(seedApi.applyPremise(base, text), null, 2);
+        refresh();
+        toast("Premise applied. Complete and validate the JSON seed before loading.", "info");
+      });
+    }
+
+    // The timeline pane is hidden at first paint, so its SVG would size against a zero-width box.
+    // Re-render when the pane actually becomes visible.
+    const timelinePane = byId(`${ns}-pane-timeline`);
+    if (timelinePane) timelinePane.addEventListener("tab:shown", () => seedApi.renderSeedTimeline(timeline, lastValid));
+
+    /** Submit to the backend. The server validates again, and its error replaces ours. */
+    async function submit(resultElement) {
+      const seed = refresh();
+      if (!seed) {
+        setInlineResult(resultElement, "Fix the seed before loading.", false);
+        return null;
+      }
+      setInlineResult(resultElement, "Loading seed…", true);
+      const response = await seedApi.submitSeedToBackend(seed);
+      if (!response.ok) {
+        setInlineResult(resultElement, response.error, false);
+        return null;
+      }
+      const summary = seedApi.summarizeSeed(seed);
+      setInlineResult(resultElement, "Seed loaded.", true);
+      toast(
+        `Seed loaded: ${summary.title} · ${summary.arcs} arc${summary.arcs === 1 ? "" : "s"} · ` +
+          `${summary.threads} thread${summary.threads === 1 ? "" : "s"} · ` +
+          `${summary.characters} character${summary.characters === 1 ? "" : "s"}`,
+        "ok"
+      );
+      if (config.onLoaded) config.onLoaded(response, seed);
+      return response;
+    }
+
+    refresh();
+    return { refresh, submit, getSeed: () => lastValid };
+  }
+
+  /* ============================================================== seed page */
+
+  function initSeedPage() {
+    const page = byId("seed-page");
+    if (!page) return;
+
+    const workspace = initSeedWorkspace("page", { onLoaded: () => renderLoadedSeed() });
+    const loadButton = byId("page-load-seed");
+    const result = byId("page-load-result");
+    if (loadButton && workspace) loadButton.addEventListener("click", () => workspace.submit(result));
+
+    /** Show what the backend actually holds, not what is typed in the editor. */
+    async function renderLoadedSeed() {
+      const target = byId("seed-summary");
+      if (!target) return;
+      const status = await getJSON("/status");
+      if (!status.ok || !status.seed_loaded) {
+        target.innerHTML = emptyState("No seed loaded", "Load a seed to see its summary here.");
+        return;
+      }
+      const project = status.project || {};
+      const counts = status.counts || {};
+      target.innerHTML = `
+        <dl class="summary-list">
+          <dt>Project</dt><dd>${escapeHtml(project.id)}</dd>
+          ${project.genre ? `<dt>Genre</dt><dd>${escapeHtml(project.genre)}</dd>` : ""}
+          <dt>Arcs</dt><dd>${counts.arcs || 0}</dd>
+          <dt>Threads</dt><dd>${counts.threads || 0}</dd>
+          <dt>Characters</dt><dd>${counts.characters || 0}</dd>
+          ${project.word_count_target ? `<dt>Word target</dt><dd>${formatNumber(project.word_count_target)}</dd>` : ""}
+        </dl>
+        ${project.premise ? `<p class="summary-premise">${escapeHtml(project.premise)}</p>` : ""}
+        <p class="summary-hint">Committed words so far: ${formatNumber(status.project_word_total || 0)}.</p>`;
+    }
+
+    renderLoadedSeed();
+  }
+
+  /* ============================================================== dashboard */
+
+  function initDashboard() {
+    const generateButton = byId("generate-button");
+    if (!generateButton) return;
+
+    const pauseResumeButton = byId("pause-resume-button");
+    const stopButton = byId("stop-button");
+    const runLabel = byId("run-status-label");
+    const runPulse = byId("run-pulse");
+    const streamDot = byId("stream-dot");
+    const notice = byId("run-notice");
+    const criticWarning = byId("critic-warning");
+    const criticWarningDetail = byId("critic-warning-detail");
+    const seedPill = byId("seed-pill");
+
+    const committedStory = byId("committed-story");
+    const committedWords = byId("committed-words");
+    const committedLast = byId("committed-last");
+
+    const liveActivity = byId("live-activity");
+    const liveStream = byId("live-stream");
+    const streamBox = byId("stream-box");
+    const activityRole = byId("activity-role");
+    const activityPhase = byId("activity-phase");
+
+    const reviewBanner = byId("review-banner");
+    const reviewText = byId("review-text");
+    const reviewMeta = byId("review-meta");
+    const reviewResult = byId("review-result");
+    const doneCard = byId("done-card");
+
+    const rail = byId("progress-rail");
+    const railCaption = byId("rail-caption");
+
+    let activityFilter = "all";
+    let entries = [];
+    let seedLoaded = false;
+    let runStatus = "idle";
+    let issueCount = 0;
+    let streamBuffer = "";
+    let currentTarget = null;
+
+    /* ----------------------------------------------------------- command bar */
+
+    function showNotice(message, isError) {
+      if (!notice) return;
+      notice.hidden = !message;
+      notice.textContent = message || "";
+      notice.classList.toggle("is-error", Boolean(isError));
+    }
+
+    // Latched so the toast fires on the transition into degraded, not on every beat.
+    let criticDegraded = false;
+
+    /**
+     * Reflect the backend's `critic_health`. The banner is a pure function of the
+     * latest event, so a recovered critic clears it without a special "recovered"
+     * message. The wording must not soften what degraded means: those beats
+     * committed with only the programmatic audit behind them.
+     */
+    function applyCriticHealth(data) {
+      if (!criticWarning) return;
+      const degraded = Boolean(data.degraded);
+
+      if (degraded && !criticDegraded) {
+        toast(`Continuity critic degraded after ${data.streak} unreadable replies.`, "warning");
+      }
+      criticDegraded = degraded;
+      criticWarning.hidden = !degraded;
+      if (!degraded) return;
+
+      const parsed = data.lenient_used
+        ? "Its latest reply was salvaged with relaxed validation."
+        : "Its latest reply could not be read at all.";
+      criticWarningDetail.textContent =
+        `The critic has returned unreadable output for ${data.streak} beats in a row ` +
+        `(threshold ${data.threshold}). ${parsed} ` +
+        `Beats are still committing, but continuity is no longer being checked — ` +
+        `only the automated passive-voice audit is. Check the model in Settings.`;
     }
 
     function applyRunState(status) {
+      runStatus = status;
       const ui = RUN_UI[status] || RUN_UI.idle;
-      currentStatus = status in RUN_UI ? status : "idle";
       if (runLabel) runLabel.textContent = ui.label;
-      if (pulse) pulse.className = `pulse-dot ${ui.pulse}`;
+      if (runPulse) runPulse.className = `pulse-dot ${ui.pulse}`;
 
-      if (generateButton) {
-        generateButton.hidden = ui.generate === null;
-        if (ui.generate !== null) {
-          generateButton.textContent = ui.generate;
-          generateButton.disabled = false;
-        }
-      }
+      // Generate stays disabled until the backend confirms a seed exists.
+      generateButton.disabled = !(ui.generate && seedLoaded);
+      generateButton.textContent = status === "running" ? "Running…" : "Generate";
+      generateButton.title = seedLoaded ? "" : "Load a seed before generating.";
+
       if (pauseResumeButton) {
         pauseResumeButton.hidden = ui.pauseResume === null;
-        if (ui.pauseResume !== null) {
+        if (ui.pauseResume) {
           pauseResumeButton.dataset.runAction = ui.pauseResume;
           pauseResumeButton.textContent = ui.pauseResume === "pause" ? "Pause" : "Resume";
-          pauseResumeButton.disabled = false;
         }
       }
-      if (stopButton) {
-        stopButton.hidden = !ui.stop;
-        stopButton.disabled = false;
-      }
+      if (stopButton) stopButton.hidden = !ui.stop;
+      if (reviewBanner && status !== "review") reviewBanner.hidden = true;
 
-      if (currentStatus !== "review" && reviewBanner) reviewBanner.hidden = true;
-      if (currentStatus === "running") {
-        if (doneCard) doneCard.hidden = true;
-      }
-      if (currentStatus === "idle") setPhase(null);
-    }
-
-    function setBeatIdentifier(text) {
-      if (beatIdentifier) beatIdentifier.textContent = text;
-    }
-
-    function setWordProgress(count, target) {
-      if (wordCounter) wordCounter.textContent = `${fmt.format(count || 0)} / ${fmt.format(target || 0)} words`;
-      if (wordFill) {
-        const pct = target > 0 ? Math.min(100, (count / target) * 100) : 0;
-        wordFill.style.width = `${pct}%`;
+      const phaseCard = byId("card-phase-value");
+      if (phaseCard && (status === "idle" || status === "done" || status === "stopped")) {
+        phaseCard.textContent = ui.label;
       }
     }
 
-    function ensureBeat(beatId, label) {
-      const id = beatId || "unknown-beat";
-      let block = stream.querySelector(`[data-beat-id="${CSS.escape(id)}"]`);
-      if (!block) {
-        stream.querySelector(".empty-state")?.remove();
-        block = document.createElement("div");
-        block.className = "beat-block";
-        block.dataset.beatId = id;
-        const labelEl = document.createElement("div");
-        labelEl.className = "beat-label";
-        labelEl.textContent = label || id;
-        const proseEl = document.createElement("div");
-        proseEl.className = "beat-prose";
-        block.append(labelEl, proseEl);
-        stream.appendChild(block);
-      } else if (label) {
-        block.querySelector(".beat-label").textContent = label;
+    function applySeedState(status) {
+      seedLoaded = Boolean(status.seed_loaded);
+      const project = status.project || {};
+      if (seedPill) {
+        seedPill.textContent = seedLoaded ? `Seed loaded: ${project.id}` : "No seed loaded";
+        seedPill.classList.toggle("is-missing", !seedLoaded);
+        seedPill.classList.toggle("is-loaded", seedLoaded);
       }
-      currentBeat = id;
-      return block;
+      const seedState = byId("card-seed-state");
+      const seedMeta = byId("card-seed-meta");
+      if (seedState) seedState.textContent = seedLoaded ? "Loaded" : "Missing";
+      if (seedMeta) {
+        seedMeta.textContent = seedLoaded ? [project.id, project.genre].filter(Boolean).join(" · ") : "Load a seed to begin.";
+      }
+    }
+
+    function applyProgress(total, target) {
+      const words = total || 0;
+      const value = byId("card-progress-value");
+      const bar = byId("card-progress-bar");
+      const fill = byId("card-progress-fill");
+      const meta = byId("card-progress-meta");
+      if (value) value.textContent = `${formatNumber(words)} words`;
+      if (meta) meta.textContent = target ? `Target ${formatNumber(target)} words.` : "No target set.";
+      if (bar && fill) {
+        const percent = target ? Math.min(100, Math.round((words / target) * 100)) : 0;
+        fill.style.width = `${percent}%`;
+        bar.setAttribute("aria-valuenow", String(words));
+        bar.setAttribute("aria-valuemax", String(target || 0));
+      }
+      if (committedWords) committedWords.textContent = `${formatNumber(words)} words`;
+    }
+
+    function applyLastCommit(lastCommit) {
+      const value = byId("card-commit-value");
+      const meta = byId("card-commit-meta");
+      if (!lastCommit) {
+        if (value) value.textContent = "None";
+        if (meta) meta.textContent = "Nothing has been committed.";
+        if (committedLast) committedLast.textContent = "no commits yet";
+        return;
+      }
+      if (value) value.textContent = lastCommit.beat_id;
+      if (meta) meta.textContent = `${formatNumber(lastCommit.word_count)} words · ${lastCommit.chapter_id}`;
+      if (committedLast) committedLast.textContent = `last commit ${lastCommit.beat_id}`;
+    }
+
+    function applyEndpoint(endpoint) {
+      const state = byId("card-endpoint-state");
+      const meta = byId("card-endpoint-meta");
+      const dot = byId("card-endpoint-dot");
+      if (!endpoint) return;
+      const configured = Boolean(endpoint.base_url && endpoint.model_name);
+      if (state) state.textContent = configured ? "Configured" : "Missing";
+      if (dot) dot.className = `health-dot ${configured ? "is-configured" : "is-missing"}`;
+      if (meta) meta.textContent = configured ? `${endpoint.model_name} · ${endpoint.base_url}` : "Set a base URL and model.";
+    }
+
+    /* ------------------------------------------------------ committed story */
+
+    /** Refetch committed prose. This is the only writer of the Committed Story panel. */
+    async function refreshCommitted() {
+      const payload = await getJSON("/committed");
+      if (!payload.ok || !committedStory) return;
+
+      const beats = payload.beats || [];
+      applyProgress(payload.project_word_total, currentTarget);
+
+      if (beats.length === 0) {
+        committedStory.innerHTML = emptyState(
+          "No committed story yet",
+          "Generation will appear here after a beat passes review and commits."
+        );
+        return;
+      }
+
+      // Group by chapter so the manuscript reads as chapters, not a flat list of beats.
+      const chapters = [];
+      beats.forEach((beat) => {
+        const last = chapters[chapters.length - 1];
+        if (last && last.id === beat.chapter_id) last.beats.push(beat);
+        else
+          chapters.push({
+            id: beat.chapter_id,
+            ordering: beat.chapter_ordering,
+            description: beat.chapter_description,
+            beats: [beat],
+          });
+      });
+
+      committedStory.innerHTML = chapters
+        .map(
+          (chapter) => `
+          <section class="beat-block">
+            <h3 class="beat-label">Chapter ${chapter.ordering}</h3>
+            ${chapter.description ? `<p class="chapter-description">${escapeHtml(chapter.description)}</p>` : ""}
+            ${chapter.beats.map((beat) => `<div class="beat-prose" data-beat="${escapeHtml(beat.beat_id)}"></div>`).join("")}
+          </section>`
+        )
+        .join("");
+
+      beats.forEach((beat) => {
+        const node = committedStory.querySelector(`[data-beat="${CSS.escape(beat.beat_id)}"]`);
+        renderMarkdownInto(node, beat.prose);
+      });
+    }
+
+    /* ----------------------------------------------------------------- rail */
+
+    /**
+     * Draw the story rail from `/outline`. Arcs are large nodes; chapters the planners have
+     * created are small ones. Nothing is drawn that the database does not contain, so before
+     * planning runs a seeded project shows arcs only.
+     */
+    async function refreshRail() {
+      if (!rail) return;
+      const outline = await getJSON("/outline");
+      if (!outline.ok) return;
+
+      const arcs = outline.arcs || [];
+      if (arcs.length === 0) {
+        rail.innerHTML = emptyState("No story shape yet", "Load a seed to see its arcs.");
+        if (railCaption) railCaption.textContent = "Load a seed to see the story shape.";
+        return;
+      }
+
+      const pointer = outline.pointer || {};
+      const nodes = [];
+      arcs.forEach((arc, arcIndex) => {
+        const arcWords = arc.chapters.reduce(
+          (sum, chapter) =>
+            sum + chapter.beats.filter((beat) => beat.status === "completed").reduce((n, beat) => n + beat.word_count, 0),
+          0
+        );
+        nodes.push({
+          kind: "arc",
+          status: arc.status,
+          label: `Arc ${arcIndex + 1}`,
+          detail: arc.description,
+          words: arcWords,
+          active: pointer.arc_id === arc.id && !pointer.chapter_id,
+        });
+        arc.chapters.forEach((chapter, chapterIndex) => {
+          const done = chapter.beats.filter((beat) => beat.status === "completed");
+          nodes.push({
+            kind: "chapter",
+            status: chapter.status,
+            label: `Ch ${chapterIndex + 1}`,
+            detail: chapter.description,
+            words: done.reduce((n, beat) => n + beat.word_count, 0),
+            beats: chapter.beats.length,
+            committedBeats: done.length,
+            active: pointer.chapter_id === chapter.id,
+          });
+        });
+      });
+
+      const activeIndex = nodes.findIndex((node) => node.active);
+      const gap = 110;
+      const left = 40;
+      const width = left + Math.max(nodes.length, 1) * gap;
+      const y = 54;
+
+      const markup = nodes
+        .map((node, index) => {
+          const cx = left + index * gap;
+          const radius = node.kind === "arc" ? 15 : 9;
+          const classes = ["rail-node", `is-${node.status}`];
+          if (activeIndex >= 0 && index < activeIndex) classes.push("is-passed");
+          if (node.active) classes.push(runStatus === "review" ? "is-blocked" : "is-active");
+
+          const tip = [
+            node.detail || node.label,
+            `Status: ${node.status}`,
+            node.words ? `${formatNumber(node.words)} committed words` : "no committed words",
+            node.kind === "chapter" ? `${node.committedBeats}/${node.beats} beats committed` : null,
+          ]
+            .filter(Boolean)
+            .join("\n");
+
+          return `
+            <g class="${classes.join(" ")}" tabindex="0" role="listitem"
+               aria-label="${escapeHtml(node.label)}, status ${escapeHtml(node.status)}">
+              <title>${escapeHtml(tip)}</title>
+              <circle class="rail-${node.kind}" cx="${cx}" cy="${y}" r="${radius}"></circle>
+              <text class="rail-label" x="${cx}" y="${y + 34}" text-anchor="middle">${escapeHtml(node.label)}</text>
+            </g>`;
+        })
+        .join("");
+
+      const lastX = left + Math.max(nodes.length - 1, 0) * gap;
+      const fillTo = activeIndex >= 0 ? left + activeIndex * gap : left;
+      rail.innerHTML = `
+        <svg class="rail" viewBox="0 0 ${width} 100" role="list" aria-label="Story progress rail">
+          <line class="rail-track" x1="${left}" y1="${y}" x2="${lastX}" y2="${y}"></line>
+          <line class="rail-fill" x1="${left}" y1="${y}" x2="${fillTo}" y2="${y}"></line>
+          ${markup}
+        </svg>`;
+
+      if (railCaption) {
+        const active = nodes[activeIndex];
+        railCaption.textContent = active
+          ? `Currently at ${active.label}${pointer.beat_index !== undefined ? ` · beat ${pointer.beat_index + 1}` : ""}`
+          : `${arcs.length} arc${arcs.length === 1 ? "" : "s"} planned.`;
+      }
+    }
+
+    /* -------------------------------------------------------- live activity */
+
+    function renderActivity() {
+      if (!liveActivity) return;
+      const visible = entries.filter((entry) => activityFilter === "all" || entry.category === activityFilter);
+      if (visible.length === 0) {
+        liveActivity.innerHTML = emptyState("No activity yet", "Events appear here while the engine runs.");
+        return;
+      }
+      liveActivity.innerHTML = visible
+        .map(
+          (entry) => `
+          <div class="activity-entry is-${entry.category}">
+            <span class="activity-time">${entry.time}</span>
+            <span class="activity-role-tag">${escapeHtml(entry.role)}</span>
+            <span class="activity-text">${escapeHtml(entry.text)}</span>
+          </div>`
+        )
+        .join("");
+      liveActivity.scrollTop = 0;
+    }
+
+    /** Record one line of backend activity. Newest first, capped so the DOM stays small. */
+    function logActivity(type, text, role) {
+      entries.unshift({
+        category: EVENT_CATEGORY[type] || "commit",
+        role: role || "system",
+        text,
+        time: new Date().toLocaleTimeString(),
+      });
+      if (entries.length > MAX_ACTIVITY_ENTRIES) entries.length = MAX_ACTIVITY_ENTRIES;
+      renderActivity();
+    }
+
+    function setRole(role, phase) {
+      if (activityRole && role) activityRole.textContent = role;
+      if (activityPhase && phase) activityPhase.textContent = phase;
+      const badge = byId("card-role-badge");
+      const phaseValue = byId("card-phase-value");
+      if (badge && role) badge.textContent = role;
+      if (phaseValue && phase) phaseValue.textContent = phase;
+    }
+
+    function bumpIssues(count) {
+      issueCount += count;
+      const value = byId("card-issues-value");
+      const meta = byId("card-issues-meta");
+      if (value) value.textContent = String(issueCount);
+      if (meta) {
+        meta.textContent =
+          runStatus === "review"
+            ? "Review needed."
+            : issueCount === 0
+            ? "No audit failures seen."
+            : "Audit failures seen this session.";
+      }
     }
 
     function showReview(data) {
@@ -195,111 +614,143 @@
       reviewBanner.hidden = false;
       if (reviewText) reviewText.value = data.best_seen_draft || "";
       if (reviewMeta) {
-        const failures = Array.isArray(data.failures) ? data.failures.length : 0;
-        const best = data.best_seen_failure_count;
-        reviewMeta.textContent =
-          `The draft failed its quality gate ${failures ? `with ${failures} open issue(s)` : ""}` +
-          `${best != null ? ` — best attempt had ${best} failure(s)` : ""}. ` +
-          "Edit it if needed, then accept or regenerate.";
+        const failures = (data.failures || []).length;
+        reviewMeta.textContent = `${failures} unresolved issue${failures === 1 ? "" : "s"}. Edit the draft, then accept or regenerate.`;
       }
-      reviewBanner.scrollIntoView({ behavior: "smooth", block: "nearest" });
     }
+
+    /* ------------------------------------------------------------------ SSE */
 
     const handlers = {
       hydration(snapshot) {
-        const entries = Object.entries(snapshot || {});
-        // Apply run_status last: it decides which panels are visible.
-        entries.sort(([a], [b]) => (a === "run_status") - (b === "run_status"));
-        entries.forEach(([type, data]) => {
-          if (type !== "hydration") dispatch(type, data);
-        });
+        // Replay the last payload of each type; run_status last so it wins the command bar.
+        Object.keys(snapshot)
+          .sort((a, b) => (a === "run_status" ? 1 : b === "run_status" ? -1 : 0))
+          .forEach((type) => dispatch(type, snapshot[type]));
       },
+
       run_status(data) {
-        applyRunState(data.status || "idle");
-        if (data.status === "error" && data.error) notice(`Run failed: ${data.error}`);
+        applyRunState(data.status);
+        if (data.error) {
+          // The failed run's draft is salvaged to disk; tell the user where.
+          const salvaged = data.draft_path ? ` Draft saved to ${data.draft_path}` : "";
+          showNotice(`${data.error}${salvaged}`, true);
+          logActivity("run_status", `Error: ${data.error}`, "system");
+        }
+        if (data.status === "done" || data.status === "stopped") refreshCommitted();
       },
+
       phase_change(data) {
-        setPhase(data.phase);
+        const role = NODE_ROLE[data.node] || "system";
+        setRole(role, data.phase);
+        logActivity("phase_change", String(data.phase), role);
       },
+
       chapters_planned(data) {
-        setBeatIdentifier(`${data.arc_id || "Arc"} · Ch ${data.active_chapter_id || "—"} · Beat —`);
+        logActivity("chapters_planned", `Planned ${data.chapter_count} chapters for ${data.arc_id}`, "planner");
+        refreshRail();
       },
+
       beats_planned(data) {
-        const beats = Array.isArray(data.beats) ? data.beats : [];
-        const active = beats.find((beat) => beat.id === data.active_beat_id) || beats[0];
-        if (active) setBeatIdentifier(`${data.chapter_id || "Chapter"} · Beat ${active.ordering}`);
+        logActivity("beats_planned", `Planned ${data.beat_count} beats for ${data.chapter_id}`, "planner");
+        refreshRail();
       },
+
+      pad_update(data) {
+        const pad = data.target_pad || {};
+        const axes = ["pleasure", "arousal", "dominance"]
+          .filter((axis) => pad[axis] !== undefined)
+          .map((axis) => `${axis[0].toUpperCase()} ${Number(pad[axis]).toFixed(2)}`)
+          .join(" · ");
+        logActivity("pad_update", `Target emotion for ${data.character_id}: ${axes || "unset"}`, "planner");
+      },
+
       beat_start(data) {
-        ensureBeat(data.beat_id, `Beat ${data.ordering ?? "—"} · ${data.beat_id || "unknown"}`);
-        beatText.set(data.beat_id, "");
-        scrollIfNeeded();
+        streamBuffer = "";
+        if (streamBox) streamBox.hidden = false;
+        if (liveStream) liveStream.textContent = "";
+        logActivity("beat_start", `Drafting beat ${data.beat_id} (target ${data.word_target} words)`, "drafter");
       },
+
+      // Raw model output. Belongs here and nowhere else.
       token(data) {
-        const beatId = data.beat_id || currentBeat || "unknown-beat";
-        const block = ensureBeat(beatId);
-        const next = (beatText.get(beatId) || "") + (data.text || "");
-        beatText.set(beatId, next);
-        renderMarkdownInto(block.querySelector(".beat-prose"), next);
-        scrollIfNeeded();
+        if (!liveStream) return;
+        streamBuffer += data.text || "";
+        liveStream.textContent = streamBuffer;
+        liveStream.scrollTop = liveStream.scrollHeight;
       },
+
       revision(data) {
-        const block = ensureBeat(data.beat_id, `Revised · ${data.beat_id || "unknown"}`);
-        beatText.set(data.beat_id, data.text || "");
-        renderMarkdownInto(block.querySelector(".beat-prose"), data.text || "");
+        streamBuffer = data.text || "";
+        if (liveStream) liveStream.textContent = streamBuffer;
+        logActivity("revision", `Revised beat ${data.beat_id} (${data.mode}, retry ${data.retry_count})`, "reviser");
       },
+
       audit(data) {
-        const failures = Array.isArray(data.failures) ? data.failures.length : 0;
-        if (criticSummary) {
-          criticSummary.textContent = failures
-            ? `Programmatic audit found ${failures} issue(s).`
-            : "Programmatic audit clean.";
-        }
+        const failures = (data.failures || []).length;
+        bumpIssues(failures);
+        logActivity(
+          "audit",
+          failures === 0
+            ? `Audit passed (passive density ${Number(data.passive_density).toFixed(2)})`
+            : `Audit found ${failures} issue${failures === 1 ? "" : "s"}`,
+          "critic"
+        );
       },
+
       critic_tool(data) {
-        if (!criticTools) return;
-        if (criticBody) criticBody.hidden = false;
-        const card = document.createElement("div");
-        card.className = "critic-tool";
-        const name = document.createElement("strong");
-        name.textContent = data.tool || "web_search";
-        const query = document.createElement("div");
-        query.className = "critic-tool-query";
-        query.textContent = (data.arguments && data.arguments.query) || "No query";
-        const results = Array.isArray(data.result) ? data.result : [];
-        const preview = document.createElement("pre");
-        preview.textContent = results.length
-          ? results.slice(0, 2).map((item) => `${item.title || "Result"}: ${item.snippet || item.url || ""}`).join("\n")
-          : "No results returned.";
-        card.append(name, query, preview);
-        criticTools.prepend(card);
-        while (criticTools.children.length > MAX_TOOL_CARDS) criticTools.lastChild.remove();
+        const query = (data.arguments && data.arguments.query) || "";
+        logActivity("critic_tool", `Searched: ${query}`, "critic");
       },
+
       critic_reasoning(data) {
-        if (criticBody) criticBody.hidden = false;
-        if (criticReasoning) criticReasoning.textContent = data.text || "Critic returned no text.";
+        logActivity("critic_reasoning", data.text || "", "critic");
       },
+
       critic_summary(data) {
-        if (criticSummary) criticSummary.textContent = data.summary || "Critic complete.";
+        logActivity("critic_summary", data.summary || `${data.total_failures} failures`, "critic");
       },
-      word_count(data) {
-        setWordProgress(data.word_count || 0, data.target || 0);
-      },
-      pointer_update(data) {
-        const pointer = data.fsm_pointer || {};
-        setBeatIdentifier(`Arc ${pointer.arc_id || "—"} · Ch ${pointer.chapter_id || "—"} · Beat ${pointer.beat_index ?? "—"}`);
-      },
-      review_needed(data) {
-        showReview(data || {});
-      },
-      manuscript_ready(data) {
-        applyRunState("done");
-        if (doneCard) {
-          doneCard.hidden = false;
-          const words = document.getElementById("done-words");
-          const path = document.getElementById("done-path");
-          if (words) words.textContent = `${fmt.format(data.word_count || 0)} words`;
-          if (path) path.textContent = data.path || "—";
+
+      critic_health(data) {
+        applyCriticHealth(data);
+        if (data.streak > 0) {
+          const detail = data.degraded ? " Continuity checking is degraded." : "";
+          logActivity(
+            "critic_health",
+            `Critic output unreadable (${data.streak} in a row).${detail}`,
+            "critic"
+          );
         }
+      },
+
+      word_count(data) {
+        currentTarget = data.target || currentTarget;
+        applyProgress(data.word_count, currentTarget);
+        refreshCommitted();
+      },
+
+      pointer_update(data) {
+        logActivity("pointer_update", `Committed beat ${data.beat_id}`, "committer");
+        refreshCommitted();
+        refreshRail();
+        refreshStatus();
+      },
+
+      review_needed(data) {
+        applyRunState("review");
+        showReview(data);
+        bumpIssues(0);
+        logActivity("review_needed", "Parked for human review", "system");
+      },
+
+      manuscript_ready(data) {
+        if (doneCard) doneCard.hidden = false;
+        const words = byId("done-words");
+        const path = byId("done-path");
+        if (words) words.textContent = `${formatNumber(data.word_count)} words`;
+        if (path) path.textContent = data.path;
+        logActivity("manuscript_ready", `Manuscript exported to ${data.path}`, "system");
+        refreshCommitted();
       },
     };
 
@@ -307,216 +758,410 @@
       const handler = handlers[type];
       if (!handler) return;
       try {
-        handler(data || {});
-      } catch (err) {
-        console.error(`MuseAI: handler for '${type}' failed`, err);
+        handler(data);
+      } catch (error) {
+        // A malformed payload must not tear down the stream.
+        console.error(`handler for ${type} failed`, error);
       }
     }
 
-    const events = new EventSource("/stream");
-    Object.keys(handlers).forEach((type) => {
-      events.addEventListener(type, (event) => {
-        let data = {};
-        try {
-          data = JSON.parse(event.data || "{}");
-        } catch {
-          return;
-        }
-        dispatch(type, data);
+    function connectStream() {
+      const events = new EventSource("/stream");
+      Object.keys(handlers).forEach((type) => {
+        events.addEventListener(type, (event) => {
+          let data = {};
+          try {
+            data = JSON.parse(event.data);
+          } catch (error) {
+            return;
+          }
+          dispatch(type, data);
+        });
       });
-    });
-    events.onerror = () => notice("Live connection lost — reconnecting…");
-    events.onopen = () => notice("");
+      events.onopen = () => {
+        if (streamDot) streamDot.className = "stream-dot is-connected";
+        showNotice("");
+      };
+      events.onerror = () => {
+        if (streamDot) streamDot.className = "stream-dot is-disconnected";
+        showNotice("Event stream disconnected. Retrying…", true);
+        // EventSource reconnects on its own; re-read authoritative state when it does.
+        window.setTimeout(refreshStatus, 2000);
+      };
+    }
 
-    async function runAction(button, action) {
-      button.disabled = true;
-      const body = await postJSON(action === "generate" ? "/generate" : `/control/${action}`);
-      if (body.aborted) return;
-      if (!body.ok) {
-        notice(body.error || "Request failed.");
-        applyRunState(body.status || currentStatus);
+    /* -------------------------------------------------------------- controls */
+
+    async function runAction(action) {
+      const url = action === "generate" ? "/generate" : `/control/${action}`;
+      const response = await postJSON(url, {});
+      if (!response.ok) {
+        showNotice(response.error, true);
         return;
       }
-      notice(action === "pause" && body.status === "running" ? "Pausing at the next safe boundary…" : "");
-      applyRunState(body.status || "idle");
+      showNotice("");
+      if (response.status) applyRunState(response.status);
     }
 
     document.querySelectorAll("[data-run-action]").forEach((button) => {
-      button.addEventListener("click", () => runAction(button, button.dataset.runAction));
+      button.addEventListener("click", () => runAction(button.dataset.runAction));
     });
-
-    document.getElementById("review-accept")?.addEventListener("click", () => submitReview("accept"));
-    document.getElementById("review-regenerate")?.addEventListener("click", () => submitReview("regenerate"));
 
     async function submitReview(decision) {
-      const result = document.getElementById("review-result");
-      const body = await postJSON("/control/review", { decision, edited_text: reviewText?.value || "" });
-      if (body.aborted) return;
-      setInlineResult(result, body.ok ? "" : body.error, body.ok);
-      if (body.ok) applyRunState(body.status || "running");
-    }
-
-    // The manager is the source of truth at page load; the SSE snapshot may
-    // predate a server restart.
-    getJSON("/status").then((body) => {
-      if (!body || !body.ok) return;
-      applyRunState(body.status || "idle");
-      if (typeof body.project_word_total === "number") {
-        setWordProgress(body.project_word_total, body.word_target || 0);
-      }
-      const pointer = body.pointer;
-      if (pointer && (pointer.arc_id || pointer.chapter_id)) {
-        setBeatIdentifier(`Arc ${pointer.arc_id || "—"} · Ch ${pointer.chapter_id || "—"} · Beat ${pointer.beat_index ?? "—"}`);
-      }
-    });
-  }
-
-  /* ------------------------------------------------------------------ */
-  /* Seed                                                                */
-  /* ------------------------------------------------------------------ */
-
-  function validateSeed(raw) {
-    if (!raw.trim()) return { ok: false, message: "Paste seed JSON to validate it.", neutral: true };
-    let seed;
-    try {
-      seed = JSON.parse(raw);
-    } catch (err) {
-      return { ok: false, message: `Malformed JSON: ${err.message}` };
-    }
-    if (typeof seed !== "object" || seed === null || Array.isArray(seed)) {
-      return { ok: false, message: "Seed must be a JSON object." };
-    }
-    const project = seed.project;
-    if (typeof project !== "object" || project === null || typeof project.id !== "string" || !project.id) {
-      return { ok: false, message: "seed.project.id (a string) is required." };
-    }
-    if (!Array.isArray(seed.arcs) || seed.arcs.length === 0) {
-      return { ok: false, message: "seed.arcs must be a non-empty list." };
-    }
-    for (let i = 0; i < seed.arcs.length; i += 1) {
-      const arc = seed.arcs[i];
-      if (typeof arc !== "object" || arc === null || typeof arc.description !== "string") {
-        return { ok: false, message: `seed.arcs[${i + 1}].description is required.` };
-      }
-    }
-    for (const collection of ["threads", "characters"]) {
-      if (collection in seed && !Array.isArray(seed[collection])) {
-        return { ok: false, message: `seed.${collection} must be a list.` };
-      }
-    }
-    const characters = Array.isArray(seed.characters) ? seed.characters.length : 0;
-    const threads = Array.isArray(seed.threads) ? seed.threads.length : 0;
-    return {
-      ok: true,
-      message: `Valid seed — project “${project.id}”, ${seed.arcs.length} arc(s), ${characters} character(s), ${threads} thread(s).`,
-    };
-  }
-
-  function initSeed() {
-    const editor = document.getElementById("seed_json");
-    if (!editor) return;
-    const validation = document.getElementById("seed-validation");
-    const submit = document.getElementById("seed-submit");
-    const example = document.getElementById("seed-example")?.dataset.example || "";
-    let timer = null;
-
-    function runValidation() {
-      const verdict = validateSeed(editor.value);
-      if (validation) {
-        validation.textContent = verdict.message;
-        validation.classList.toggle("is-ok", verdict.ok);
-        validation.classList.toggle("is-error", !verdict.ok && !verdict.neutral);
-      }
-      if (submit) submit.disabled = !verdict.ok;
-      return verdict;
-    }
-
-    editor.addEventListener("input", () => {
-      clearTimeout(timer);
-      timer = setTimeout(runValidation, 250);
-    });
-
-    document.getElementById("seed-format")?.addEventListener("click", () => {
-      const verdict = runValidation();
-      if (!verdict.ok) return;
-      editor.value = JSON.stringify(JSON.parse(editor.value), null, 2);
-      runValidation();
-    });
-
-    document.getElementById("seed-reset")?.addEventListener("click", () => {
-      if (example) editor.value = example;
-      runValidation();
-    });
-
-    runValidation();
-  }
-
-  /* ------------------------------------------------------------------ */
-  /* Settings                                                            */
-  /* ------------------------------------------------------------------ */
-
-  function initSettings() {
-    const page = document.getElementById("settings-page");
-    if (!page) return;
-    let baseConfig = {};
-    try {
-      baseConfig = JSON.parse(page.dataset.config || "{}");
-    } catch {
-      baseConfig = {};
-    }
-    const result = document.getElementById("settings-save-result");
-    const endpointResult = document.getElementById("endpoint-test-result");
-
-    function readGenerationValues() {
-      const values = {};
-      let firstError = null;
-      document.querySelectorAll(".generation-setting").forEach((input) => {
-        const key = input.dataset.generationKey;
-        const raw = input.value.trim();
-        const value = raw === "" ? NaN : Number(raw);
-        const min = Number(input.min);
-        const max = Number(input.max);
-        const bad = !Number.isFinite(value) || value < min || value > max;
-        input.classList.toggle("is-invalid", bad);
-        if (bad && !firstError) {
-          const label = document.querySelector(`label[for="${input.id}"]`);
-          firstError = `${label ? label.textContent : key} must be a number between ${input.min} and ${input.max}.`;
-        }
-        values[key] = value;
-      });
-      return { values, error: firstError };
-    }
-
-    document.getElementById("save-settings")?.addEventListener("click", async () => {
-      const { values, error } = readGenerationValues();
-      if (error) {
-        setInlineResult(result, error, false);
+      const payload = { decision };
+      if (decision === "accept" && reviewText) payload.edited_text = reviewText.value;
+      setInlineResult(reviewResult, "Submitting…", true);
+      const response = await postJSON("/control/review", payload);
+      if (!response.ok) {
+        setInlineResult(reviewResult, response.error, false);
         return;
       }
-      const cfg = structuredClone(baseConfig);
-      cfg.endpoint.base_url = document.getElementById("setting-base-url").value.trim();
-      cfg.endpoint.model_name = document.getElementById("setting-model-name").value.trim();
-      cfg.endpoint.api_key = document.getElementById("setting-api-key").value;
-      cfg.endpoint.tokenizer_family = document.getElementById("setting-tokenizer").value;
-      Object.assign(cfg.generation, values);
+      setInlineResult(reviewResult, "", true);
+      if (reviewBanner) reviewBanner.hidden = true;
+      applyRunState(response.status);
+    }
 
-      setInlineResult(result, "Saving…");
-      const body = await postJSON("/settings/save", cfg);
-      if (body.aborted) return;
-      setInlineResult(result, body.ok ? "Settings saved." : body.error, body.ok);
+    const accept = byId("review-accept");
+    const regenerate = byId("review-regenerate");
+    if (accept) accept.addEventListener("click", () => submitReview("accept"));
+    if (regenerate) regenerate.addEventListener("click", () => submitReview("regenerate"));
+
+    document.querySelectorAll("[data-activity-filter]").forEach((chip) => {
+      chip.addEventListener("click", () => {
+        activityFilter = chip.dataset.activityFilter;
+        document.querySelectorAll("[data-activity-filter]").forEach((other) => other.classList.toggle("active", other === chip));
+        renderActivity();
+      });
     });
 
-    document.getElementById("test-endpoint")?.addEventListener("click", async () => {
-      setInlineResult(endpointResult, "Testing…");
-      const body = await postJSON("/settings/test_endpoint");
-      if (body.aborted) return;
-      setInlineResult(endpointResult, body.ok ? `Connected — model responded: ${body.model}` : body.error, body.ok);
+    /* ----------------------------------------------------------- seed drawer */
+
+    const drawer = MuseAI.createDrawer(byId("seed-drawer"));
+    const drawerResult = byId("drawer-load-result");
+    const drawerWorkspace = initSeedWorkspace("drawer", {
+      onLoaded: async () => {
+        if (drawer) drawer.close();
+        await refreshStatus();
+        await refreshRail();
+        await refreshCommitted();
+      },
+    });
+
+    const openDrawer = byId("open-seed-drawer");
+    if (openDrawer && drawer) openDrawer.addEventListener("click", drawer.open);
+
+    const drawerValidate = byId("drawer-validate-seed");
+    if (drawerValidate && drawerWorkspace) {
+      drawerValidate.addEventListener("click", () => {
+        const seed = drawerWorkspace.refresh();
+        setInlineResult(drawerResult, seed ? "Seed is valid." : "Seed is not valid yet.", Boolean(seed));
+      });
+    }
+
+    const drawerLoad = byId("drawer-load-seed");
+    if (drawerLoad && drawerWorkspace) drawerLoad.addEventListener("click", () => drawerWorkspace.submit(drawerResult));
+
+    /* ------------------------------------------------------------ hydration */
+
+    /** `/status` is the source of truth. Everything else is a hint. */
+    async function refreshStatus() {
+      const status = await getJSON("/status");
+      if (!status.ok) {
+        showNotice(status.error || "Could not read run status.", true);
+        return;
+      }
+      currentTarget = status.word_target;
+      applySeedState(status);
+      applyRunState(status.status);
+      applyProgress(status.project_word_total, status.word_target);
+      applyLastCommit(status.last_commit);
+      applyEndpoint(status.endpoint);
+      bumpIssues(0);
+    }
+
+    renderActivity();
+    refreshStatus().then(() => {
+      refreshCommitted();
+      refreshRail();
+      connectStream();
     });
   }
 
+  /* =============================================================== settings */
+
+  function initSettings() {
+    const page = byId("settings-page");
+    if (!page) return;
+
+    const baseConfig = JSON.parse(page.dataset.config || "{}");
+    const saveButton = byId("save-settings");
+    const saveResult = byId("settings-save-result");
+
+    // Save stays disabled until something actually changes.
+    document.querySelectorAll(".dirty-watch").forEach((input) => {
+      const event = input.type === "checkbox" || input.tagName === "SELECT" ? "change" : "input";
+      input.addEventListener(event, () => {
+        if (saveButton) saveButton.disabled = false;
+        setInlineResult(saveResult, "", true);
+      });
+    });
+
+    /** Read number inputs, naming the offending field rather than silently clamping it. */
+    function readNumbers(selector, datasetKey) {
+      const values = {};
+      for (const input of document.querySelectorAll(selector)) {
+        const value = Number(input.value);
+        const min = Number(input.min);
+        const max = Number(input.max);
+        if (Number.isNaN(value) || value < min || value > max) {
+          const label = document.querySelector(`label[for="${input.id}"]`);
+          const name = label ? label.textContent.trim() : input.id;
+          throw new Error(`${name} must be between ${min} and ${max}.`);
+        }
+        values[input.dataset[datasetKey]] = value;
+      }
+      return values;
+    }
+
+    if (saveButton) {
+      saveButton.addEventListener("click", async () => {
+        let generation;
+        let endpointNumbers;
+        try {
+          generation = readNumbers(".generation-setting", "generationKey");
+          endpointNumbers = readNumbers(".endpoint-setting", "endpointKey");
+        } catch (error) {
+          setInlineResult(saveResult, error.message, false);
+          return;
+        }
+
+        const payload = structuredClone(baseConfig);
+        payload.endpoint = {
+          ...payload.endpoint,
+          ...endpointNumbers,
+          base_url: byId("setting-base-url").value.trim(),
+          model_name: byId("setting-model-name").value.trim(),
+          tokenizer_family: byId("setting-tokenizer").value,
+          // An empty string means "keep the key already configured"; the server substitutes it.
+          api_key: byId("setting-api-key").value,
+        };
+        payload.generation = { ...payload.generation, ...generation };
+        payload.log_level = byId("setting-log_level").value;
+        payload.web_search_timeout = Number(byId("setting-web_search_timeout").value);
+        payload.allow_reset = byId("setting-allow_reset").checked;
+
+        setInlineResult(saveResult, "Saving…", true);
+        const response = await postJSON("/settings/save", payload);
+        if (!response.ok) {
+          setInlineResult(saveResult, response.error, false);
+          return;
+        }
+        setInlineResult(saveResult, "Settings saved.", true);
+        saveButton.disabled = true;
+        toast("Settings saved.", "ok");
+      });
+    }
+
+    const testButton = byId("test-endpoint");
+    if (testButton) {
+      testButton.addEventListener("click", async () => {
+        const result = byId("endpoint-test-result");
+        const dot = byId("endpoint-health-dot");
+        setInlineResult(result, "Testing…", true);
+        if (dot) dot.className = "health-dot is-testing";
+        const response = await postJSON("/settings/test_endpoint", {});
+        setInlineResult(result, response.ok ? `Reached ${response.model}.` : response.error, response.ok);
+        if (dot) dot.className = `health-dot ${response.ok ? "is-ok" : "is-failed"}`;
+      });
+    }
+
+    const resetButton = byId("reset-project");
+    if (resetButton) {
+      resetButton.addEventListener("click", async () => {
+        if (!window.confirm("Reset deletes the project database and event log. Continue?")) return;
+        const response = await postJSON("/control/reset", {});
+        setInlineResult(byId("reset-result"), response.ok ? "Project data reset." : response.error, response.ok);
+      });
+    }
+  }
+
+  /* =============================================================== database */
+
+  function initDatabase() {
+    const page = byId("database-page");
+    if (!page) return;
+
+    const typeSelect = byId("db-type");
+    const search = byId("db-search");
+    const head = byId("db-head");
+    const body = byId("db-body");
+    const count = byId("db-count");
+    const drawer = MuseAI.createDrawer(byId("record-drawer"));
+    const recordJson = byId("record-json");
+    let records = [];
+
+    const preview = (value) => {
+      if (value === null || value === undefined) return "";
+      const text = String(value);
+      return text.length > 80 ? `${text.slice(0, 80)}…` : text;
+    };
+
+    function render(columns) {
+      if (records.length === 0) {
+        head.innerHTML = "";
+        body.innerHTML = `<tr><td>${emptyState("No records", "Nothing of this type has been written yet.")}</td></tr>`;
+        return;
+      }
+      head.innerHTML = `<tr>${columns.map((column) => `<th scope="col">${escapeHtml(column)}</th>`).join("")}</tr>`;
+      body.innerHTML = records
+        .map(
+          (record, index) =>
+            `<tr data-index="${index}" tabindex="0">${columns
+              .map((column) => `<td>${escapeHtml(preview(record[column]))}</td>`)
+              .join("")}</tr>`
+        )
+        .join("");
+
+      body.querySelectorAll("tr[data-index]").forEach((row) => {
+        const open = () => {
+          if (recordJson) recordJson.textContent = JSON.stringify(records[Number(row.dataset.index)], null, 2);
+          if (drawer) drawer.open();
+        };
+        row.addEventListener("click", open);
+        row.addEventListener("keydown", (event) => {
+          if (event.key === "Enter") open();
+        });
+      });
+    }
+
+    async function load() {
+      const type = typeSelect.value;
+
+      if (type === "__events__") {
+        const payload = await getJSON("/database/event-log?limit=200");
+        if (!payload.ok) {
+          count.textContent = payload.error;
+          return;
+        }
+        records = (payload.events || []).slice().reverse();
+        count.textContent = `${payload.total} event${payload.total === 1 ? "" : "s"} in the log · showing ${records.length}`;
+        render(["type", "beat_id", "word_count"]);
+        return;
+      }
+
+      const url = `/database/records?type=${encodeURIComponent(type)}&q=${encodeURIComponent(search.value.trim())}`;
+      const payload = await getJSON(url);
+      if (!payload.ok) {
+        count.textContent = payload.error;
+        records = [];
+        render([]);
+        return;
+      }
+      records = payload.records || [];
+      count.textContent = `${payload.total} record${payload.total === 1 ? "" : "s"} · showing ${records.length}`;
+      render(records.length ? Object.keys(records[0]) : []);
+    }
+
+    typeSelect.addEventListener("change", load);
+    byId("db-refresh").addEventListener("click", load);
+
+    let debounce = null;
+    search.addEventListener("input", () => {
+      window.clearTimeout(debounce);
+      debounce = window.setTimeout(load, 250);
+    });
+
+    load();
+  }
+
+  /* =================================================================== logs */
+
+  function initLogs() {
+    const page = byId("logs-page");
+    if (!page) return;
+
+    const view = byId("log-view");
+    const source = byId("log-source");
+    const eventsBox = byId("log-events");
+    const seen = [];
+
+    async function loadTail() {
+      const payload = await getJSON(`/logs/tail?source=${encodeURIComponent(source.value)}&limit=400`);
+      if (!payload.ok) {
+        view.textContent = payload.error;
+        return;
+      }
+      view.textContent = payload.lines.length
+        ? payload.lines.join("\n")
+        : payload.exists
+        ? "The log file is empty."
+        : "No log file has been written yet.";
+      view.scrollTop = view.scrollHeight;
+    }
+
+    source.addEventListener("change", loadTail);
+    byId("log-refresh").addEventListener("click", loadTail);
+    loadTail();
+
+    // The browser's own record of the stream, so a dropped event is visible as a gap.
+    eventsBox.innerHTML = emptyState("No stream events yet", "Events this tab receives will be listed here.");
+    const events = new EventSource("/stream");
+    Object.keys(EVENT_CATEGORY)
+      .concat(["hydration"])
+      .forEach((type) => {
+        events.addEventListener(type, (event) => {
+          seen.unshift({ type, time: new Date().toLocaleTimeString(), data: event.data });
+          if (seen.length > 100) seen.length = 100;
+          eventsBox.innerHTML = seen
+            .map(
+              (entry) => `
+              <details class="log-event">
+                <summary><span class="activity-time">${entry.time}</span> <code>${escapeHtml(entry.type)}</code></summary>
+                <pre>${escapeHtml(entry.data)}</pre>
+              </details>`
+            )
+            .join("");
+        });
+      });
+  }
+
+  /* ================================================================ exports */
+
+  function initExports() {
+    const page = byId("exports-page");
+    if (!page) return;
+
+    const run = byId("export-run");
+    const result = byId("export-result");
+    if (!run) return;
+
+    run.addEventListener("click", async () => {
+      setInlineResult(result, "Exporting…", true);
+      const response = await postJSON("/exports/manuscript", {});
+      if (!response.ok) {
+        setInlineResult(result, response.error, false);
+        return;
+      }
+      setInlineResult(result, `Exported ${formatNumber(response.word_count)} words to ${response.path}.`, true);
+      toast("Manuscript exported.", "ok");
+      const download = byId("export-download");
+      if (download) {
+        download.classList.remove("disabled");
+        download.removeAttribute("aria-disabled");
+        download.removeAttribute("tabindex");
+      }
+    });
+  }
+
+  /* =================================================================== boot */
+
   document.addEventListener("DOMContentLoaded", () => {
+    MuseAI.initTabs(document);
+    initSeedPage();
     initDashboard();
-    initSeed();
     initSettings();
+    initDatabase();
+    initLogs();
+    initExports();
   });
-})();
+})(window.MuseAI);

@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+
+{% block title %}Database · MuseAI{% endblock %}
+
+{% block content %}
+<div class="page-wide" id="database-page">
+  <header class="page-header">
+    <h1 class="page-title">Database</h1>
+    <p class="page-subtitle">
+      A read-only view of the project's SQLite tables and the append-only event log.
+      Nothing on this page writes.
+    </p>
+  </header>
+
+  <section class="panel">
+    <div class="db-toolbar">
+      <div class="field">
+        <label class="form-label" for="db-type">Record type</label>
+        <select class="form-select" id="db-type">
+          {% for record_type in record_types %}
+          <option value="{{ record_type }}">{{ record_type }}</option>
+          {% endfor %}
+          <option value="__events__">Event log</option>
+        </select>
+      </div>
+      <div class="field db-search-field">
+        <label class="form-label" for="db-search">Search</label>
+        <input class="form-control" id="db-search" type="search" autocomplete="off"
+               placeholder="Match any column…">
+      </div>
+      <div class="field">
+        <label class="form-label" for="db-refresh">&nbsp;</label>
+        <button type="button" class="btn btn-outline-secondary" id="db-refresh">Refresh</button>
+      </div>
+    </div>
+    <p class="db-count" id="db-count" role="status" aria-live="polite"></p>
+    <div class="db-table-wrap">
+      <table class="table table-sm table-hover db-table" id="db-table">
+        <thead id="db-head"></thead>
+        <tbody id="db-body"></tbody>
+      </table>
+    </div>
+  </section>
+</div>
+
+<div class="offcanvas offcanvas-end record-drawer" id="record-drawer" tabindex="-1"
+     aria-labelledby="record-drawer-title" aria-hidden="true">
+  <div class="offcanvas-header">
+    <h2 class="offcanvas-title" id="record-drawer-title">Record</h2>
+    <button type="button" class="btn-close" data-drawer-close aria-label="Close"></button>
+  </div>
+  <div class="offcanvas-body">
+    <pre class="record-json" id="record-json"></pre>
+  </div>
+</div>
+{% endblock %}

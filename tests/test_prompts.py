@@ -248,10 +248,10 @@ WELL_FORMED = json.dumps(
 
 class TestParseFailureObjects:
     def test_empty_array_is_a_clean_result(self):
-        assert parse_failure_objects(CLEAN, retry_cap=3) == []
+        assert parse_failure_objects(CLEAN) == []
 
     def test_well_formed_array(self):
-        findings = parse_failure_objects(WELL_FORMED, retry_cap=3)
+        findings = parse_failure_objects(WELL_FORMED)
         assert len(findings) == 1
         assert isinstance(findings[0], FailureObject)
         assert findings[0].error_code == "CONTRADICTS_PRIOR_PROSE"
@@ -259,21 +259,21 @@ class TestParseFailureObjects:
 
     def test_fenced_array_is_extracted(self):
         raw = f"Here is what I found:\n\n```json\n{WELL_FORMED}\n```\n\nHope that helps."
-        findings = parse_failure_objects(raw, retry_cap=3)
+        findings = parse_failure_objects(raw)
         assert len(findings) == 1
         assert findings[0].offending_text == "bright with noon sun"
 
     def test_bare_fence_without_language_hint(self):
         raw = f"```\n{CLEAN}\n```"
-        assert parse_failure_objects(raw, retry_cap=3) == []
+        assert parse_failure_objects(raw) == []
 
     def test_prose_preamble_without_a_fence(self):
         raw = f"I found one issue. {WELL_FORMED}"
-        assert len(parse_failure_objects(raw, retry_cap=3)) == 1
+        assert len(parse_failure_objects(raw)) == 1
 
     def test_single_object_is_accepted_as_one_finding(self):
         raw = json.loads(WELL_FORMED)[0]
-        findings = parse_failure_objects(json.dumps(raw), retry_cap=3)
+        findings = parse_failure_objects(json.dumps(raw))
         assert len(findings) == 1
 
     def test_brackets_inside_strings_do_not_end_the_span(self):
@@ -286,41 +286,74 @@ class TestParseFailureObjects:
             }
         ]
         raw = f"```json\n{json.dumps(payload)}\n```"
-        findings = parse_failure_objects(raw, retry_cap=3)
+        findings = parse_failure_objects(raw)
         assert findings[0].offending_text == 'she said "] is not a door"'
 
     def test_malformed_junk_is_rejected(self):
         with pytest.raises(StructuredOutputError, match="could not extract"):
-            parse_failure_objects("the draft looks fine to me!", retry_cap=3)
+            parse_failure_objects("the draft looks fine to me!")
 
     def test_truncated_json_is_rejected(self):
         with pytest.raises(StructuredOutputError):
-            parse_failure_objects('[{"error_code": "X", "offending', retry_cap=3)
+            parse_failure_objects('[{"error_code": "X", "offending')
 
     def test_missing_required_field_is_rejected(self):
         raw = json.dumps([{"error_code": "X", "offending_text": "y"}])
         with pytest.raises(StructuredOutputError, match="not a valid failure object"):
-            parse_failure_objects(raw, retry_cap=3)
+            parse_failure_objects(raw)
 
     def test_extra_field_is_rejected(self):
         """FailureObject forbids extra keys; a hallucinated field is a hard failure."""
         payload = json.loads(WELL_FORMED)
         payload[0]["severity"] = "high"
         with pytest.raises(StructuredOutputError, match="not a valid failure object"):
-            parse_failure_objects(json.dumps(payload), retry_cap=3)
+            parse_failure_objects(json.dumps(payload))
 
     def test_non_array_json_is_rejected(self):
         with pytest.raises(StructuredOutputError, match="expected a JSON array"):
-            parse_failure_objects('"clean"', retry_cap=3)
+            parse_failure_objects('"clean"')
 
     def test_empty_response_is_rejected(self):
         with pytest.raises(StructuredOutputError, match="empty response"):
-            parse_failure_objects("   ", retry_cap=3)
+            parse_failure_objects("   ")
 
-    def test_retry_cap_must_be_positive(self):
-        with pytest.raises(ValueError, match="retry_cap must be at least 1"):
-            parse_failure_objects(CLEAN, retry_cap=0)
+    def test_critic_source_defaults_when_omitted(self):
+        """v1 has one critic; making the model echo the constant bought nothing."""
+        raw = json.dumps(
+            [{"error_code": "X", "offending_text": "y", "suggested_fix": "z"}]
+        )
+        assert parse_failure_objects(raw)[0].critic_source == "continuity_critic"
 
-    def test_retry_cap_appears_in_the_error(self):
-        with pytest.raises(StructuredOutputError, match="retry_cap=2"):
-            parse_failure_objects("nonsense", retry_cap=2)
+    def test_the_error_carries_the_validation_detail(self):
+        """The message is fed back to the model verbatim, so it must name the field."""
+        raw = json.dumps([{"error_code": "X", "offending_text": "y"}])
+        with pytest.raises(StructuredOutputError, match="suggested_fix"):
+            parse_failure_objects(raw)
+
+
+class TestLenientMode:
+    def test_lenient_ignores_an_unknown_key(self):
+        payload = json.loads(WELL_FORMED)
+        payload[0]["severity"] = "high"
+        findings = parse_failure_objects(json.dumps(payload), lenient=True)
+        assert len(findings) == 1
+        assert not hasattr(findings[0], "severity")
+
+    def test_lenient_skips_rather_than_fabricates_a_missing_field(self):
+        """An empty offending_text would make revise.locate() rewrite the whole draft."""
+        payload = [
+            {"error_code": "X", "offarming_text": "typo'd key", "suggested_fix": "z"},
+            json.loads(WELL_FORMED)[0],
+        ]
+        findings = parse_failure_objects(json.dumps(payload), lenient=True)
+        assert len(findings) == 1
+        assert findings[0].offending_text == "bright with noon sun"
+
+    def test_lenient_returns_empty_when_every_element_is_unreadable(self):
+        payload = [{"error_code": "X", "offarming_text": "nope"}]
+        assert parse_failure_objects(json.dumps(payload), lenient=True) == []
+
+    def test_lenient_does_not_rescue_unparseable_text(self):
+        """Element validation loosens; extraction never does."""
+        with pytest.raises(StructuredOutputError, match="could not extract"):
+            parse_failure_objects("the draft looks fine to me!", lenient=True)

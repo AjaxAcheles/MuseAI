@@ -160,6 +160,7 @@ async def run_agent_loop(
     tool_impls: Mapping[str, Callable[..., Any]],
     max_iterations: int,
     on_event: EventCallback | None = None,
+    agent: str = "system",
 ) -> LLMResponse:
     """Drive the model through tool calls until it answers in prose.
 
@@ -167,6 +168,9 @@ async def run_agent_loop(
     still asks for a tool, one final tool-free call forces a plain answer, and
     that response is what comes back — so the return value never carries pending
     tool calls.
+
+    ``agent`` names the node driving the loop for the chat transcript; each
+    model turn inside the loop appears there as its own call.
 
     ``messages`` is not mutated; the loop works on its own copy.
     """
@@ -176,7 +180,7 @@ async def run_agent_loop(
     working: list[dict[str, Any]] = [dict(m) for m in messages]
 
     for _ in range(max_iterations):
-        response = await call_llm(endpoint, working, tools=tools)
+        response = await call_llm(endpoint, working, tools=tools, agent=agent, stream=True)
         if not response.tool_calls:
             return response
 
@@ -195,4 +199,4 @@ async def run_agent_loop(
         "agent_loop max_iterations=%d reached; forcing a tool-free answer",
         max_iterations,
     )
-    return await call_llm(endpoint, working)
+    return await call_llm(endpoint, working, agent=agent, stream=True)

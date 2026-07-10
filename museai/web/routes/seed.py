@@ -51,14 +51,20 @@ async def _seed_payload() -> dict[str, Any]:
     return _validate_seed(parsed)
 
 
-def _example_seed() -> str:
+def example_seed_text() -> str:
+    """The bundled starter seed, or empty string when it is absent.
+
+    Shared with the dashboard, whose Load Seed drawer prefills the same JSON.
+    """
     example_path = Path("seeds/example.json")
     return example_path.read_text(encoding="utf-8") if example_path.is_file() else ""
 
 
 @bp.get("/seed")
+@bp.get("/setup")
 async def seed():
-    example = _example_seed()
+    """The Seed & Plan workspace. ``/setup`` is an alias — same page, friendlier URL."""
+    example = example_seed_text()
     return await render_template("seed.html", example_seed=example, seed_text=example)
 
 
@@ -76,7 +82,7 @@ async def submit():
             await render_template(
                 "seed.html",
                 error=str(exc),
-                example_seed=_example_seed(),
+                example_seed=example_seed_text(),
                 seed_text=form.get("seed_json", ""),
             ),
             400,

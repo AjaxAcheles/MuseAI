@@ -403,6 +403,61 @@ def get_character_emotions(
     ).fetchone()
 
 
+def reset_active_beats(conn: sqlite3.Connection, project_id: str) -> int:
+    """Return in-flight beats to ``planned``, so a restart redrafts them cleanly.
+
+    A crash mid-beat leaves ``status='active'`` with no prose — a half-state the
+    planners skip and the drafter never revisits. Only prose-less beats are
+    touched: a beat that has prose is either committed or awaiting review, and
+    neither is ours to undo. Idempotent; returns the number of rows reset.
+    """
+    cursor = conn.execute(
+        """
+        UPDATE Beats SET status='planned'
+        WHERE status='active'
+          AND prose IS NULL
+          AND chapter_id IN (
+              SELECT Chapters.id FROM Chapters
+              JOIN Arcs ON Chapters.arc_id = Arcs.id
+              WHERE Arcs.project_id = ?
+          )
+        """,
+        (project_id,),
+    )
+    return cursor.rowcount
+
+
+def get_committed_beats(conn: sqlite3.Connection, project_id: str) -> list[sqlite3.Row]:
+    """Every committed beat in narrative order, with its arc and chapter context.
+
+    A beat counts as committed only when the commit node has both persisted its prose
+    and flipped its status to ``completed``. Planned and active beats are never returned,
+    so a caller cannot accidentally present a discarded draft as manuscript.
+    """
+    return conn.execute(
+        """
+        SELECT
+            Beats.id            AS beat_id,
+            Beats.ordering      AS beat_ordering,
+            Beats.prose         AS prose,
+            Beats.word_count    AS word_count,
+            Chapters.id         AS chapter_id,
+            Chapters.ordering   AS chapter_ordering,
+            Chapters.description AS chapter_description,
+            Arcs.id             AS arc_id,
+            Arcs.ordering       AS arc_ordering
+        FROM Beats
+        JOIN Chapters ON Beats.chapter_id = Chapters.id
+        JOIN Arcs ON Chapters.arc_id = Arcs.id
+        WHERE Arcs.project_id = ?
+          AND Beats.status = 'completed'
+          AND Beats.prose IS NOT NULL
+        ORDER BY Arcs.ordering ASC, Chapters.ordering ASC, Beats.ordering ASC
+        """,
+        (project_id,),
+    ).fetchall()
+
+
 def get_recent_committed_beats(
     conn: sqlite3.Connection, project_id: str, limit: int
 ) -> list[sqlite3.Row]:

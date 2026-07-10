@@ -65,7 +65,7 @@ def _patch_clean_headless_endpoint(monkeypatch):
         await on_token(draft)
         return _Response(draft)
 
-    async def fake_critic_loop(endpoint, messages, tools, tool_impls, max_iterations, on_event=None):
+    async def fake_critic_loop(endpoint, messages, tools, tool_impls, max_iterations, on_event=None, **kwargs):
         return _Response("[]")
 
     monkeypatch.setattr(plan_chapter_module, "call_llm", fake_chapter_llm)

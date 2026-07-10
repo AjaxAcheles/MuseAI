@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+
+{% block title %}View Chat · MuseAI{% endblock %}
+
+{% block content %}
+<div class="chat-page" id="chat-root">
+  <header class="chat-toolbar">
+    <div class="chat-filters btn-group" id="chat-filters" role="group" aria-label="Filter by agent">
+      <button type="button" class="btn btn-sm btn-outline-secondary active" data-agent-filter="all">All</button>
+      {% for agent in agents %}
+      <button type="button" class="btn btn-sm btn-outline-secondary" data-agent-filter="{{ agent }}">
+        {{ agent.replace("_", " ") | title }}
+      </button>
+      {% endfor %}
+    </div>
+    <div class="chat-toolbar-meta">
+      <span class="chat-conn" id="chat-conn" data-state="connecting">Connecting…</span>
+    </div>
+  </header>
+
+  <div class="chat-scroll" id="chat-scroll" tabindex="0" aria-label="LLM conversation">
+    <div class="chat-messages" id="chat-messages"></div>
+  </div>
+</div>
+{% endblock %}

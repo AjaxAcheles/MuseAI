@@ -1,32 +1,42 @@
 {% extends "base.html" %}
+{% from "_seed_workspace.html" import seed_workspace %}
 
-{% block title %}MuseAI Seed{% endblock %}
+{% block title %}Seed &amp; Plan · MuseAI{% endblock %}
 
 {% block content %}
-<div class="page-narrow">
+<div class="page-wide" id="seed-page" data-example="{{ example_seed }}">
   <header class="page-header">
-    <h1 class="page-title">Load a seed</h1>
-    <p class="page-subtitle">Project metadata, arcs, threads, and characters. Reloading a seed is safe — writes are idempotent upserts.</p>
+    <h1 class="page-title">Seed &amp; Plan</h1>
+    <p class="page-subtitle">
+      Describe the project once: a premise and its arcs. MuseAI plans chapters and beats from
+      there. The included test seed is one compact arc with a 1,500-word manuscript target, sized
+      for a fast local run. Reloading a seed is safe.
+    </p>
   </header>
 
-  {% if error %}<p class="alert alert-danger" role="alert">{{ error }}</p>{% endif %}
+  {% if error %}<div class="alert alert-danger" role="alert">{{ error }}</div>{% endif %}
 
-  <form id="seed-form" method="post" action="/seed/submit" class="panel">
-    <div class="seed-toolbar">
-      <label class="seed-label" for="seed_json">Seed JSON</label>
-      <div class="seed-toolbar-actions">
-        <button id="seed-format" class="btn btn-sm btn-outline-light" type="button">Format</button>
-        <button id="seed-reset" class="btn btn-sm btn-outline-light" type="button">Reset to example</button>
+  <div class="seed-layout">
+    <section class="panel">
+      <div class="panel-header">
+        <h2 class="panel-title">Seed input</h2>
       </div>
-    </div>
-    <textarea id="seed_json" name="seed_json" class="form-control seed-editor" rows="22"
-              spellcheck="false" autocomplete="off">{{ seed_text }}</textarea>
-    <p id="seed-validation" class="seed-validation" aria-live="polite"></p>
-    <div class="seed-submit-row">
-      <button id="seed-submit" class="btn btn-accent" type="submit">Load seed</button>
-    </div>
-  </form>
 
-  <div id="seed-example" hidden data-example="{{ example_seed }}"></div>
+      {{ seed_workspace("page", seed_text) }}
+
+      <div class="seed-submit-row">
+        <button type="button" class="btn btn-accent" id="page-load-seed">Load Seed</button>
+        <span class="inline-result" id="page-load-result" role="status" aria-live="polite"></span>
+      </div>
+    </section>
+
+    <aside class="panel seed-summary-panel" aria-label="Loaded seed">
+      <div class="panel-header">
+        <h2 class="panel-title">Loaded seed</h2>
+        <p class="panel-subtitle">What the backend currently holds.</p>
+      </div>
+      <div id="seed-summary"></div>
+    </aside>
+  </div>
 </div>
 {% endblock %}

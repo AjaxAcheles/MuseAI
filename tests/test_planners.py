@@ -452,3 +452,53 @@ async def test_plan_beat_resolves_focal_character_by_name(seeded, monkeypatch):
     specs = [json.loads(row["beat_spec"]) for row in rows]
     assert specs[0]["focal_character_id"] == "char-mara"
     assert specs[1]["focal_character_id"] == ""
+
+
+class TestResolveFocalCharacter:
+    """The values below are the real ones a live run produced, from logs/fsm.log.
+
+    Every beat's PAD was dropped because none of them resolved, so
+    `CharacterEmotions` never moved off its seeded values.
+    """
+
+    CHARACTERS = [
+        {"id": "love-thy-doppelganger-char-1", "name": "Chloe Evans"},
+        {"id": "love-thy-doppelganger-char-2", "name": "Liam Hayes"},
+    ]
+
+    def resolve(self, raw: str) -> str:
+        from museai.fsm.nodes.plan_beat import resolve_focal_character
+
+        return resolve_focal_character(raw, self.CHARACTERS)
+
+    def test_an_exact_id_passes_through(self):
+        assert self.resolve("love-thy-doppelganger-char-1") == "love-thy-doppelganger-char-1"
+
+    def test_the_schema_key_fused_to_the_value_is_stripped(self):
+        """`"focal_character_id": "character-id=<id>"` — observed in production."""
+        assert self.resolve("character-id=love-thy-doppelganger-char-1") == "love-thy-doppelganger-char-1"
+        assert self.resolve("focal_character_id: love-thy-doppelganger-char-2") == "love-thy-doppelganger-char-2"
+
+    def test_a_case_folded_id_resolves(self):
+        assert self.resolve("LOVE-THY-DOPPELGANGER-CHAR-2") == "love-thy-doppelganger-char-2"
+
+    def test_a_character_name_resolves(self):
+        assert self.resolve("Chloe Evans") == "love-thy-doppelganger-char-1"
+        assert self.resolve("  liam hayes ") == "love-thy-doppelganger-char-2"
+
+    def test_surrounding_quotes_are_stripped(self):
+        assert self.resolve('"love-thy-doppelganger-char-1"') == "love-thy-doppelganger-char-1"
+
+    def test_an_invented_abbreviation_does_not_resolve(self):
+        """`ch-1` / `cl-2` — the model made these up. Guessing would corrupt PAD state."""
+        assert self.resolve("ch-1") == ""
+        assert self.resolve("cl-2") == ""
+
+    def test_an_ambiguous_string_resolves_to_nobody(self):
+        """Two known ids embedded: attributing to either would be a coin flip."""
+        raw = "love-thy-doppelganger-char-1 and love-thy-doppelganger-char-2"
+        assert self.resolve(raw) == ""
+
+    def test_empty_and_whitespace_resolve_to_nobody(self):
+        assert self.resolve("") == ""
+        assert self.resolve("   ") == ""

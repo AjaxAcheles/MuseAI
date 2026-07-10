@@ -149,7 +149,7 @@ def _budgeted_messages(config, **kwargs) -> tuple[list[dict], bool]:
 
 async def _rewrite(config, messages: list[dict], what: str) -> str:
     """One reviser call. Empty prose is a hard failure, never a silent no-op."""
-    response = await call_llm(config.endpoint, messages)
+    response = await call_llm(config.endpoint, messages, agent="reviser", stream=True)
     revised = response.text.strip()
     if not revised:
         raise DraftingError(

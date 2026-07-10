@@ -1,41 +1,25 @@
-# MuseAI v1 configuration.
-# Unknown or mistyped keys are FATAL at boot (extra keys are forbidden).
-
-project_id: "museai-v1"
-
-# Web UI / server.
-host: "127.0.0.1"
-port: 8000
-log_level: "INFO"
-
-# Local persistence.
-db_path: "data/museai.db"
-event_log_path: "data/events.jsonl"
-
-# Dev-only reset route guard.
-allow_reset: true
-
-# Seconds the continuity critic's web_search tool waits on a search engine.
-web_search_timeout: 10
-
-# LLM endpoint. Endpoint/model-agnostic: any OpenAI-compatible server works.
+project_id: lantern-keeper
 endpoint:
-  # OpenAI example: "https://api.openai.com/v1"
-  base_url: "http://127.0.0.1:11434/v1"
-  # ${VAR} is resolved from the environment (.env is loaded automatically).
-  api_key: "${MUSEAI_API_KEY}"
-  model_name: "openbmb/minicpm5:latest"
-  # "tiktoken" or "char_heuristic" only.
-  tokenizer_family: "char_heuristic"
+  base_url: http://127.0.0.1:11434/v1
+  api_key: ${MUSEAI_API_KEY}
+  model_name: openbmb/minicpm5:latest
+  tokenizer_family: char_heuristic
   request_timeout: 60
-  temperature: 0.7
-
-# Generation shape.
+  temperature: 0.85
 generation:
-  word_count_target: 3000
-  beat_word_target: 600
+  word_count_target: 1500
+  beat_word_target: 400
   revision_retry_cap: 3
   max_agent_iterations: 6
   recent_prose_beats: 4
   context_token_budget: 8000
   passive_voice_threshold: 0.25
+  critic_parse_retries: 2
+  critic_degrade_threshold: 3
+log_level: INFO
+host: 127.0.0.1
+port: 8000
+db_path: data/museai.db
+event_log_path: data/events.jsonl
+allow_reset: true
+web_search_timeout: 10

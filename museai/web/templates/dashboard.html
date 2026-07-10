@@ -1,80 +1,182 @@
 {% extends "base.html" %}
+{% from "_seed_workspace.html" import seed_workspace %}
 
 {% block title %}MuseAI Dashboard{% endblock %}
 
 {% block appbar_status %}
+<span id="stream-dot" class="stream-dot" title="Event stream" aria-hidden="true"></span>
 <span id="run-pulse" class="pulse-dot pulse-idle" aria-hidden="true"></span>
 <span id="run-status-label" class="run-status-label">Idle</span>
 {% endblock %}
 
 {% block content %}
+
+{# ---------------------------------------------------------------- command bar #}
 <section class="command-bar" aria-label="Run controls and status">
+  <div class="command-seed">
+    <span id="seed-pill" class="seed-pill is-missing">No seed loaded</span>
+    <button type="button" class="btn btn-sm btn-outline-secondary" id="open-seed-drawer">Load Seed</button>
+    <a class="btn btn-sm btn-link" href="/setup">Seed &amp; Plan</a>
+  </div>
+
   <div class="command-cluster" role="group" aria-label="Run controls">
-    <button id="generate-button" class="btn btn-accent" type="button" data-run-action="generate">Generate</button>
-    <button id="pause-resume-button" class="btn btn-outline-light" type="button" data-run-action="pause" hidden>Pause</button>
+    <button id="generate-button" class="btn btn-accent" type="button" data-run-action="generate" disabled>
+      Generate
+    </button>
+    <button id="pause-resume-button" class="btn btn-outline-secondary" type="button" data-run-action="pause" hidden>
+      Pause
+    </button>
     <button id="stop-button" class="btn btn-outline-danger" type="button" data-run-action="stop" hidden>Stop</button>
-  </div>
-
-  <div class="phase-tracker" aria-label="Phase tracker">
-    {% for phase in ["Planning", "Drafting", "Auditing", "Committing"] %}
-    <span class="phase-step" data-phase-step="{{ phase }}">{{ phase }}</span>
-    {% endfor %}
-  </div>
-
-  <div class="run-metrics">
-    <span id="beat-identifier" class="beat-identifier" title="Current position">—</span>
-    <div class="word-progress" aria-label="Word count progress">
-      <div class="word-progress-track"><div id="word-progress-fill" class="word-progress-fill"></div></div>
-      <span id="word-counter" class="word-counter">0 / 0 words</span>
-    </div>
   </div>
 </section>
 
 <p id="run-notice" class="run-notice" role="status" aria-live="polite" hidden></p>
 
+{# Raised when the continuity critic's output has been unreadable for enough
+   consecutive beats that validation had to be loosened. Beats still commit, but
+   with only the programmatic audit behind them — say so, do not soften it. #}
+<div id="critic-warning" class="critic-warning" role="alert" hidden>
+  <strong class="critic-warning-title">Continuity critic degraded</strong>
+  <span id="critic-warning-detail" class="critic-warning-detail"></span>
+</div>
+
+{# ------------------------------------------------------------- progress rail #}
+<section class="panel rail-panel" aria-label="Story progress">
+  <div class="panel-header">
+    <h2 class="panel-title">Story progress</h2>
+    <p class="panel-subtitle" id="rail-caption">Load a seed to see the story shape.</p>
+  </div>
+  <div class="rail-wrap" id="progress-rail"></div>
+</section>
+
+{# ------------------------------------------------------- committed vs. live #}
 <div class="studio-grid">
-  <section class="manuscript-column" aria-label="Manuscript">
+  <section class="panel manuscript-column" aria-label="Committed story">
+    <div class="panel-header">
+      <h2 class="panel-title">Committed Story</h2>
+      <p class="panel-subtitle">
+        <span id="committed-words">0 words</span>
+        <span class="dot-sep" aria-hidden="true">·</span>
+        <span id="committed-last">no commits yet</span>
+      </p>
+    </div>
 
     <div id="review-banner" class="review-banner" hidden>
       <div class="review-banner-head">
-        <h2 class="review-title">Review needed</h2>
+        <h3 class="review-title">Review needed</h3>
         <p id="review-meta" class="review-meta">Review the best draft before continuing.</p>
       </div>
       <textarea id="review-text" class="form-control review-editor" rows="12"
-                aria-label="Best draft" placeholder="Best draft appears here when review is active."></textarea>
+                aria-label="Best seen draft"
+                placeholder="The best draft appears here when review is active."></textarea>
       <div class="review-actions">
         <button id="review-accept" class="btn btn-accent" type="button">Accept &amp; continue</button>
-        <button id="review-regenerate" class="btn btn-outline-light" type="button">Regenerate beat</button>
+        <button id="review-regenerate" class="btn btn-outline-secondary" type="button">Regenerate beat</button>
         <span id="review-result" class="inline-result" aria-live="polite"></span>
       </div>
     </div>
 
     <div id="done-card" class="done-card" hidden>
-      <h2 class="done-title">Manuscript complete</h2>
+      <h3 class="done-title">Manuscript complete</h3>
       <p class="done-meta"><span id="done-words">0 words</span> exported to <code id="done-path">—</code></p>
     </div>
 
-    <div id="manuscript-stream" class="manuscript-stream" aria-live="polite">
-      <div class="empty-state">
-        <p class="empty-title">Nothing on the page yet</p>
-        <p class="empty-hint">Load a <a href="/seed">seed</a>, then press <strong>Generate</strong>. Prose streams here beat by beat.</p>
-      </div>
-    </div>
+    {# Populated only from GET /committed. Never from the token stream. #}
+    <div id="committed-story" class="manuscript-stream" aria-live="polite"></div>
   </section>
 
-  <aside class="critic-column" aria-label="Continuity critic">
-    <section class="panel">
-      <header class="panel-header">
-        <h2 class="panel-title">Continuity critic</h2>
-        <p id="critic-summary" class="panel-subtitle">Waiting for critic activity…</p>
-      </header>
-      <div id="critic-body" class="critic-body" hidden>
-        <h3 class="critic-section-label">Reasoning</h3>
-        <div id="critic-reasoning" class="critic-box"></div>
-        <h3 class="critic-section-label">Web searches</h3>
-        <div id="critic-tools" class="critic-tools"></div>
-      </div>
-    </section>
+  <aside class="panel activity-column" aria-label="Live activity">
+    <div class="panel-header">
+      <h2 class="panel-title">Live Activity</h2>
+      <p class="panel-subtitle">
+        <span id="activity-role" class="role-badge">system</span>
+        <span class="dot-sep" aria-hidden="true">·</span>
+        <span id="activity-phase">idle</span>
+      </p>
+    </div>
+
+    <div class="activity-filters" role="group" aria-label="Filter activity">
+      {% for label in ["All", "Planner", "Drafter", "Critics", "Commit", "Warnings"] %}
+      <button type="button" class="filter-chip{{ ' active' if label == 'All' else '' }}"
+              data-activity-filter="{{ label | lower }}">{{ label }}</button>
+      {% endfor %}
+    </div>
+
+    <div class="stream-box" id="stream-box" hidden>
+      <h3 class="activity-section-label">Drafting now</h3>
+      <div id="live-stream" class="live-stream" aria-live="off"></div>
+    </div>
+
+    <div id="live-activity" class="live-activity" aria-live="polite"></div>
   </aside>
+</div>
+
+{# ------------------------------------------------------------ at-a-glance #}
+<section class="glance-grid" aria-label="At a glance">
+  <article class="glance-card">
+    <h3 class="glance-title">Seed</h3>
+    <p class="glance-value" id="card-seed-state">Missing</p>
+    <p class="glance-meta" id="card-seed-meta">Load a seed to begin.</p>
+  </article>
+
+  <article class="glance-card">
+    <h3 class="glance-title">Progress</h3>
+    <p class="glance-value" id="card-progress-value">0 words</p>
+    <div class="progress" role="progressbar" id="card-progress-bar"
+         aria-label="Committed manuscript words" aria-valuemin="0" aria-valuenow="0" aria-valuemax="0">
+      <div class="progress-bar" id="card-progress-fill" style="width: 0%"></div>
+    </div>
+    <p class="glance-meta" id="card-progress-meta">No target set.</p>
+  </article>
+
+  <article class="glance-card">
+    <h3 class="glance-title">Current Phase</h3>
+    <p class="glance-value" id="card-phase-value">Idle</p>
+    <p class="glance-meta"><span class="role-badge" id="card-role-badge">system</span></p>
+  </article>
+
+  <article class="glance-card">
+    <h3 class="glance-title">Last Commit</h3>
+    <p class="glance-value" id="card-commit-value">None</p>
+    <p class="glance-meta" id="card-commit-meta">Nothing has been committed.</p>
+  </article>
+
+  <article class="glance-card">
+    <h3 class="glance-title">Issues</h3>
+    <p class="glance-value" id="card-issues-value">0</p>
+    <p class="glance-meta" id="card-issues-meta">No audit failures seen.</p>
+  </article>
+
+  <article class="glance-card">
+    <h3 class="glance-title">Endpoint</h3>
+    <p class="glance-value">
+      <span class="health-dot" id="card-endpoint-dot" aria-hidden="true"></span>
+      <span id="card-endpoint-state">Configured</span>
+    </p>
+    <p class="glance-meta" id="card-endpoint-meta">—</p>
+  </article>
+</section>
+
+{# ------------------------------------------------------------ seed drawer #}
+{# Source for the drawer's "Reset to test seed" button; the Seed & Plan page carries its own. #}
+<div id="dashboard-example" hidden data-example="{{ example_seed }}"></div>
+
+<div class="offcanvas offcanvas-end seed-drawer" id="seed-drawer" tabindex="-1"
+     aria-labelledby="seed-drawer-title" aria-hidden="true">
+  <div class="offcanvas-header">
+    <h2 class="offcanvas-title" id="seed-drawer-title">Load Seed</h2>
+    <button type="button" class="btn-close" data-drawer-close aria-label="Close"></button>
+  </div>
+  <div class="offcanvas-body">
+    {{ seed_workspace("drawer", example_seed) }}
+  </div>
+  <div class="offcanvas-footer">
+    <span class="inline-result" id="drawer-load-result" role="status" aria-live="polite"></span>
+    <div class="offcanvas-footer-actions">
+      <button type="button" class="btn btn-outline-secondary" data-drawer-close>Cancel</button>
+      <button type="button" class="btn btn-outline-secondary" id="drawer-validate-seed">Validate Seed</button>
+      <button type="button" class="btn btn-accent" id="drawer-load-seed">Load Seed</button>
+    </div>
+  </div>
 </div>
 {% endblock %}
