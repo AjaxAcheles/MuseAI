@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 from museai.core import logging_setup
 from museai.web.routes.logs import redact
 
@@ -147,3 +149,27 @@ async def test_download_404s_before_an_export(config_factory, web_app, tmp_path,
     app = await web_app(config_factory())
     response = await app.test_client().get("/exports/download")
     assert response.status_code == 404
+
+
+def test_log_node_event_defaults_to_info(caplog):
+    with caplog.at_level(logging.DEBUG, logger="museai"):
+        logging_setup.log_node_event("audit", event="audited", failures=0)
+    record = caplog.records[-1]
+    assert record.levelno == logging.INFO
+    assert "node=audit event=audited failures=0" in record.getMessage()
+
+
+def test_log_node_event_honours_an_explicit_level(caplog):
+    with caplog.at_level(logging.DEBUG, logger="museai"):
+        logging_setup.log_node_event("manager", level=logging.ERROR, event="run_failed")
+    record = caplog.records[-1]
+    assert record.levelno == logging.ERROR
+    assert "node=manager event=run_failed" in record.getMessage()
+
+
+def test_a_level_is_never_mistaken_for_a_log_field(caplog):
+    """`level` is keyword-only and consumed, not printed as `level=40`."""
+    with caplog.at_level(logging.DEBUG, logger="museai"):
+        logging_setup.log_node_event("critics", level=logging.WARNING, event="health")
+    message = caplog.records[-1].getMessage()
+    assert "level=" not in message

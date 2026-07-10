@@ -74,17 +74,33 @@ Database · Settings · Logs · Exports**. A typical session:
    warns that continuity is no longer being checked. Beats keep committing, but
    with only the automated passive-voice audit behind them. Fix the model in
    **Settings** — the banner clears as soon as one reply parses.
-6. If generation parks for review, edit the best-seen draft and choose
+
+   The planners get the same treatment. A model that writes dialogue inside a
+   JSON string without escaping the quotes is re-prompted with the parse error
+   (`planner_parse_retries`); if it will not fix its own quoting, MuseAI repairs
+   the quoting and says so in Live Activity under **Warnings**. A plan that had
+   to be repaired is not literally what the model wrote, so it is never silent.
+
+6. Generation resumes where it stopped. Pressing **Generate** after a crash,
+   a stop, or a restart reuses the arc's existing chapters and the current
+   chapter's existing beats instead of re-planning them, and picks up at the
+   first beat that has no committed prose. Committed prose is never rewritten
+   or discarded by planning. To plan a story differently, **Reset** it.
+7. If generation parks for review, edit the best-seen draft and choose
    **Accept** or **Regenerate**.
-7. Open **View Chat** to watch the models themselves: every prompt any agent
+8. Open **View Chat** to watch the models themselves: every prompt any agent
    sends — chapter planner, beat planner, drafter, critic, reviser — appears as
    a chat bubble with the outgoing prompt (collapsed, expandable), the model's
    thinking, and the response streaming in token by token. Filter by agent.
    History persists in `data/chat.jsonl` and replays on reload.
-8. Use the other tabs as needed:
+9. Use the other tabs as needed:
    - **Database** — read-only view of every SQLite table and the event log.
    - **Logs** — the server's `fsm.log` and `llm_io.log`, with credentials
-     stripped, plus the stream events this browser has seen.
+     stripped, plus the stream events this browser has seen. A run that stopped
+     logs `ERROR`; a run still going on a degraded footing — an unreadable
+     critic, a repaired plan, a beat parked for review — logs `WARNING`.
+     Everything else is `INFO`, so grepping for the first two finds every
+     moment the run needed you.
    - **Settings** — endpoint, generation, quality, and runtime configuration.
    - **Exports** — write the committed manuscript to
      `data/output/<project_id>.md` and download it.

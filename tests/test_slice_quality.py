@@ -37,6 +37,8 @@ from museai.fsm.routers.mode_selector import COMMIT, REVIEW, mode_selector
 from museai.fsm.state import FSM_Pointer, accumulate_or_reset, make_initial_state
 from museai.seed.loader import load_seed
 
+from conftest import patch_planner_llm
+
 SEED_PATH = Path(__file__).resolve().parent.parent / "seeds" / "example.json"
 ARC_ID = "lantern-keeper-arc-1"
 RETRY_CAP = 2
@@ -129,8 +131,7 @@ def endpoint(monkeypatch):
         async def fake_revise_llm(endpoint, messages, **kwargs):
             return _Response(REPAIRED)
 
-        monkeypatch.setattr(plan_chapter_module, "call_llm", fake_chapter_llm)
-        monkeypatch.setattr(plan_beat_module, "call_llm", fake_beat_llm)
+        patch_planner_llm(monkeypatch, chapter=fake_chapter_llm, beat=fake_beat_llm)
         monkeypatch.setattr(draft_prose_module, "call_llm", fake_draft_llm)
         monkeypatch.setattr(critics_module, "run_agent_loop", fake_critic_loop)
         monkeypatch.setattr(revise_module, "call_llm", fake_revise_llm)

@@ -55,6 +55,7 @@
     critic_reasoning: "critics",
     critic_summary: "critics",
     critic_health: "warnings",
+    planner_repaired: "warnings",
     word_count: "commit",
     pointer_update: "commit",
     manuscript_ready: "commit",
@@ -721,6 +722,22 @@
             "critic"
           );
         }
+      },
+
+      /**
+       * The planner's JSON was unreadable and we rewrote its quoting to salvage
+       * it. The plan that resulted is not literally what the model returned, so
+       * say so rather than letting it pass as a normal plan.
+       */
+      planner_repaired(data) {
+        const what = data.what || "plan";
+        logActivity(
+          "planner_repaired",
+          `Repaired malformed JSON from the ${data.agent || "planner"} to recover ` +
+            `${data.count} ${what}. The model did not return valid JSON.`,
+          "planner"
+        );
+        toast(`Recovered a malformed ${what} plan by repairing its JSON.`, "warning");
       },
 
       word_count(data) {

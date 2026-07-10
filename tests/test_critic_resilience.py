@@ -12,6 +12,8 @@ exists so it can never take a run down again.
 
 from __future__ import annotations
 
+import logging
+
 import pytest
 
 from museai.core.stream_bus import bus
@@ -501,3 +503,31 @@ def test_salvage_never_masks_the_original_failure(config_factory, tmp_path, monk
 
     draft_path = manager._salvage_failed_run()  # must not raise
     assert (tmp_path / draft_path).read_text(encoding="utf-8") == "Salvage me."
+
+
+async def test_a_healthy_critic_does_not_warn(configure, scripted_loop, caplog):
+    """Health fires once per beat. Warning on every clean beat trains you to skim."""
+    configure(critic_parse_retries=0, critic_degrade_threshold=2)
+    scripted_loop("[]")
+
+    with caplog.at_level(logging.DEBUG, logger="museai"):
+        await adversarial_critics(state_with(critic_parse_failure_streak=0))
+
+    health = [r for r in caplog.records if "event=health" in r.getMessage()]
+    assert len(health) == 1
+    assert health[0].levelno == logging.INFO
+
+
+async def test_a_degraded_critic_warns(configure, scripted_loop, caplog):
+    configure(critic_parse_retries=0, critic_degrade_threshold=2)
+    scripted_loop(PRODUCTION_FAILURE)
+
+    with caplog.at_level(logging.DEBUG, logger="museai"):
+        await adversarial_critics(state_with(critic_parse_failure_streak=1))
+
+    health = [r for r in caplog.records if "event=health" in r.getMessage()]
+    assert len(health) == 1
+    assert health[0].levelno == logging.WARNING
+
+    failed = [r for r in caplog.records if "event=parse_failed" in r.getMessage()]
+    assert failed and all(r.levelno == logging.WARNING for r in failed)

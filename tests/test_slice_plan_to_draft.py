@@ -28,6 +28,8 @@ from museai.fsm.state import FSM_Pointer, make_initial_state
 from museai.memory.db import connect_db, get_beats_for_chapter, get_chapters_for_arc
 from museai.seed.loader import load_seed
 
+from conftest import patch_planner_llm
+
 SEED_PATH = Path(__file__).resolve().parent.parent / "seeds" / "example.json"
 
 CHAPTERS_JSON = """```json
@@ -85,8 +87,7 @@ async def test_the_plan_to_draft_slice_composes(project, monkeypatch):
             await on_token(token)
         return _Response("".join(PROSE_TOKENS))
 
-    monkeypatch.setattr(plan_chapter_module, "call_llm", fake_chapter_llm)
-    monkeypatch.setattr(plan_beat_module, "call_llm", fake_beat_llm)
+    patch_planner_llm(monkeypatch, chapter=fake_chapter_llm, beat=fake_beat_llm)
     monkeypatch.setattr(draft_prose_module, "call_llm", fake_draft_llm)
 
     # The seed marks its first arc active.

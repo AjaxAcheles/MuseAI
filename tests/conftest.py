@@ -50,6 +50,7 @@ _GENERATION_DEFAULTS = dict(
     passive_voice_threshold=0.25,
     critic_parse_retries=2,
     critic_degrade_threshold=3,
+    planner_parse_retries=2,
 )
 
 
@@ -179,3 +180,23 @@ def add_beat(config: AppConfig, *, beat_id: str, ordering: int, status: str, pro
             )
     finally:
         conn.close()
+
+
+def patch_planner_llm(monkeypatch, *, chapter=None, beat=None) -> None:
+    """Install fake planner responses at the seam both planners now share.
+
+    `plan_chapter` and `plan_beat` no longer call `call_llm` directly — they go
+    through `museai.llm.planning.call_llm_for_json_array`, which owns the
+    re-prompt-and-repair ladder. Patching that away would skip the ladder, so
+    tests patch the `call_llm` *inside* it and dispatch on the `agent` kwarg.
+    """
+    from museai.llm import planning as planning_module
+
+    async def dispatch(endpoint, messages, **kwargs):
+        agent = kwargs.get("agent")
+        fake = {"chapter_planner": chapter, "beat_planner": beat}.get(agent)
+        if fake is None:
+            raise AssertionError(f"no planner fake installed for agent={agent!r}")
+        return await fake(endpoint, messages, **kwargs)
+
+    monkeypatch.setattr(planning_module, "call_llm", dispatch)

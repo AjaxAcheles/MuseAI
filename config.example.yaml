@@ -42,3 +42,4 @@ generation:
   passive_voice_threshold: 0.25  # max proportion of passive sentences per beat
   critic_parse_retries: 2        # re-prompts when the critic's JSON will not parse
   critic_degrade_threshold: 3    # consecutive unreadable critics before degrading + warning
+  planner_parse_retries: 2       # re-prompts when a planner's JSON will not parse

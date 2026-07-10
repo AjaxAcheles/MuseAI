@@ -26,6 +26,8 @@ Degraded beats commit with only the programmatic ``audit`` behind them.
 
 from __future__ import annotations
 
+import logging
+
 from museai.core.logging_setup import log_node_event
 from museai.core.stream_bus import bus
 from museai.fsm.nodes.deps import get_node_config
@@ -77,8 +79,12 @@ async def _publish_health(
     a pure function of the latest event and clears itself on recovery. It lands
     in ``bus.last_snapshot``, so a reloading page hydrates the current state.
     """
+    # Health fires once per beat. WARNING only once the continuity gate has
+    # actually stopped working — a warning on every healthy beat is a warning
+    # nobody reads.
     log_node_event(
         "critics",
+        level=logging.WARNING if degraded else logging.INFO,
         event="health",
         beat_id=beat_id,
         streak=streak,
@@ -162,6 +168,7 @@ async def adversarial_critics(state: OrchestratorState) -> dict:
             last_error = str(exc)
             log_node_event(
                 "critics",
+                level=logging.WARNING,
                 event="parse_failed",
                 beat_id=beat_id,
                 attempt=attempt + 1,

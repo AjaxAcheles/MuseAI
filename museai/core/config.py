@@ -14,7 +14,13 @@ from typing import Literal
 
 import yaml
 from dotenv import load_dotenv
-from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    ValidationError,
+    ValidationInfo,
+    field_validator,
+)
 
 # Load .env once at import so ${VAR} references can be resolved.
 load_dotenv()
@@ -83,6 +89,10 @@ class GenerationConfig(BaseModel):
     # before the run degrades: validation loosens and the UI warns. A weak model
     # must not silently disable the continuity gate.
     critic_degrade_threshold: int
+    # How many times a planner is re-prompted when its reply will not parse as a
+    # JSON array. A planner cannot degrade the way the critic can — there is no
+    # honest empty plan — so this budget, then a quote repair, then the run dies.
+    planner_parse_retries: int
 
     @field_validator("passive_voice_threshold")
     @classmethod
@@ -94,12 +104,12 @@ class GenerationConfig(BaseModel):
             )
         return value
 
-    @field_validator("critic_parse_retries")
+    @field_validator("critic_parse_retries", "planner_parse_retries")
     @classmethod
-    def _non_negative(cls, value: int) -> int:
+    def _non_negative(cls, value: int, info: ValidationInfo) -> int:
         """0 is legal — never re-prompt — but a negative budget is a typo."""
         if value < 0:
-            raise ValueError(f"critic_parse_retries must be >= 0, got {value}")
+            raise ValueError(f"{info.field_name} must be >= 0, got {value}")
         return value
 
     @field_validator("critic_degrade_threshold")

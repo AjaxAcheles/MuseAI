@@ -1,11 +1,14 @@
 """Chapter planning node.
 
 Breaks the pointer's active arc into an ordered sequence of chapters, writes them
-to SQLite, activates the first one, and advances the pointer to it.
+to SQLite, activates the first unfinished one, and advances the pointer to it.
 
-Chapter ids are derived from the arc id and the chapter's position in the
-returned array, so re-planning an arc overwrites the same rows rather than
-accumulating duplicates — the upserts stay idempotent under an event-log replay.
+**An arc is planned once.** If the arc already has chapters this node reuses
+them and never calls the model. That is not an optimisation. Every run enters at
+this node, including the one you start after a crash, and re-planning would hand
+back a *different* set of chapters whose descriptions no longer describe the
+prose already drafted from the old ones — while resetting their status and
+walking the graph back over committed beats. Re-planning is what `Reset` is for.
 
 The LLM call sends no ``max_tokens``: a reasoning-style endpoint bills its hidden
 reasoning against that budget, and a plan truncated mid-array parses to nothing.
@@ -20,12 +23,12 @@ from museai.core.logging_setup import log_node_event
 from museai.core.stream_bus import bus
 from museai.fsm.nodes.deps import PlanningError, get_node_config
 from museai.fsm.state import FSM_Pointer, OrchestratorState
-from museai.llm.client import call_llm
+from museai.llm.planning import call_llm_for_json_array
 from museai.llm.prompts import render_messages
-from museai.llm.structured import parse_json_array
 from museai.memory.db import (
     connect_db,
     get_arcs,
+    get_chapters_for_arc,
     get_characters,
     get_open_threads,
     get_project,
@@ -55,6 +58,28 @@ def _character_context(rows: list[sqlite3.Row]) -> list[dict]:
     ]
 
 
+def _stored_chapters(rows: list[sqlite3.Row]) -> list[dict]:
+    """Rebuild the planner's chapter dicts from rows this node wrote earlier."""
+    return [
+        {
+            "id": row["id"],
+            "arc_id": row["arc_id"],
+            "ordering": row["ordering"],
+            "description": row["description"],
+            "obligations": row["obligations"] or "[]",
+        }
+        for row in rows
+    ]
+
+
+def _first_unfinished(rows: list[sqlite3.Row]) -> int:
+    """Index of the first chapter still to write, or the last one if the arc is done."""
+    for index, row in enumerate(rows):
+        if row["status"] != "completed":
+            return index
+    return len(rows) - 1
+
+
 def _normalise_obligations(value: object, ordering: int) -> list[str]:
     """Coerce a chapter's obligations to a list of non-empty strings."""
     if value is None:
@@ -70,10 +95,10 @@ def _normalise_obligations(value: object, ordering: int) -> list[str]:
 
 
 async def plan_chapter(state: OrchestratorState) -> dict:
-    """Plan the chapters of the pointer's arc and advance the pointer to the first.
+    """Plan the chapters of the pointer's arc, or reuse the ones already planned.
 
-    Returns the state delta: a pointer aimed at the newly-active chapter, beat
-    index reset to 0.
+    Returns the state delta: a pointer aimed at the active chapter, beat index
+    reset to 0.
     """
     config = get_node_config()
     pointer = state["fsm_pointer"]
@@ -97,57 +122,80 @@ async def plan_chapter(state: OrchestratorState) -> dict:
                 f"arc {pointer.arc_id!r} is not an arc of project {project_id!r}"
             )
 
-        threads = get_open_threads(conn, project_id)
-        characters = get_characters(conn, project_id)
-        log_node_event(
-            "plan_chapter",
-            event="context_assembled",
-            arc_id=arc["id"],
-            open_threads=len(threads),
-            characters=len(characters),
-        )
+        existing = get_chapters_for_arc(conn, arc["id"])
+        reused = bool(existing)
 
-        messages = render_messages(
-            "chapter_planner",
-            project={"genre": project["genre"] or "", "premise": project["premise"] or ""},
-            arc={"description": arc["description"]},
-            threads=_thread_context(threads),
-            characters=_character_context(characters),
-        )
-
-        response = await call_llm(config.endpoint, messages, agent="chapter_planner", stream=True)
-        planned = parse_json_array(response.text, what="chapters")
-
-        chapters: list[dict] = []
-        for ordering, item in enumerate(planned, start=1):
-            description = str(item.get("description") or "").strip()
-            if not description:
-                raise PlanningError(f"chapter {ordering} has no description")
-            chapters.append(
-                {
-                    "id": chapter_id_for(arc["id"], ordering),
-                    "arc_id": arc["id"],
-                    "ordering": ordering,
-                    "description": description,
-                    "obligations": json.dumps(
-                        _normalise_obligations(item.get("obligations"), ordering),
-                        ensure_ascii=False,
-                    ),
-                }
+        if reused:
+            chapters = _stored_chapters(existing)
+            index = _first_unfinished(existing)
+            active = chapters[index]
+            arc_done = existing[index]["status"] == "completed"
+        else:
+            threads = get_open_threads(conn, project_id)
+            characters = get_characters(conn, project_id)
+            log_node_event(
+                "plan_chapter",
+                event="context_assembled",
+                arc_id=arc["id"],
+                open_threads=len(threads),
+                characters=len(characters),
             )
 
-        active = chapters[0]
+            messages = render_messages(
+                "chapter_planner",
+                project={
+                    "genre": project["genre"] or "",
+                    "premise": project["premise"] or "",
+                },
+                arc={"description": arc["description"]},
+                threads=_thread_context(threads),
+                characters=_character_context(characters),
+            )
+            planned = await call_llm_for_json_array(
+                config.endpoint,
+                messages,
+                what="chapters",
+                agent="chapter_planner",
+                node="plan_chapter",
+                retries=config.generation.planner_parse_retries,
+            )
+
+            chapters = []
+            for ordering, item in enumerate(planned, start=1):
+                description = str(item.get("description") or "").strip()
+                if not description:
+                    raise PlanningError(f"chapter {ordering} has no description")
+                chapters.append(
+                    {
+                        "id": chapter_id_for(arc["id"], ordering),
+                        "arc_id": arc["id"],
+                        "ordering": ordering,
+                        "description": description,
+                        "obligations": json.dumps(
+                            _normalise_obligations(item.get("obligations"), ordering),
+                            ensure_ascii=False,
+                        ),
+                    }
+                )
+            active = chapters[0]
+            arc_done = False
+
         with conn:
-            for chapter in chapters:
-                upsert_chapter(conn, status="planned", **chapter)
-            upsert_chapter(conn, status="active", **active)
+            if not reused:
+                for chapter in chapters:
+                    upsert_chapter(conn, status="planned", **chapter)
+            # On the reuse path only the active chapter is touched, and only when
+            # there is still one to write. Marking a finished chapter 'active'
+            # would walk the graph back over prose it already committed.
+            if not arc_done:
+                upsert_chapter(conn, status="active", **active)
             upsert_arc(
                 conn,
                 id=arc["id"],
                 project_id=project_id,
                 ordering=arc["ordering"],
                 description=arc["description"],
-                status="active",
+                status="completed" if arc_done else "active",
             )
     finally:
         conn.close()
@@ -158,6 +206,7 @@ async def plan_chapter(state: OrchestratorState) -> dict:
         arc_id=arc["id"],
         chapters=len(chapters),
         active_chapter_id=active["id"],
+        reused=reused,
     )
     log_node_event("plan_chapter", event="phase_change", phase=PHASE, arc_id=arc["id"])
     await bus.publish(
@@ -171,6 +220,7 @@ async def plan_chapter(state: OrchestratorState) -> dict:
             "arc_id": arc["id"],
             "chapter_count": len(chapters),
             "active_chapter_id": active["id"],
+            "reused": reused,
             "chapters": [
                 {"id": c["id"], "ordering": c["ordering"], "description": c["description"]}
                 for c in chapters

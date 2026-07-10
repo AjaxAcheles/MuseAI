@@ -1,7 +1,15 @@
 """Beat planning node.
 
 Decomposes the pointer's active chapter — and only that chapter — into an ordered
-sequence of beats, then activates the first one.
+sequence of beats, then activates the first one still to be written.
+
+**A chapter is decomposed once.** If it already has beats this node reuses them
+and never calls the model, for the same reason ``plan_chapter`` reuses chapters:
+every run enters through the planners, and re-planning a chapter that already
+holds committed prose would overwrite the specs that prose was written from and
+send the drafter back over beats it had finished. ``beat_spec`` stores the plan
+verbatim as JSON, so the reuse path reconstitutes it exactly rather than asking
+the model to reinvent it.
 
 Each beat's ``pad_constraint`` is a pure deterministic lookup: the target PAD
 coordinate quantizes into one of 27 regions and
@@ -24,11 +32,11 @@ from museai.core.stream_bus import bus
 from museai.fsm.nodes.deps import PlanningError, get_node_config
 from museai.fsm.pad import PAD_AXES, resolve_pad_constraint
 from museai.fsm.state import FSM_Pointer, OrchestratorState
-from museai.llm.client import call_llm
+from museai.llm.planning import call_llm_for_json_array
 from museai.llm.prompts import render_messages
-from museai.llm.structured import parse_json_array
 from museai.memory.db import (
     connect_db,
+    get_beats_for_chapter,
     get_character_emotions,
     get_characters,
     get_chapters_for_arc,
@@ -183,6 +191,36 @@ def _row(beat: dict) -> dict:
     return {key: value for key, value in beat.items() if not key.startswith("_")}
 
 
+def _stored_beats(rows: list[sqlite3.Row]) -> list[dict]:
+    """Rebuild the planner's beat dicts from rows this node wrote earlier.
+
+    ``beat_spec`` is the exact dict that was planned, serialised — intent, entry
+    and exit state, target PAD, focal character — so nothing is re-derived.
+    """
+    beats: list[dict] = []
+    for row in rows:
+        beats.append(
+            {
+                "id": row["id"],
+                "chapter_id": row["chapter_id"],
+                "ordering": row["ordering"],
+                "beat_spec": row["beat_spec"],
+                "pad_constraint": row["pad_constraint"],
+                "word_target": row["word_target"],
+                "_spec": json.loads(row["beat_spec"]) if row["beat_spec"] else {},
+            }
+        )
+    return beats
+
+
+def _first_unfinished(rows: list[sqlite3.Row]) -> int:
+    """Index of the first beat still to write, or the last one if the chapter is done."""
+    for index, row in enumerate(rows):
+        if row["status"] != "completed":
+            return index
+    return len(rows) - 1
+
+
 async def plan_beat(state: OrchestratorState) -> dict:
     """Plan the beats of the active chapter and activate the first one.
 
@@ -199,79 +237,103 @@ async def plan_beat(state: OrchestratorState) -> dict:
     conn = connect_db(config.db_path)
     try:
         chapter = _resolve_chapter(conn, pointer)
-        characters = _character_context(conn, project_id)
-        recent = get_recent_committed_beats(
-            conn, project_id, config.generation.recent_prose_beats
-        )
-        log_node_event(
-            "plan_beat",
-            event="context_assembled",
-            chapter_id=chapter["id"],
-            characters=len(characters),
-            recent_prose_beats=len(recent),
-        )
+        existing = get_beats_for_chapter(conn, chapter["id"])
+        reused = bool(existing)
 
-        messages = render_messages(
-            "beat_planner",
-            chapter={
-                "description": chapter["description"],
-                "obligations": _chapter_obligations(chapter["obligations"]),
-            },
-            threads=[
-                {"id": row["id"], "status": row["status"], "description": row["description"]}
-                for row in get_open_threads(conn, project_id)
-            ],
-            characters=characters,
-            recent_prose=[row["prose"] for row in recent],
-            beat_word_target=config.generation.beat_word_target,
-        )
-
-        response = await call_llm(config.endpoint, messages, agent="beat_planner", stream=True)
-        planned = parse_json_array(response.text, what="beats")
-
-        beats: list[dict] = []
-        for ordering, item in enumerate(planned, start=1):
-            intent = str(item.get("intent") or "").strip()
-            if not intent:
-                raise PlanningError(f"beat {ordering} has no intent")
-
-            target_pad = _target_pad(item, ordering)
-            raw_focal = str(item.get("focal_character_id") or "").strip()
-            focal = resolve_focal_character(raw_focal, characters)
-            if raw_focal and not focal:
-                logger.warning(
-                    "node=plan_beat beat %d names unknown focal character %r; "
-                    "PAD will not be attributed",
-                    ordering,
-                    raw_focal,
-                )
-
-            spec = {
-                "intent": intent,
-                "entry_state": str(item.get("entry_state") or "").strip(),
-                "exit_state": str(item.get("exit_state") or "").strip(),
-                "target_pad": target_pad,
-                "focal_character_id": focal,
-            }
-            beats.append(
-                {
-                    "id": beat_id_for(chapter["id"], ordering),
-                    "chapter_id": chapter["id"],
-                    "ordering": ordering,
-                    "beat_spec": json.dumps(spec, ensure_ascii=False),
-                    "pad_constraint": resolve_pad_constraint(
-                        *(target_pad[axis] for axis in PAD_AXES)
-                    ),
-                    "word_target": _word_target(item, config.generation.beat_word_target),
-                    "_spec": spec,
-                }
+        if reused:
+            beats = _stored_beats(existing)
+            active_index = _first_unfinished(existing)
+            active = beats[active_index]
+            chapter_done = existing[active_index]["status"] == "completed"
+        else:
+            active_index = 0
+            chapter_done = False
+            characters = _character_context(conn, project_id)
+            recent = get_recent_committed_beats(
+                conn, project_id, config.generation.recent_prose_beats
+            )
+            log_node_event(
+                "plan_beat",
+                event="context_assembled",
+                chapter_id=chapter["id"],
+                characters=len(characters),
+                recent_prose_beats=len(recent),
             )
 
-        active = beats[0]
+            messages = render_messages(
+                "beat_planner",
+                chapter={
+                    "description": chapter["description"],
+                    "obligations": _chapter_obligations(chapter["obligations"]),
+                },
+                threads=[
+                    {
+                        "id": row["id"],
+                        "status": row["status"],
+                        "description": row["description"],
+                    }
+                    for row in get_open_threads(conn, project_id)
+                ],
+                characters=characters,
+                recent_prose=[row["prose"] for row in recent],
+                beat_word_target=config.generation.beat_word_target,
+            )
+            planned = await call_llm_for_json_array(
+                config.endpoint,
+                messages,
+                what="beats",
+                agent="beat_planner",
+                node="plan_beat",
+                retries=config.generation.planner_parse_retries,
+            )
+
+            beats = []
+            for ordering, item in enumerate(planned, start=1):
+                intent = str(item.get("intent") or "").strip()
+                if not intent:
+                    raise PlanningError(f"beat {ordering} has no intent")
+
+                target_pad = _target_pad(item, ordering)
+                raw_focal = str(item.get("focal_character_id") or "").strip()
+                focal = resolve_focal_character(raw_focal, characters)
+                if raw_focal and not focal:
+                    logger.warning(
+                        "node=plan_beat beat %d names unknown focal character %r; "
+                        "PAD will not be attributed",
+                        ordering,
+                        raw_focal,
+                    )
+
+                spec = {
+                    "intent": intent,
+                    "entry_state": str(item.get("entry_state") or "").strip(),
+                    "exit_state": str(item.get("exit_state") or "").strip(),
+                    "target_pad": target_pad,
+                    "focal_character_id": focal,
+                }
+                beats.append(
+                    {
+                        "id": beat_id_for(chapter["id"], ordering),
+                        "chapter_id": chapter["id"],
+                        "ordering": ordering,
+                        "beat_spec": json.dumps(spec, ensure_ascii=False),
+                        "pad_constraint": resolve_pad_constraint(
+                            *(target_pad[axis] for axis in PAD_AXES)
+                        ),
+                        "word_target": _word_target(
+                            item, config.generation.beat_word_target
+                        ),
+                        "_spec": spec,
+                    }
+                )
+            active = beats[0]
+
         with conn:
-            for beat in beats:
-                upsert_beat(conn, status="planned", **_row(beat))
-            upsert_beat(conn, status="active", **_row(active))
+            if not reused:
+                for beat in beats:
+                    upsert_beat(conn, status="planned", **_row(beat))
+            if not chapter_done:
+                upsert_beat(conn, status="active", **_row(active))
     finally:
         conn.close()
 
@@ -281,7 +343,9 @@ async def plan_beat(state: OrchestratorState) -> dict:
         chapter_id=chapter["id"],
         beats=len(beats),
         active_beat_id=active["id"],
+        active_beat_index=active_index,
         word_target_total=sum(beat["word_target"] for beat in beats),
+        reused=reused,
     )
     await bus.publish(
         "beats_planned",
@@ -289,6 +353,7 @@ async def plan_beat(state: OrchestratorState) -> dict:
             "chapter_id": chapter["id"],
             "beat_count": len(beats),
             "active_beat_id": active["id"],
+            "reused": reused,
             "beats": [
                 {
                     "id": beat["id"],
@@ -301,8 +366,12 @@ async def plan_beat(state: OrchestratorState) -> dict:
         },
     )
 
-    focal_character_id = active["_spec"]["focal_character_id"]
-    if focal_character_id:
+    # The PAD target of a beat is applied when that beat is first planned. Reusing
+    # a stored plan must not re-apply it: the character has since lived through
+    # the beats that followed, and re-publishing an old target would drag their
+    # emotional state backwards to where the run had already left it.
+    focal_character_id = active["_spec"].get("focal_character_id")
+    if not reused and focal_character_id:
         log_node_event(
             "plan_beat",
             event="pad_update",
@@ -315,11 +384,11 @@ async def plan_beat(state: OrchestratorState) -> dict:
             {
                 "character_id": focal_character_id,
                 "beat_id": active["id"],
-                "beat_index": 0,
+                "beat_index": active_index,
                 "target_pad": active["_spec"]["target_pad"],
             },
         )
-    else:
+    elif not reused:
         logger.warning(
             "node=plan_beat no character to attribute the target PAD of beat %s to",
             active["id"],
@@ -327,6 +396,6 @@ async def plan_beat(state: OrchestratorState) -> dict:
 
     return {
         "fsm_pointer": FSM_Pointer(
-            arc_id=pointer.arc_id, chapter_id=chapter["id"], beat_index=0
+            arc_id=pointer.arc_id, chapter_id=chapter["id"], beat_index=active_index
         )
     }

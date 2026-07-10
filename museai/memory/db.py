@@ -185,7 +185,13 @@ def upsert_chapter(
             ordering = excluded.ordering,
             description = excluded.description,
             obligations = excluded.obligations,
-            status = excluded.status
+            -- A finished chapter is never un-finished by a later write. Re-planning
+            -- an arc would otherwise reset completed chapters to 'planned' and the
+            -- graph would redraft prose it had already committed.
+            status = CASE
+                WHEN Chapters.status = 'completed' THEN 'completed'
+                ELSE excluded.status
+            END
         """,
         (id, arc_id, ordering, description, obligations, status),
     )
@@ -215,9 +221,19 @@ def upsert_beat(
             beat_spec = excluded.beat_spec,
             pad_constraint = excluded.pad_constraint,
             word_target = excluded.word_target,
-            prose = excluded.prose,
-            word_count = excluded.word_count,
-            status = excluded.status
+            -- Prose is written once, by `commit`, and is the manuscript. A caller
+            -- that passes no prose (the planners) is describing a beat, not
+            -- unwriting it, so an absent value must never blank the column — nor
+            -- orphan `word_count` from the text it counts.
+            prose = COALESCE(excluded.prose, Beats.prose),
+            word_count = CASE
+                WHEN excluded.prose IS NULL THEN Beats.word_count
+                ELSE excluded.word_count
+            END,
+            status = CASE
+                WHEN Beats.status = 'completed' THEN 'completed'
+                ELSE excluded.status
+            END
         """,
         (id, chapter_id, ordering, beat_spec, pad_constraint,
          word_target, prose, word_count, status),

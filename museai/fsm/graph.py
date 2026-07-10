@@ -14,6 +14,7 @@ owns explicit resumption.
 
 from __future__ import annotations
 
+import logging
 from typing import Literal, cast
 
 from langgraph.graph import END, StateGraph
@@ -180,8 +181,11 @@ async def review(state: OrchestratorState) -> dict:
         "best_seen_failure_count": state["best_seen_failure_count"],
         "failures": [failure.model_dump() for failure in state["critic_failures"]],
     }
+    # WARNING: the revision loop spent its budget and never got the beat clean.
+    # The run is now stopped until a person decides what to do with it.
     log_node_event(
         "review",
+        level=logging.WARNING,
         event="review_needed",
         arc_id=pointer.arc_id,
         chapter_id=pointer.chapter_id,

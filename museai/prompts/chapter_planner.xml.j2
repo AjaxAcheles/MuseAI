@@ -61,6 +61,10 @@ Return a JSON array inside a single fenced code block. Each element:
 ]
 ```
 
+Inside a string value, never write a bare double quote. Quote dialogue with
+single quotes ('like this') or escape it (\"like this\"). An unescaped quote
+ends the string early and the whole array becomes unreadable.
+
 Return the fenced JSON array and nothing else.
 </output_format>
 </user>

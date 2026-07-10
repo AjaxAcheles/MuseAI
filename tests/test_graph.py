@@ -13,6 +13,8 @@ from museai.fsm.graph import build_graph
 from museai.memory import db
 from museai.seed.loader import load_seed
 
+from conftest import patch_planner_llm
+
 
 PROJECT_ID = "graph-project"
 
@@ -84,8 +86,7 @@ def _patch_clean_endpoint(monkeypatch):
     async def fake_critic_loop(endpoint, messages, tools, tool_impls, max_iterations, on_event=None, **kwargs):
         return _Response("[]")
 
-    monkeypatch.setattr(plan_chapter_module, "call_llm", fake_chapter_llm)
-    monkeypatch.setattr(plan_beat_module, "call_llm", fake_beat_llm)
+    patch_planner_llm(monkeypatch, chapter=fake_chapter_llm, beat=fake_beat_llm)
     monkeypatch.setattr(draft_prose_module, "call_llm", fake_draft_llm)
     monkeypatch.setattr(critics_module, "run_agent_loop", fake_critic_loop)
 

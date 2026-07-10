@@ -9,6 +9,7 @@ starts the next run at either ``commit`` or ``assemble``.
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal, cast
@@ -41,6 +42,8 @@ class GenerationManager:
         self.status: RunStatus = "idle"
         self._task: asyncio.Task | None = None
         self._paused_entry: GraphEntry = "assemble"
+        # The last node the graph yielded, so a crash can name where it happened.
+        self._last_node: str = ""
 
     async def start(self, project_id: str) -> None:
         """Build the initial state and start generation in the background."""
@@ -48,6 +51,7 @@ class GenerationManager:
             raise GenerationManagerError("generation is already running")
         pointer = self._initial_pointer(project_id)
         self.state = make_initial_state(project_id, pointer)
+        self._last_node = ""
         await self._start_run("plan_chapter")
 
     def pause(self) -> None:
@@ -169,6 +173,7 @@ class GenerationManager:
         try:
             async for chunk in self.graph.astream(self.state):
                 for node_name, delta in chunk.items():
+                    self._last_node = node_name
                     if delta:
                         self._merge_delta(delta)
                     await bus.publish(
@@ -213,10 +218,15 @@ class GenerationManager:
             raise
         except Exception as exc:  # noqa: BLE001 - a dead run must never look "running"
             self.status = "error"
+            # ERROR, not INFO. This is the only line in `fsm.log` that says the run
+            # is over, and it has twice been missed among thousands of INFO lines.
+            # `entry_point` is where the run began; `after_node` is where it died.
             log_node_event(
                 "manager",
+                level=logging.ERROR,
                 event="run_failed",
                 entry_point=entry_point,
+                after_node=self._last_node or entry_point,
                 error=f"{type(exc).__name__}: {exc}",
             )
             draft_path = self._salvage_failed_run()
@@ -236,11 +246,21 @@ class GenerationManager:
         try:
             draft_path = self._persist_draft()
         except Exception as exc:  # noqa: BLE001
-            log_node_event("manager", event="draft_salvage_failed", error=str(exc))
+            log_node_event(
+                "manager",
+                level=logging.ERROR,
+                event="draft_salvage_failed",
+                error=str(exc),
+            )
         try:
             self._reset_active_beat()
         except Exception as exc:  # noqa: BLE001
-            log_node_event("manager", event="beat_reset_failed", error=str(exc))
+            log_node_event(
+                "manager",
+                level=logging.ERROR,
+                event="beat_reset_failed",
+                error=str(exc),
+            )
         return draft_path
 
     def _persist_draft(self) -> str | None:

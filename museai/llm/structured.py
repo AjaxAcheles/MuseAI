@@ -29,6 +29,7 @@ handle.
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 from pydantic import ConfigDict, ValidationError
@@ -38,6 +39,14 @@ from museai.fsm.state import FailureObject
 
 # Openers paired with their closers, for the balanced-span scan.
 _PAIRS = {"[": "]", "{": "}"}
+
+# One `"key": "value"` pair occupying a whole line, captured as prefix / value /
+# suffix. The value group is greedy, so it runs to the *last* quote on the line —
+# which is the closing quote, whatever the model put between them.
+_STRING_FIELD_LINE = re.compile(r'^(\s*"[\w-]+"\s*:\s*")(.*)("\s*,?\s*)$')
+
+# A double quote not already escaped.
+_BARE_QUOTE = re.compile(r'(?<!\\)"')
 
 
 class _LenientFailureObject(FailureObject):
@@ -218,7 +227,42 @@ def _as_object_array(data: Any, what: str) -> list[dict]:
     return list(data)
 
 
-def parse_json_array(raw_text: str, *, what: str) -> list[dict]:
+def repair_json_text(text: str) -> str:
+    """Escape unescaped double quotes inside single-line JSON string values.
+
+    A fiction planner quotes speech. Asked for ``exit_state`` it writes
+
+        "exit_state": "Mara expresses vague regret ("It was stronger") while ...",
+
+    which terminates the string at the first inner quote and makes the whole
+    array unparseable. That killed a run on 2026-07-10 after seven committed
+    beats.
+
+    The repair is line-oriented because JSON forbids a raw newline inside a
+    string: the closing quote of a value is therefore the *last* quote on its
+    line, and everything between the opening and closing quotes is content. A
+    character scanner deciding string boundaries by looking ahead for ``,`` or
+    ``}`` would instead mangle ``"he said "yes", then left"``.
+
+    Lines that are structural, or whose value is not a string, never match and
+    pass through untouched. Valid JSON is returned byte-identical, because a
+    valid string value contains no unescaped quote to rewrite.
+
+    This is a heuristic, and it puts words in the model's mouth. Callers use it
+    only after re-prompting has failed, and must say so out loud when it fires.
+    """
+    repaired: list[str] = []
+    for line in text.splitlines():
+        match = _STRING_FIELD_LINE.match(line)
+        if match is None:
+            repaired.append(line)
+            continue
+        prefix, value, suffix = match.groups()
+        repaired.append(f"{prefix}{_BARE_QUOTE.sub(r'\\"', value)}{suffix}")
+    return "\n".join(repaired)
+
+
+def parse_json_array(raw_text: str, *, what: str, repair: bool = False) -> list[dict]:
     """Parse a planner response into a non-empty list of JSON objects.
 
     Same two bounded passes as :func:`parse_failure_objects`, but the elements
@@ -229,6 +273,10 @@ def parse_json_array(raw_text: str, *, what: str) -> list[dict]:
     error says which plan failed. Unlike the critic's parser, an empty array is
     a hard failure: a plan must contain at least one element, and returning
     ``[]`` here would let a node silently write nothing.
+
+    ``repair`` adds a third pass that runs :func:`repair_json_text` over the
+    response. It is off by default and belongs to callers that have already
+    spent their re-prompts — see ``museai/llm/planning.py``.
     """
     if not raw_text or not raw_text.strip():
         raise StructuredOutputError(f"model returned an empty response for {what}")
@@ -248,6 +296,15 @@ def parse_json_array(raw_text: str, *, what: str) -> list[dict]:
             return _as_object_array(json.loads(candidate), what)
         except json.JSONDecodeError:
             pass
+
+    # Pass 3: repair the model's quoting, then extract again.
+    if repair:
+        candidate = _first_balanced_span(repair_json_text(_strip_fences(raw_text)))
+        if candidate is not None:
+            try:
+                return _as_object_array(json.loads(candidate), what)
+            except json.JSONDecodeError:
+                pass
 
     raise StructuredOutputError(
         f"could not extract a JSON array of {what} from the model response: "

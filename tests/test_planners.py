@@ -43,6 +43,8 @@ from museai.memory.db import (
     upsert_thread,
 )
 
+from conftest import patch_planner_llm
+
 ARC_ID = "arc-1"
 PROJECT_ID = "test-project"
 
@@ -158,7 +160,7 @@ async def test_plan_chapter_writes_ordered_rows_and_advances_pointer(seeded, mon
     async def fake_call_llm(endpoint, messages, **kwargs):
         return _response(CHAPTERS_JSON)
 
-    monkeypatch.setattr(plan_chapter_module, "call_llm", fake_call_llm)
+    patch_planner_llm(monkeypatch, chapter=fake_call_llm)
 
     delta = await plan_chapter(_state())
 
@@ -190,7 +192,7 @@ async def test_plan_chapter_is_idempotent_across_replans(seeded, monkeypatch):
     async def fake_call_llm(endpoint, messages, **kwargs):
         return _response(CHAPTERS_JSON)
 
-    monkeypatch.setattr(plan_chapter_module, "call_llm", fake_call_llm)
+    patch_planner_llm(monkeypatch, chapter=fake_call_llm)
 
     await plan_chapter(_state())
     await plan_chapter(_state())
@@ -205,7 +207,7 @@ async def test_plan_chapter_publishes_phase_change_and_summary(seeded, monkeypat
     async def fake_call_llm(endpoint, messages, **kwargs):
         return _response(CHAPTERS_JSON)
 
-    monkeypatch.setattr(plan_chapter_module, "call_llm", fake_call_llm)
+    patch_planner_llm(monkeypatch, chapter=fake_call_llm)
 
     queue = bus.subscribe()
     try:
@@ -224,7 +226,7 @@ async def test_plan_chapter_raises_on_unparseable_plan(seeded, monkeypatch):
     async def fake_call_llm(endpoint, messages, **kwargs):
         return _response("I'd rather not plan this arc.")
 
-    monkeypatch.setattr(plan_chapter_module, "call_llm", fake_call_llm)
+    patch_planner_llm(monkeypatch, chapter=fake_call_llm)
 
     with pytest.raises(StructuredOutputError):
         await plan_chapter(_state())
@@ -239,7 +241,7 @@ async def test_plan_chapter_raises_on_empty_array(seeded, monkeypatch):
     async def fake_call_llm(endpoint, messages, **kwargs):
         return _response("[]")
 
-    monkeypatch.setattr(plan_chapter_module, "call_llm", fake_call_llm)
+    patch_planner_llm(monkeypatch, chapter=fake_call_llm)
 
     with pytest.raises(StructuredOutputError, match="empty array"):
         await plan_chapter(_state())
@@ -249,7 +251,7 @@ async def test_plan_chapter_rejects_an_unknown_arc(seeded, monkeypatch):
     async def fake_call_llm(endpoint, messages, **kwargs):
         raise AssertionError("the endpoint must not be reached")
 
-    monkeypatch.setattr(plan_chapter_module, "call_llm", fake_call_llm)
+    patch_planner_llm(monkeypatch, chapter=fake_call_llm)
 
     state = make_initial_state(
         PROJECT_ID, FSM_Pointer(arc_id="arc-nope", chapter_id="", beat_index=0)
@@ -270,7 +272,7 @@ async def test_plan_beat_writes_ordered_rows_with_pad_constraints(seeded, monkey
         calls.append(messages)
         return _response(BEATS_JSON)
 
-    monkeypatch.setattr(plan_beat_module, "call_llm", fake_call_llm)
+    patch_planner_llm(monkeypatch, beat=fake_call_llm)
 
     delta = await plan_beat(_state(chapter_id))
 
@@ -321,7 +323,7 @@ async def test_plan_beat_only_plans_the_active_chapter(seeded, monkeypatch):
     async def fake_call_llm(endpoint, messages, **kwargs):
         return _response(BEATS_JSON)
 
-    monkeypatch.setattr(plan_beat_module, "call_llm", fake_call_llm)
+    patch_planner_llm(monkeypatch, beat=fake_call_llm)
 
     # The pointer names no chapter, so the node must find the active one.
     await plan_beat(_state())
@@ -338,7 +340,7 @@ async def test_plan_beat_publishes_summary_and_focal_pad_update(seeded, monkeypa
     async def fake_call_llm(endpoint, messages, **kwargs):
         return _response(BEATS_JSON)
 
-    monkeypatch.setattr(plan_beat_module, "call_llm", fake_call_llm)
+    patch_planner_llm(monkeypatch, beat=fake_call_llm)
 
     queue = bus.subscribe()
     try:
@@ -364,7 +366,7 @@ async def test_plan_beat_raises_on_unparseable_plan(seeded, monkeypatch):
     async def fake_call_llm(endpoint, messages, **kwargs):
         return _response("No beats today.")
 
-    monkeypatch.setattr(plan_beat_module, "call_llm", fake_call_llm)
+    patch_planner_llm(monkeypatch, beat=fake_call_llm)
 
     with pytest.raises(StructuredOutputError):
         await plan_beat(_state(chapter_id))
@@ -442,7 +444,7 @@ async def test_plan_beat_resolves_focal_character_by_name(seeded, monkeypatch):
     async def fake_call_llm(endpoint, messages, **kwargs):
         return _response(beats)
 
-    monkeypatch.setattr(plan_beat_module, "call_llm", fake_call_llm)
+    patch_planner_llm(monkeypatch, beat=fake_call_llm)
     await plan_beat(_state())
 
     conn = connect_db(seeded.db_path)

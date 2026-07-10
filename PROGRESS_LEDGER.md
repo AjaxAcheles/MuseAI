@@ -18,6 +18,7 @@ session ritual.
 | v1.10 | Frontend rebuild: tabbed local-only UI, committed/live separation, seed gating, story rail, Database/Logs/Exports tabs | done |
 | v1.11 | View Chat tab: every agent's LLM traffic (prompts, thinking, streamed responses) live + replayed; all-agent streaming; committed-story chapter label fix | done |
 | v1.12 | Critic resilience: re-prompt + degrade instead of killing the run; PAD focal-character resolution; crash salvage; test log isolation | done |
+| v1.13 | Planner resilience: re-prompt + JSON quote repair; idempotent planners (resume no longer destroys committed prose); ERROR/WARNING log levels | done |
 
 Next up: v1 complete
 
@@ -979,3 +980,142 @@ museai import, and drops any handler that beat it there.
   tested, and offered to the model, which simply never asks for it. Unexplained.
 - The smoke server exercises the real app, so it writes to the real `logs/`.
   Only the test suite is isolated.
+
+---
+
+## v1.13 — done
+
+**What broke.** A generation of `lantern-keeper` died at `2026-07-10 10:43:49`
+after 17 minutes, 7 committed beats and 2745 words. The beat planner wrote
+dialogue inside a JSON string value without escaping the quotes:
+
+```
+"exit_state": "Mara expresses vague regret ("It was meant to be stronger") while ...",
+```
+
+`json.loads` stopped at the inner quote (`Expecting ',' delimiter: line 19
+column 50`), both of `parse_json_array`'s extraction passes failed,
+`StructuredOutputError` reached `manager`'s catch-all, and the run went to
+`status="error"`. `finish_reason` was `stop` — nothing was truncated. The full
+reply is only recoverable from `data/chat.jsonl`; `llm_io.log` elides it at
+`_LOG_CONTENT_PREVIEW_CHARS`.
+
+This is the failure class v1.12 fixed for the critic. The planners never got it:
+`plan_chapter.py` and `plan_beat.py` each called `parse_json_array` once, bare.
+
+**The bug underneath.** `manager.start()` always re-enters the graph at
+`plan_chapter`, which re-called the model and upserted every chapter with
+`status="planned"`; `upsert_chapter` did `status = excluded.status`. The graph
+then ran `plan_beat`, which upserted beats without passing `prose`, and
+`upsert_beat` did `prose = excluded.prose`. Beat ids are deterministic, so the
+rows collided exactly. **Pressing Generate after the crash would have destroyed
+the manuscript.** Replaying the real upserts against a copy of `data/museai.db`
+erased 979 of 2745 words on chapter 1 alone, and the graph would have walked on
+into chapter 2.
+
+**Why it went unnoticed, twice.** `log_node_event` hardcoded `logger.info`, so
+`run_failed` — the only line that says a run is over — sat at INFO among
+thousands of routine node lines. `fsm.log` contained no ERROR or WARNING line at
+any severity, ever.
+
+**What replaced it**
+
+- `repair_json_text` (`llm/structured.py`) escapes unescaped double quotes inside
+  single-line JSON string values. Line-oriented, because JSON forbids a raw
+  newline in a string: the closing quote is the last quote on the line. A
+  character scanner using `,`/`}` lookahead would mangle
+  `"he said "yes", then left"`; this does not. Valid JSON is returned
+  byte-identical. Reached via `parse_json_array(..., repair=True)`, a third pass
+  after the two existing ones.
+- `llm/planning.py::call_llm_for_json_array` — the shared planner ladder. Ask,
+  parse strictly; on failure re-prompt with the model's own reply and the
+  verbatim error, up to `generation.planner_parse_retries` (new required config
+  key, default 2); when those are spent, repair. **Repair is last, never first**
+  — a re-prompt returns the model's words, the repair returns our reconstruction
+  of them, and the difference matters when the text becomes a beat's `intent`.
+  Every repair logs `event=json_repaired` at WARNING and publishes
+  `planner_repaired` to the stream, which the dashboard renders under
+  **Warnings** with an orange toast.
+- A planner **cannot degrade** the way the critic can: `parse_json_array` treats
+  an empty array as a hard failure, and there is no honest empty plan. Exhausting
+  every rung still raises.
+- **Idempotent planners.** `plan_chapter` reuses an arc's existing chapters and
+  `plan_beat` reuses a chapter's existing beats, skipping the model entirely.
+  `beat_spec` already stores the planned dict as JSON, so the reuse path
+  reconstitutes it exactly. The active chapter/beat becomes the first one whose
+  status is not `completed`, so `plan_beat` returns a pointer at the first
+  *unwritten* beat rather than always beat 0. The PAD target is **not**
+  republished on the reuse path: it was applied when the beat was first planned,
+  and re-applying it would drag the character's emotional state backwards.
+- **Defensive floor** in `memory/db.py`: `upsert_beat` now does
+  `prose = COALESCE(excluded.prose, Beats.prose)`, keeps `word_count` with the
+  text it counts, and never downgrades a `completed` beat; `upsert_chapter` never
+  downgrades a `completed` chapter. `commit` still overwrites prose, because it
+  passes real prose — so review → Regenerate → recommit still works.
+- **Log levels.** `log_node_event(node, *, level=logging.INFO, **fields)`.
+  ERROR: `manager: run_failed`, `draft_salvage_failed`, `beat_reset_failed`.
+  WARNING: `critics: parse_failed`, `critics: health` *only when degraded*,
+  `plan_*: parse_failed` and `json_repaired`, `review: review_needed`.
+  Everything else stays INFO — a warning on every healthy beat is a warning
+  nobody reads. `run_failed` also gained `after_node`, since `entry_point` says
+  where the run began, not where it broke.
+
+**Files**
+
+- Created: `museai/llm/planning.py`, `tests/test_planner_resilience.py`.
+- Modified: `museai/llm/structured.py`, `museai/core/config.py`,
+  `museai/core/logging_setup.py`, `museai/memory/db.py`, `museai/fsm/manager.py`,
+  `museai/fsm/graph.py`, `museai/fsm/nodes/plan_chapter.py`,
+  `museai/fsm/nodes/plan_beat.py`, `museai/fsm/nodes/critics.py`,
+  `museai/prompts/beat_planner.xml.j2`, `museai/prompts/chapter_planner.xml.j2`,
+  `museai/web/static/js/main.js`, `config.yaml`, `config.example.yaml`,
+  `tests/conftest.py` (+ `patch_planner_llm`), `tests/test_planners.py`,
+  `tests/test_graph.py`, `tests/test_review.py`, `tests/test_slice_quality.py`,
+  `tests/test_slice_plan_to_draft.py`, `tests/test_slice_headless.py`,
+  `tests/test_manager_error.py`, `tests/test_logs_exports.py`,
+  `tests/test_critic_resilience.py`, `README.md`.
+
+**Done-check**
+
+- `uv run pytest tests/test_planner_resilience.py -q` → `20 passed`. The
+  production reply is fixtured verbatim in `PRODUCTION_BEAT_PLAN`.
+- Full suite: `uv run pytest -q` → **`453 passed`** (v1.12 baseline was 426).
+- Log isolation still holds: **0 bytes** added to `logs/fsm.log` and
+  `logs/llm_io.log` across a full suite run.
+- **Data-loss regression, run against a copy of the real `data/museai.db`:**
+  `plan_chapter` then `plan_beat` on an already-drafted chapter, with `call_llm`
+  replaced by a function that raises if called. Result: 7 beats / 2745 words
+  unchanged, chapter statuses unchanged, no model call, and the pointer resumed
+  at `lantern-keeper-arc-1-c03`. Before this change the same replay erased 979
+  words.
+- **Live smoke** against a stub OpenAI-compatible endpoint whose beat planner
+  *always* returns the malformed payload: the run reached `status: done` (it
+  previously died), `fsm.log` shows three `parse_failed` WARNINGs (one attempt
+  plus two retries) followed by `json_repaired`, one `planner_repaired` event was
+  published, and the committed beat's `exit_state` reads
+  `Mara expresses vague regret ("It was meant to be stronger") while she works.`
+  — the dialogue quotes preserved as content.
+- `config.yaml` / `config.example.yaml` generation keys at exact parity;
+  `planner_parse_retries: -1` is rejected at boot.
+- `node --check museai/web/static/js/main.js` parses.
+
+**Known limitations**
+
+- `repair_json_text` is a heuristic. It fires only after re-prompts are spent and
+  always logs a WARNING, but a repaired plan is not literally what the model
+  wrote. It handles one field per line; a string value containing a newline is
+  not JSON and is not repaired.
+- Idempotent planners mean a story can only be re-planned by **Reset**. That is
+  the intended trade: the alternative destroyed the manuscript.
+- `_first_unfinished` returns the last element when everything is complete. No
+  caller reaches that branch (a completed chapter is never selected as active),
+  but the fallback is a floor, not a guarantee.
+- `critic_parse_failure_streak` still lives in `OrchestratorState` and resets
+  when the process restarts.
+- `data/drafts/` is never pruned; nothing rotates it.
+- The continuity critic has still made **zero tool calls with any real model,
+  ever** — `tool_calls=0` on all 40 responses of the `lantern-keeper` run.
+  `web_search` is wired, tested, and offered; the model never asks. Untouched
+  again, and still unexplained.
+- The smoke harness exercises the real app, so it writes to its own `logs/`
+  directory under the scratchpad. Only the test suite is isolated from `logs/`.

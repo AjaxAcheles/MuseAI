@@ -122,10 +122,21 @@ def _format_fields(fields: dict[str, object]) -> str:
     return " ".join(parts)
 
 
-def log_node_event(node_name: str, **fields: object) -> None:
-    """Write one structured line describing a node event to ``logs/fsm.log``."""
+def log_node_event(
+    node_name: str, *, level: int = logging.INFO, **fields: object
+) -> None:
+    """Write one structured line describing a node event to ``logs/fsm.log``.
+
+    ``level`` is keyword-only and defaults to INFO, which is what the overwhelming
+    majority of node events are: a beat drafted, a chapter committed. Reserve
+    WARNING for a run that is still going but is doing so on a degraded footing,
+    and ERROR for a run that has stopped. Every beat emits a critic health line,
+    so raising *that* to WARNING unconditionally would teach the reader to skim
+    past warnings — which is exactly how two fatal crashes went unnoticed.
+    """
     logger = get_fsm_logger()
     suffix = _format_fields(fields)
-    logger.info("node=%s %s", node_name, suffix) if suffix else logger.info(
-        "node=%s", node_name
-    )
+    if suffix:
+        logger.log(level, "node=%s %s", node_name, suffix)
+    else:
+        logger.log(level, "node=%s", node_name)
