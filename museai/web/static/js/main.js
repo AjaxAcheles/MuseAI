@@ -503,15 +503,15 @@
       });
 
       const activeIndex = nodes.findIndex((node) => node.active);
-      const gap = 110;
-      const left = 40;
+      const gap = 72;
+      const left = 30;
       const width = left + Math.max(nodes.length, 1) * gap;
-      const y = 54;
+      const y = 24;
 
       const markup = nodes
         .map((node, index) => {
           const cx = left + index * gap;
-          const radius = node.kind === "arc" ? 15 : 9;
+          const radius = node.kind === "arc" ? 10 : 6;
           const classes = ["rail-node", `is-${node.status}`];
           if (activeIndex >= 0 && index < activeIndex) classes.push("is-passed");
           if (node.active) classes.push(runStatus === "review" ? "is-blocked" : "is-active");
@@ -526,11 +526,10 @@
             .join("\n");
 
           return `
-            <g class="${classes.join(" ")}" tabindex="0" role="listitem"
+            <g class="${classes.join(" ")}" tabindex="0" role="listitem" data-tip="${escapeHtml(tip)}"
                aria-label="${escapeHtml(node.label)}, status ${escapeHtml(node.status)}">
-              <title>${escapeHtml(tip)}</title>
               <circle class="rail-${node.kind}" cx="${cx}" cy="${y}" r="${radius}"></circle>
-              <text class="rail-label" x="${cx}" y="${y + 34}" text-anchor="middle">${escapeHtml(node.label)}</text>
+              <text class="rail-label" x="${cx}" y="${y + 24}" text-anchor="middle">${escapeHtml(node.label)}</text>
             </g>`;
         })
         .join("");
@@ -538,11 +537,12 @@
       const lastX = left + Math.max(nodes.length - 1, 0) * gap;
       const fillTo = activeIndex >= 0 ? left + activeIndex * gap : left;
       rail.innerHTML = `
-        <svg class="rail" viewBox="0 0 ${width} 100" role="list" aria-label="Story progress rail">
+        <svg class="rail" viewBox="0 0 ${width} 58" role="list" aria-label="Story progress rail">
           <line class="rail-track" x1="${left}" y1="${y}" x2="${lastX}" y2="${y}"></line>
           <line class="rail-fill" x1="${left}" y1="${y}" x2="${fillTo}" y2="${y}"></line>
           ${markup}
         </svg>`;
+      MuseAI.attachNodeTooltips(rail);
 
       if (railCaption) {
         const active = nodes[activeIndex];
@@ -1017,6 +1017,18 @@
     const recordJson = byId("record-json");
     let records = [];
 
+    // The chosen record type survives leaving the tab. localStorage can be
+    // unavailable (privacy modes), in which case the select simply starts fresh.
+    const TYPE_KEY = "museai.database.record-type";
+    try {
+      const stored = window.localStorage.getItem(TYPE_KEY);
+      if (stored && Array.from(typeSelect.options).some((option) => option.value === stored)) {
+        typeSelect.value = stored;
+      }
+    } catch (error) {
+      /* storage unavailable */
+    }
+
     const preview = (value) => {
       if (value === null || value === undefined) return "";
       const text = String(value);
@@ -1079,7 +1091,14 @@
       render(records.length ? Object.keys(records[0]) : []);
     }
 
-    typeSelect.addEventListener("change", load);
+    typeSelect.addEventListener("change", () => {
+      try {
+        window.localStorage.setItem(TYPE_KEY, typeSelect.value);
+      } catch (error) {
+        /* storage unavailable */
+      }
+      load();
+    });
     byId("db-refresh").addEventListener("click", load);
 
     let debounce = null;

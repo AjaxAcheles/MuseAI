@@ -15,6 +15,7 @@ from __future__ import annotations
 from quart import Blueprint, jsonify, render_template, request
 
 from museai.core import chat_log
+from museai.llm.client import live_chat_calls
 from museai.web.app import get_config
 
 bp = Blueprint("chat", __name__)
@@ -53,4 +54,14 @@ async def history():
     limit = _clamp_limit(request.args.get("limit"))
     path = chat_log.default_path(get_config().event_log_path)
     records = chat_log.replay(path, limit)
-    return jsonify({"ok": True, "returned": len(records), "records": records})
+    # In-flight calls are not on disk yet; without them a page that loads
+    # mid-call would show the call empty until it ends, losing every token
+    # that streamed before the page arrived.
+    return jsonify(
+        {
+            "ok": True,
+            "returned": len(records),
+            "records": records,
+            "partials": live_chat_calls(),
+        }
+    )

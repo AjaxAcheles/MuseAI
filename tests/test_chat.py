@@ -15,7 +15,13 @@ import pytest
 from museai.core import chat_log
 from museai.core.config import EndpointConfig
 from museai.core.stream_bus import bus
-from museai.llm.client import LLMCallError, _ThinkTagSplitter, call_llm
+from museai.llm.client import (
+    _LIVE_CALLS,
+    LLMCallError,
+    _ThinkTagSplitter,
+    call_llm,
+    live_chat_calls,
+)
 
 MESSAGES = [{"role": "user", "content": "Plan a chapter."}]
 
@@ -227,6 +233,52 @@ async def test_failed_call_ends_with_error(endpoint, chat_events):
     assert "400" in end["error"]
 
 
+async def test_tokens_carry_a_monotonic_seq(endpoint, chat_events):
+    """The seq lets a reloading page discard tokens its history partial covered."""
+    transport = transport_for(
+        delta_chunk(reasoning_content="mull"),
+        delta_chunk(content="Ans"),
+        delta_chunk(content="wer."),
+    )
+    await call_llm(endpoint, MESSAGES, stream=True, transport=transport)
+    seqs = [e["data"]["seq"] for e in chat_events if e["type"] == "chat_token"]
+    assert seqs == list(range(1, len(seqs) + 1))
+
+
+async def test_in_flight_call_is_visible_with_its_partial_text(endpoint):
+    """Mid-stream, `live_chat_calls` holds what has streamed so far; after the
+    call ends it holds nothing — the transcript owns finished calls."""
+    snapshots: list[list[dict]] = []
+
+    async def on_token(token: str) -> None:
+        snapshots.append(live_chat_calls())
+
+    transport = transport_for(
+        delta_chunk(reasoning_content="mull it over"),
+        delta_chunk(content="Answer."),
+    )
+    await call_llm(
+        endpoint, MESSAGES, agent="drafter", stream=True, on_token=on_token, transport=transport
+    )
+
+    assert snapshots, "on_token never fired"
+    live = snapshots[-1]
+    assert len(live) == 1
+    assert live[0]["agent"] == "drafter"
+    assert live[0]["messages"] == MESSAGES
+    assert live[0]["thinking"] == "mull it over"
+    assert live[0]["seq"] >= 1
+
+    assert live_chat_calls() == []
+
+
+async def test_a_failed_call_leaves_no_live_entry(endpoint):
+    transport = httpx.MockTransport(lambda r: httpx.Response(400, content=b"nope"))
+    with pytest.raises(LLMCallError):
+        await call_llm(endpoint, MESSAGES, transport=transport)
+    assert live_chat_calls() == []
+
+
 async def test_chat_events_never_carry_the_api_key(endpoint, chat_events):
     payload = {"choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}]}
     transport = httpx.MockTransport(lambda r: httpx.Response(200, json=payload))
@@ -319,7 +371,36 @@ async def test_history_replays_the_transcript(config_factory, web_app):
 async def test_history_is_empty_before_any_call(config_factory, web_app):
     app = await web_app(config_factory())
     body = await (await app.test_client().get("/chat/history")).get_json()
-    assert body == {"ok": True, "returned": 0, "records": []}
+    assert body == {"ok": True, "returned": 0, "records": [], "partials": []}
+
+
+async def test_history_carries_in_flight_partials(config_factory, web_app, monkeypatch):
+    """A page loading mid-call gets the tokens that streamed before it arrived."""
+    app = await web_app(config_factory())
+    monkeypatch.setitem(
+        _LIVE_CALLS,
+        "live1",
+        {
+            "id": "live1",
+            "agent": "drafter",
+            "model": "test-model",
+            "ts": 1.0,
+            "stream": True,
+            "messages": MESSAGES,
+            "thinking": "half a thought",
+            "text": "half a sen",
+            "seq": 7,
+        },
+    )
+
+    body = await (await app.test_client().get("/chat/history")).get_json()
+    assert body["records"] == []
+    assert len(body["partials"]) == 1
+    partial = body["partials"][0]
+    assert partial["id"] == "live1"
+    assert partial["thinking"] == "half a thought"
+    assert partial["text"] == "half a sen"
+    assert partial["seq"] == 7
 
 
 async def test_history_respects_the_limit(config_factory, web_app):

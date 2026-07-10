@@ -162,6 +162,7 @@
         responseEl: el.querySelector(".chat-response"),
         footEl: el.querySelector(".chat-call-foot"),
         done: false,
+        seenSeq: 0, // tokens up to this server sequence arrived via the history partial
       };
       calls.set(id, entry);
       messagesEl.appendChild(el);
@@ -197,6 +198,9 @@
     function onChatToken(data) {
       let entry = calls.get(data.id);
       if (entry && entry.done) return;
+      // The history partial already carried this token's text; appending it
+      // again would duplicate everything received before history rendered.
+      if (entry && data.seq && data.seq <= entry.seenSeq) return;
       const wasPinned = pinned();
       if (!entry) entry = createCall(data.id, data.agent || "system", null);
       if (entry.stateEl.dataset.state !== "streaming") {
@@ -206,7 +210,12 @@
       }
       if (data.kind === "thinking") {
         entry.thinkingDetails.hidden = false;
-        appendToken(entry.thinkingBody, data.text);
+        const body = entry.thinkingBody;
+        // The thinking box scrolls on its own once it overflows; keep it
+        // pinned to the newest tokens unless the reader scrolled back up.
+        const nearBottom = body.scrollHeight - body.scrollTop - body.clientHeight < 60;
+        appendToken(body, data.text);
+        if (nearBottom) body.scrollTop = body.scrollHeight;
       } else {
         appendToken(entry.responseEl, data.text);
       }
@@ -287,6 +296,29 @@
       });
     }
 
+    /**
+     * Calls still in flight when history was fetched. The transcript on disk
+     * has their start but no end, so without this the thinking and prose that
+     * streamed before this page loaded would simply vanish. Runs after
+     * `renderHistory`, which is why it also un-marks them as interrupted.
+     */
+    function renderPartials(partials) {
+      partials.forEach((partial) => {
+        let entry = calls.get(partial.id);
+        if (!entry) entry = createCall(partial.id, partial.agent || "system", partial);
+        if (entry.done) return;
+        entry.seenSeq = partial.seq || 0;
+        if (partial.thinking) {
+          entry.thinkingDetails.hidden = false;
+          entry.thinkingBody.textContent = partial.thinking;
+          entry.thinkingBody.scrollTop = entry.thinkingBody.scrollHeight;
+        }
+        if (partial.text) entry.responseEl.textContent = partial.text;
+        entry.stateEl.dataset.state = "streaming";
+        entry.stateEl.textContent = "streaming";
+      });
+    }
+
     let historyReady = false;
     const backlog = [];
 
@@ -319,7 +351,10 @@
       connect();
       try {
         const payload = await getJSON("/chat/history?limit=200");
-        if (payload.ok) renderHistory(payload.records || []);
+        if (payload.ok) {
+          renderHistory(payload.records || []);
+          renderPartials(payload.partials || []);
+        }
       } finally {
         historyReady = true;
         backlog.forEach(([kind, data]) => {

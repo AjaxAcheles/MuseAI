@@ -65,7 +65,9 @@ window.MuseAI = window.MuseAI || {};
   const escapeHtml = (value) => {
     const div = document.createElement("div");
     div.textContent = value == null ? "" : String(value);
-    return div.innerHTML;
+    // Quotes too: this helper is used inside attribute values (aria-label,
+    // data-tip), where a bare double quote in story text would end the attribute.
+    return div.innerHTML.replace(/"/g, "&quot;");
   };
 
   const formatNumber = (value) => (typeof value === "number" ? value.toLocaleString() : "—");
@@ -170,6 +172,45 @@ window.MuseAI = window.MuseAI || {};
     element.classList.toggle("is-ok", message !== "" && Boolean(ok));
   }
 
+  /**
+   * Instant hover/focus tooltips for the SVG node maps (dashboard rail, seed
+   * timeline). Every element carrying `data-tip` inside `container` gets one;
+   * the tip text renders with its newlines. One shared tooltip element serves
+   * the whole document, so re-rendering a container just re-attaches listeners
+   * to its fresh nodes.
+   */
+  function attachNodeTooltips(container) {
+    if (!container) return;
+    let tip = document.getElementById("node-tooltip");
+    if (!tip) {
+      tip = document.createElement("div");
+      tip.id = "node-tooltip";
+      tip.className = "node-tooltip";
+      tip.hidden = true;
+      document.body.appendChild(tip);
+      window.addEventListener("scroll", () => (tip.hidden = true), { passive: true });
+    }
+
+    const hide = () => (tip.hidden = true);
+    container.querySelectorAll("[data-tip]").forEach((node) => {
+      const show = () => {
+        tip.textContent = node.dataset.tip;
+        tip.hidden = false;
+        const rect = node.getBoundingClientRect();
+        const width = tip.offsetWidth;
+        const left = Math.min(Math.max(rect.left + rect.width / 2 - width / 2, 8), window.innerWidth - width - 8);
+        let top = rect.top - tip.offsetHeight - 10;
+        if (top < 8) top = rect.bottom + 10;
+        tip.style.left = `${left}px`;
+        tip.style.top = `${top}px`;
+      };
+      node.addEventListener("mouseenter", show);
+      node.addEventListener("mouseleave", hide);
+      node.addEventListener("focus", show);
+      node.addEventListener("blur", hide);
+    });
+  }
+
   /** Standard empty state. Honest absence of data, never a promise of a future feature. */
   function emptyState(title, hint) {
     return `<div class="empty-state">
@@ -186,6 +227,7 @@ window.MuseAI = window.MuseAI || {};
   MuseAI.formatProgress = formatProgress;
   MuseAI.initTabs = initTabs;
   MuseAI.createDrawer = createDrawer;
+  MuseAI.attachNodeTooltips = attachNodeTooltips;
   MuseAI.toast = toast;
   MuseAI.setInlineResult = setInlineResult;
   MuseAI.emptyState = emptyState;

@@ -19,6 +19,7 @@ session ritual.
 | v1.11 | View Chat tab: every agent's LLM traffic (prompts, thinking, streamed responses) live + replayed; all-agent streaming; committed-story chapter label fix | done |
 | v1.12 | Critic resilience: re-prompt + degrade instead of killing the run; PAD focal-character resolution; crash salvage; test log isolation | done |
 | v1.13 | Planner resilience: re-prompt + JSON quote repair; idempotent planners (resume no longer destroys committed prose); ERROR/WARNING log levels | done |
+| v1.14 | Web UI polish: compact story rail + instant node tooltips; View Chat keeps in-flight thinking across reloads and auto-scrolls it; richer seed timeline; Database tab remembers its record type | done |
 
 Next up: v1 complete
 
@@ -1119,3 +1120,67 @@ any severity, ever.
   again, and still unexplained.
 - The smoke harness exercises the real app, so it writes to its own `logs/`
   directory under the scratchpad. Only the test suite is isolated from `logs/`.
+
+## v1.14 — done
+
+Four user-reported web UI fixes. No engine changes.
+
+**Dashboard: story progress rail.** The rail was a headline-sized panel whose
+information density did not justify it. It is now a slim strip: SVG height
+100 → 58, node radii 15/9 → 10/6, gap 110 → 72, and the panel header sits on
+one compact line. Hover behaviour is real now: the sluggish native SVG
+`<title>` tooltips are replaced by an instant custom tooltip
+(`MuseAI.attachNodeTooltips` in `ui.js`, one shared element per document)
+showing description, status, committed words, and beats-committed per node,
+with a visible hover highlight on the node itself.
+
+**View Chat: thinking tokens survived only in the moment.** Leaving the tab
+mid-call and returning rebuilt the page from `data/chat.jsonl`, which only
+knows a call once it *ends* — everything already streamed was gone until
+`chat_end` arrived. Fix: `client.py` keeps an in-memory registry of in-flight
+calls (`_LIVE_CALLS`) accumulating thinking/response text; `GET /chat/history`
+returns it as `partials`; `chat.js` renders partials after history and flips
+them back from "interrupted" to "streaming". Each `chat_token` now carries a
+per-call monotonic `seq`, and the partial records the last seq it includes, so
+tokens buffered while history was loading are not applied twice. `chat_end`
+still rewrites the full text, so any residual gap self-heals. The thinking box
+also auto-scrolls now: pinned to the newest tokens unless the reader scrolled
+up (same near-bottom rule as the transcript itself).
+
+**Seed & Plan: preview timeline.** Arc nodes carry the same instant tooltips
+(full description, position N of M; the Start node shows genre, word target,
+and premise), each arc is captioned with the start of its description, and
+below the badges an itemised preview lists every arc, thread (status,
+priority), and character (with PAD) the seed declares — strictly seed
+contents, no invented chapters or beats, so it is richer than the dashboard
+rail by exactly the data it legitimately has.
+
+**Database: record type resets on every visit.** The selected record type now
+persists in `localStorage` (guarded — privacy modes without storage just start
+fresh) and is restored on load only if it still matches an existing option.
+
+`MuseAI.escapeHtml` now also escapes double quotes: it was already being
+interpolated into attribute values (`aria-label`, now `data-tip`), where a
+bare `"` in story text — dialogue — would have ended the attribute.
+
+**Done-check**
+
+- `uv run pytest -q` → **457 passed** (baseline 453), zero failures. New tests:
+  chat_token seq monotonicity, mid-stream `live_chat_calls` visibility +
+  emptiness after end, failed-call registry cleanup, `/chat/history` partials
+  (and the exact-shape empty-history test updated for the new key).
+- `node --check` parses all four modified JS files.
+- Live boot: `/chat/history` serves `partials`; `/`, `/chat`, `/setup`,
+  `/database` and all changed static assets serve 200.
+
+**Known limitations**
+
+- No headless browser is available in this environment, so hover tooltips,
+  thinking auto-scroll, and the localStorage restore were verified by code
+  path and served assets, not by driving a real browser.
+- `_LIVE_CALLS` is in-process state: a server restart mid-call loses the
+  partial (the transcript never had it), and the call shows as interrupted —
+  which is then true.
+- The seq guard dedupes only against the history partial; it does not attempt
+  general SSE replay protection (EventSource reconnects already re-subscribe
+  cleanly through `bus.last_snapshot`).

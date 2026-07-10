@@ -104,9 +104,19 @@ window.MuseAI = window.MuseAI || {};
     };
   }
 
+  /** Trim to `max` characters on a word boundary, with an ellipsis when cut. */
+  function truncate(text, max) {
+    const value = (text || "").trim();
+    if (value.length <= max) return value;
+    return `${value.slice(0, max).replace(/\s+\S*$/, "")}…`;
+  }
+
   /**
-   * Draw the seed as an SVG timeline: a project node, then one node per arc.
-   * Only what the seed actually contains is drawn — no invented chapters or beats.
+   * Draw the seed as an SVG timeline: a project node, then one node per arc,
+   * each captioned with the start of its description and carrying the full
+   * description in its hover tooltip. Below the badges, an itemised preview
+   * lists every arc, thread, and character the seed declares. Only what the
+   * seed actually contains is drawn — no invented chapters or beats.
    */
   function renderSeedTimeline(container, seed) {
     if (!container) return;
@@ -121,6 +131,8 @@ window.MuseAI = window.MuseAI || {};
     }
 
     const summary = summarizeSeed(seed);
+    const threads = Array.isArray(seed && seed.threads) ? seed.threads : [];
+    const characters = Array.isArray(seed && seed.characters) ? seed.characters : [];
     const gap = 150;
     const left = 70;
     const width = left + Math.max(arcs.length, 1) * gap + 40;
@@ -131,24 +143,67 @@ window.MuseAI = window.MuseAI || {};
         const cx = left + (index + 1) * gap;
         const label = `Arc ${index + 1}`;
         const description = (arc && arc.description) || "";
+        const tip = `${label} of ${arcs.length}\n${description}`;
         return `
-          <g class="tl-node" tabindex="0" role="listitem"
+          <g class="tl-node" tabindex="0" role="listitem" data-tip="${escapeHtml(tip)}"
              aria-label="${escapeHtml(label)}: ${escapeHtml(description)}">
-            <title>${escapeHtml(label)} — ${escapeHtml(description)}</title>
             <circle class="tl-arc" cx="${cx}" cy="${y}" r="16"></circle>
             <text class="tl-label" x="${cx}" y="${y + 38}" text-anchor="middle">${escapeHtml(label)}</text>
+            <text class="tl-snippet" x="${cx}" y="${y + 54}" text-anchor="middle">${escapeHtml(truncate(description, 22))}</text>
           </g>`;
       })
       .join("");
 
     const endX = left + Math.max(arcs.length, 1) * gap;
 
+    const projectTip = [
+      `Project — ${summary.title}`,
+      summary.genre ? `Genre: ${summary.genre}` : null,
+      summary.wordTarget ? `Target: ${MuseAI.formatNumber(summary.wordTarget)} words` : null,
+      summary.premise ? truncate(summary.premise, 220) : null,
+    ]
+      .filter(Boolean)
+      .join("\n");
+
+    const detailGroup = (title, items) =>
+      items.length
+        ? `<div class="timeline-detail-group">
+             <h4>${escapeHtml(title)}</h4>
+             <ul>${items.join("")}</ul>
+           </div>`
+        : "";
+
+    const arcItems = arcs.map(
+      (arc, index) => `<li><strong>Arc ${index + 1}</strong> — ${escapeHtml((arc && arc.description) || "")}</li>`
+    );
+    const threadItems = threads.map((thread) => {
+      const meta = [
+        thread && thread.status ? `status ${thread.status}` : null,
+        thread && typeof thread.priority_score === "number" ? `priority ${thread.priority_score}` : null,
+      ]
+        .filter(Boolean)
+        .join(" · ");
+      return `<li>${escapeHtml((thread && thread.description) || "")}${meta ? ` <span class="detail-meta">(${escapeHtml(meta)})</span>` : ""}</li>`;
+    });
+    const characterItems = characters.map((character) => {
+      const pad = character && character.pad;
+      const padMeta = pad
+        ? ["pleasure", "arousal", "dominance"]
+            .filter((axis) => typeof pad[axis] === "number")
+            .map((axis) => `${axis[0].toUpperCase()} ${pad[axis]}`)
+            .join(" · ")
+        : "";
+      return `<li><strong>${escapeHtml((character && character.name) || "")}</strong>${
+        character && character.description ? ` — ${escapeHtml(truncate(character.description, 120))}` : ""
+      }${padMeta ? ` <span class="detail-meta">(${escapeHtml(padMeta)})</span>` : ""}</li>`;
+    });
+
     container.innerHTML = `
-      <svg class="timeline" viewBox="0 0 ${width} 120" role="list"
+      <svg class="timeline" viewBox="0 0 ${width} 130" role="list"
            aria-label="Seed timeline: ${arcs.length} arc${arcs.length === 1 ? "" : "s"}">
         <line class="tl-rail" x1="${left}" y1="${y}" x2="${endX}" y2="${y}"></line>
-        <g class="tl-node" tabindex="0" role="listitem" aria-label="Project ${escapeHtml(summary.title)}">
-          <title>Project — ${escapeHtml(summary.title)}</title>
+        <g class="tl-node" tabindex="0" role="listitem" data-tip="${escapeHtml(projectTip)}"
+           aria-label="Project ${escapeHtml(summary.title)}">
           <circle class="tl-project" cx="${left}" cy="${y}" r="11"></circle>
           <text class="tl-label" x="${left}" y="${y + 38}" text-anchor="middle">Start</text>
         </g>
@@ -159,7 +214,13 @@ window.MuseAI = window.MuseAI || {};
         <span class="badge text-bg-secondary">${summary.threads} thread${summary.threads === 1 ? "" : "s"}</span>
         <span class="badge text-bg-secondary">${summary.characters} character${summary.characters === 1 ? "" : "s"}</span>
         ${summary.wordTarget ? `<span class="badge text-bg-secondary">${MuseAI.formatNumber(summary.wordTarget)}-word target</span>` : ""}
+      </div>
+      <div class="timeline-detail">
+        ${detailGroup("Arcs", arcItems)}
+        ${detailGroup("Threads", threadItems)}
+        ${detailGroup("Characters", characterItems)}
       </div>`;
+    MuseAI.attachNodeTooltips(container);
   }
 
   /** POST the seed. The server validates again and its verdict is final. */

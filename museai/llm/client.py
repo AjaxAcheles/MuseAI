@@ -499,6 +499,20 @@ def _chat_messages(messages: Sequence[Mapping[str, Any]]) -> list[dict]:
     return [dict(m) for m in messages]
 
 
+# Calls that have published ``chat_start`` but not yet ``chat_end``, with the
+# thinking and response text accumulated so far. The transcript on disk only
+# knows a call once it ends; this registry is what lets a View Chat page that
+# loads mid-call show the tokens that streamed before it arrived. ``seq``
+# counts the tokens published for the call so that page can also discard any
+# it already received through the snapshot.
+_LIVE_CALLS: dict[str, dict[str, Any]] = {}
+
+
+def live_chat_calls() -> list[dict[str, Any]]:
+    """Snapshot every in-flight call for the View Chat history endpoint."""
+    return [dict(entry) for entry in _LIVE_CALLS.values()]
+
+
 async def _chat_start(
     call_id: str, agent: str, endpoint: EndpointConfig, messages: Sequence[Mapping[str, Any]], stream: bool
 ) -> None:
@@ -511,6 +525,7 @@ async def _chat_start(
         "messages": _chat_messages(messages),
     }
     chat_log.record({"event": "chat_start", **data})
+    _LIVE_CALLS[call_id] = {**data, "thinking": "", "text": "", "seq": 0}
     await bus.publish("chat_start", data)
 
 
@@ -545,6 +560,7 @@ async def _chat_end(
         "error": error,
     }
     chat_log.record({"event": "chat_end", **data})
+    _LIVE_CALLS.pop(call_id, None)
     await bus.publish("chat_end", data)
 
 
@@ -602,8 +618,15 @@ async def call_llm(
     await _chat_start(call_id, agent, endpoint, messages, stream)
 
     async def on_chat(kind: str, text: str) -> None:
+        live = _LIVE_CALLS.get(call_id)
+        seq = 0
+        if live is not None:
+            live["seq"] += 1
+            seq = live["seq"]
+            live["thinking" if kind == "thinking" else "text"] += text
         await bus.publish(
-            "chat_token", {"id": call_id, "agent": agent, "kind": kind, "text": text}
+            "chat_token",
+            {"id": call_id, "agent": agent, "kind": kind, "text": text, "seq": seq},
         )
 
     while attempt < MAX_ATTEMPTS:

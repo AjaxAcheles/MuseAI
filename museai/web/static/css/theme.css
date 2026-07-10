@@ -241,18 +241,30 @@ code { color: var(--accent); }
 
 /* ---------- Progress rail ---------- */
 
-.rail-panel { padding-bottom: 0.75rem; }
+/* A slim strip: the rail is a wayfinding aid, not a headline panel. The
+   detail lives in the hover tooltips, so the strip itself stays short. */
+.rail-panel { padding-top: 0.6rem; padding-bottom: 0.45rem; }
 .rail-wrap { overflow-x: auto; }
 
-.rail { width: 100%; min-width: 480px; height: 100px; }
+.rail-header { display: flex; align-items: baseline; gap: 0.75rem; margin-bottom: 0.25rem; }
+.rail-header .panel-title { font-size: 0.92rem; margin: 0; }
+.rail-header .panel-subtitle { font-size: 0.82rem; }
+
+.rail { width: 100%; min-width: 480px; height: 58px; }
 
 .rail-track { stroke: var(--line); stroke-width: 3; }
 .rail-fill  { stroke: var(--accent); stroke-width: 3; }
 
-.rail-node circle { fill: var(--ink-2); stroke: var(--line); stroke-width: 2; transition: fill 0.2s ease; }
+.rail-node circle { fill: var(--ink-2); stroke: var(--line); stroke-width: 2; transition: fill 0.2s ease, r 0.15s ease; }
 .rail-node .rail-label { fill: var(--text-2); font-size: 0.72rem; }
+.rail-node { cursor: pointer; }
 .rail-node:focus { outline: none; }
-.rail-node:focus circle, .rail-node:hover circle { stroke: var(--accent); }
+.rail-node:focus circle, .rail-node:hover circle {
+  stroke: var(--accent);
+  stroke-width: 3;
+  filter: drop-shadow(0 0 4px color-mix(in srgb, var(--accent) 55%, transparent));
+}
+.rail-node:focus .rail-label, .rail-node:hover .rail-label { fill: var(--text-1); }
 
 .rail-node.is-passed circle,
 .rail-node.is-completed circle { fill: var(--accent); stroke: var(--accent); }
@@ -271,19 +283,56 @@ code { color: var(--accent); }
   filter: drop-shadow(0 0 6px color-mix(in srgb, var(--run-pause) 60%, transparent));
 }
 
+/* ---------- Node tooltip (rail + seed timeline) ---------- */
+
+.node-tooltip {
+  position: fixed;
+  z-index: 1080;
+  max-width: 22rem;
+  padding: 0.5rem 0.7rem;
+  border: 1px solid var(--line);
+  border-radius: calc(var(--radius) * 0.6);
+  background: var(--ink-1);
+  color: var(--text-1);
+  font-size: 0.8rem;
+  line-height: 1.45;
+  white-space: pre-line;
+  box-shadow: 0 6px 20px rgb(0 0 0 / 0.35);
+  pointer-events: none;
+}
+
 /* ---------- Seed timeline preview ---------- */
 
 .timeline-wrap { overflow-x: auto; padding: 0.5rem 0; }
-.timeline { width: 100%; min-width: 360px; height: 120px; }
+.timeline { width: 100%; min-width: 360px; height: 130px; }
 
 .tl-rail { stroke: var(--line); stroke-width: 3; }
 .tl-project { fill: var(--accent); }
 .tl-arc { fill: var(--ink-2); stroke: var(--accent); stroke-width: 2; }
 .tl-label { fill: var(--text-2); font-size: 0.75rem; }
+.tl-snippet { fill: var(--text-2); font-size: 0.62rem; opacity: 0.85; }
+.tl-node { cursor: pointer; }
 .tl-node:focus { outline: none; }
-.tl-node:focus .tl-arc, .tl-node:hover .tl-arc { fill: var(--accent); }
+.tl-node:focus .tl-arc, .tl-node:hover .tl-arc {
+  fill: var(--accent);
+  filter: drop-shadow(0 0 4px color-mix(in srgb, var(--accent) 55%, transparent));
+}
 
 .timeline-badges { display: flex; gap: 0.5rem; flex-wrap: wrap; margin-top: 0.5rem; }
+
+/* The itemised preview under the timeline: everything the seed declares,
+   nothing the planners have not created yet. */
+.timeline-detail { margin-top: 0.75rem; display: grid; gap: 0.6rem; }
+.timeline-detail-group h4 {
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-2);
+  margin: 0 0 0.25rem;
+}
+.timeline-detail-group ul { margin: 0; padding-left: 1.1rem; }
+.timeline-detail-group li { font-size: 0.85rem; color: var(--text-1); margin-bottom: 0.15rem; }
+.timeline-detail-group li .detail-meta { color: var(--text-2); font-size: 0.78rem; }
 
 /* ---------- Studio split ---------- */
 
