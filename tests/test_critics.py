@@ -25,7 +25,6 @@ PACKAGE = {
         "intent": "Mara finds the letter.",
         "entry_state": "A routine morning.",
         "exit_state": "Mara is holding her own handwriting.",
-        "word_target": 600,
         "focal_character_id": "char-mara",
     },
     "pad_constraint": "Energy with nowhere to go.",

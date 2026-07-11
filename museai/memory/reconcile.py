@@ -61,7 +61,6 @@ def _apply_beat_commit(conn, event: dict) -> None:
         ),
         beat_spec=(existing["beat_spec"] if existing is not None else None),
         pad_constraint=(existing["pad_constraint"] if existing is not None else None),
-        word_target=(existing["word_target"] if existing is not None else None),
         prose=event.get("prose_delta"),
         word_count=event.get("word_count", 0),
         status="completed",

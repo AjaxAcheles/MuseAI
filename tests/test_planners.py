@@ -79,7 +79,7 @@ BEATS_JSON = """```json
 
 def _response(text: str) -> SimpleNamespace:
     """The only attribute the planners read off an ``LLMResponse``."""
-    return SimpleNamespace(text=text)
+    return SimpleNamespace(text=text, tool_calls=[])
 
 
 @pytest.fixture
@@ -282,7 +282,6 @@ async def test_plan_beat_writes_ordered_rows_with_pad_constraints(seeded, monkey
 
     assert [row["ordering"] for row in rows] == [1, 2]
     assert [row["status"] for row in rows] == ["active", "planned"]
-    assert [row["word_target"] for row in rows] == [550, 700]
 
     # The beat plan is the only model call: PAD translation is a table lookup.
     assert len(calls) == 1
@@ -417,7 +416,7 @@ FLAT_HOT_BEATS = """```json
 ]
 ```"""
 
-# The varied re-plan: one peak, two calmer beats. Distinct word targets so the
+# The varied re-plan: one peak, two calmer beats. Distinct intents so the
 # test can tell which plan was accepted.
 VARIED_BEATS = """```json
 [
@@ -521,10 +520,11 @@ async def test_plan_beat_reprompts_once_for_a_flat_hot_arc(seeded, monkeypatch):
     rows = get_beats_for_chapter(conn, chapter_id)
     conn.close()
 
-    # The flat-hot plan was re-prompted, and the varied re-plan (word_target 333)
-    # is what got stored — not the flat one (word_target 400).
+    # The flat-hot plan was re-prompted, and the varied re-plan is what got
+    # stored — not the flat one ("Terror one." etc).
     assert replies == []  # both replies consumed: one re-prompt happened
-    assert [row["word_target"] for row in rows] == [333, 333, 333]
+    intents = [json.loads(row["beat_spec"])["intent"] for row in rows]
+    assert intents == ["A quiet opening.", "The peak.", "The settling."]
     assert any(e["type"] == "planner_intensity" for e in events)
 
 

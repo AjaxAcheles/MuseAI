@@ -70,8 +70,10 @@ class GenerationConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    word_count_target: int
-    beat_word_target: int
+    # Whole-manuscript stop signal. 0, empty, or absent means no word limit: the
+    # run ends only when every outlined beat is committed. A seeded project's own
+    # target takes precedence over this value.
+    word_count_target: int | None = None
     revision_retry_cap: int
     max_agent_iterations: int
     recent_prose_beats: int
@@ -124,6 +126,16 @@ class GenerationConfig(BaseModel):
     # Fraction of a chapter's beats that may be hot before the plan is re-prompted.
     intensity_flat_fraction: float
 
+    @field_validator("word_count_target", mode="before")
+    @classmethod
+    def _optional_target(cls, value: object) -> object:
+        """0, None, and "" all mean "no limit"; a negative target is a typo."""
+        if value is None or value == 0 or (isinstance(value, str) and not value.strip()):
+            return None
+        if isinstance(value, int) and value < 0:
+            raise ValueError(f"word_count_target must be >= 0 or empty, got {value}")
+        return value
+
     @field_validator(
         "passive_voice_threshold",
         "repetition_threshold",
@@ -175,8 +187,30 @@ class AppConfig(BaseModel):
     event_log_path: str = "data/events.jsonl"
     # Dev-only reset route guard. Production deployments should set this false.
     allow_reset: bool = True
-    # Seconds the continuity critic's web_search tool waits on a search engine.
+    # Seconds the agents' web_search tool waits on a search engine.
     web_search_timeout: int = 10
+
+
+def persist_project_id(project_id: str, path: str | Path = "config.yaml") -> AppConfig:
+    """Rewrite ``project_id`` in the config file and return the reloaded config.
+
+    Edits the raw YAML document rather than dumping a resolved ``AppConfig`` so
+    unresolved ``${VAR}`` references (the API key) survive the write.
+    """
+    cfg_path = Path(path)
+    if not cfg_path.is_file():
+        raise ConfigError(f"config file not found: {cfg_path}")
+    try:
+        raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    except yaml.YAMLError as exc:
+        raise ConfigError(f"could not parse YAML in {cfg_path}: {exc}") from exc
+    if not isinstance(raw, dict):
+        raise ConfigError(
+            f"config root must be a mapping, got {type(raw).__name__}: {cfg_path}"
+        )
+    raw["project_id"] = project_id
+    cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+    return load_config(cfg_path)
 
 
 def load_config(path: str | Path = "config.yaml") -> AppConfig:

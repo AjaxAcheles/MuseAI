@@ -9,8 +9,10 @@ MuseAI v1 is a **complete but deliberately narrow** product: an outline-driven
 autonomous fiction drafter. Its scope is exactly:
 
 - Chapter + Beat planning.
-- A single web-searching continuity critic.
+- A single continuity critic.
 - A draft → audit → revise loop.
+- Every LLM agent runs the bounded tool loop with `web_search`
+  (see `docs/agent-tools.md` for the tool roster and the designed next wave).
 - SQLite + an append-only event log.
 - A live web UI.
 

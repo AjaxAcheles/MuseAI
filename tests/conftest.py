@@ -42,7 +42,6 @@ from museai.web.app import create_app  # noqa: E402
 
 _GENERATION_DEFAULTS = dict(
     word_count_target=1500,
-    beat_word_target=400,
     revision_retry_cap=3,
     max_agent_iterations=6,
     recent_prose_beats=4,
@@ -195,7 +194,10 @@ def patch_planner_llm(monkeypatch, *, chapter=None, beat=None) -> None:
     through `museai.llm.planning.call_llm_for_json_array`, which owns the
     re-prompt-and-repair ladder. Patching that away would skip the ladder, so
     tests patch the `call_llm` *inside* it and dispatch on the `agent` kwarg.
+    Since the planners gained tools, that inner call runs through the agent
+    loop, so the loop's own `call_llm` is patched with the same dispatch.
     """
+    from museai.fsm.tools import loop as loop_module
     from museai.llm import planning as planning_module
 
     async def dispatch(endpoint, messages, **kwargs):
@@ -206,3 +208,4 @@ def patch_planner_llm(monkeypatch, *, chapter=None, beat=None) -> None:
         return await fake(endpoint, messages, **kwargs)
 
     monkeypatch.setattr(planning_module, "call_llm", dispatch)
+    monkeypatch.setattr(loop_module, "call_llm", dispatch)

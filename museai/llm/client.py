@@ -529,6 +529,25 @@ async def _chat_start(
     await bus.publish("chat_start", data)
 
 
+def _tool_call_summaries(tool_calls: Sequence[Mapping[str, Any]] | None) -> list[dict]:
+    """Name plus parsed arguments per requested tool call, for the transcript.
+
+    Arguments arrive as a JSON string on the wire; the View Chat page wants the
+    object. Unparseable text is kept verbatim rather than dropped.
+    """
+    summaries: list[dict] = []
+    for call in tool_calls or []:
+        function = call.get("function") or {}
+        arguments: Any = function.get("arguments")
+        if isinstance(arguments, str) and arguments.strip():
+            try:
+                arguments = json.loads(arguments)
+            except (json.JSONDecodeError, ValueError):
+                pass
+        summaries.append({"name": function.get("name") or "", "arguments": arguments})
+    return summaries
+
+
 async def _chat_end(
     call_id: str,
     agent: str,
@@ -539,11 +558,12 @@ async def _chat_end(
     text: str = "",
     tokens_in: int = 0,
     tokens_out: int = 0,
-    tool_calls: int = 0,
+    tool_calls: Sequence[Mapping[str, Any]] | None = None,
     finish_reason: str | None = None,
     attempt: int = 1,
     error: str | None = None,
 ) -> None:
+    summaries = _tool_call_summaries(tool_calls)
     data = {
         "id": call_id,
         "ts": time.time(),
@@ -554,7 +574,10 @@ async def _chat_end(
         "text": text,
         "tokens_in": tokens_in,
         "tokens_out": tokens_out,
-        "tool_calls": tool_calls,
+        # Structured list for rendering; the count survives beside it for
+        # consumers of the old integer field.
+        "tool_calls": summaries,
+        "tool_call_count": len(summaries),
         "finish_reason": finish_reason,
         "attempt": attempt,
         "error": error,
@@ -688,7 +711,7 @@ async def call_llm(
             text=text,
             tokens_in=tokens_in,
             tokens_out=tokens_out,
-            tool_calls=len(tool_calls),
+            tool_calls=tool_calls,
             finish_reason=finish_reason,
             attempt=attempt,
         )

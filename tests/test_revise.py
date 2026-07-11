@@ -1,7 +1,7 @@
 """Tests for museai.fsm.nodes.revise.
 
-``call_llm`` is replaced in the node's namespace. The locating logic, the mode
-choice, the splice, and the budget tiers all run for real.
+The agent loop's ``call_llm`` is replaced with a fake. The locating logic, the
+mode choice, the splice guard, and the budget tiers all run for real.
 """
 
 from __future__ import annotations
@@ -9,9 +9,14 @@ from __future__ import annotations
 import pytest
 
 from museai.core.stream_bus import bus
-from museai.fsm.nodes import revise as revise_module
+from museai.fsm.tools import loop as loop_module
 from museai.fsm.nodes.deps import DraftingError, set_node_config
-from museai.fsm.nodes.revise import fuzzy_find, locate, revise_prose
+from museai.fsm.nodes.revise import (
+    fuzzy_find,
+    locate,
+    replacement_rejection,
+    revise_prose,
+)
 from museai.fsm.state import FSM_Pointer, FailureObject, make_initial_state
 
 DRAFT = (
@@ -29,7 +34,6 @@ PACKAGE = {
         "intent": "Mara finds the letter.",
         "entry_state": "A routine morning.",
         "exit_state": "Mara is holding her own handwriting.",
-        "word_target": 600,
         "focal_character_id": "char-mara",
     },
     "pad_constraint": "Energy with nowhere to go.",
@@ -57,6 +61,7 @@ class _Response:
     def __init__(self, text: str) -> None:
         self.text = text
         self.finish_reason = "stop"
+        self.tool_calls = []
 
 
 def failure(offending_text: str = OFFENDING, code: str = "CONTRADICTS_CHARACTER"):
@@ -95,7 +100,7 @@ def patched_llm(monkeypatch):
             calls.append([dict(m) for m in messages])
             return _Response(replies.pop(0) if replies else "revised prose")
 
-        monkeypatch.setattr(revise_module, "call_llm", fake_llm)
+        monkeypatch.setattr(loop_module, "call_llm", fake_llm)
         return calls
 
     return _install
@@ -175,6 +180,49 @@ class TestSpanMode:
         assert len(calls) == 1
         assert "<passage_to_rewrite>" not in calls[0][1]["content"]
         assert delta["current_draft_text"] == "A wholly rewritten beat."
+
+
+class TestSpliceGuard:
+    """A span rewrite padded with surrounding prose must never be spliced —
+    that is exactly how duplicated paragraphs reached exported manuscripts."""
+
+    def test_a_sane_replacement_is_not_rejected(self):
+        span = (DRAFT.index(OFFENDING), DRAFT.index(OFFENDING) + len(OFFENDING))
+        assert replacement_rejection(DRAFT, span, REPLACEMENT) is None
+
+    def test_an_oversized_replacement_is_rejected(self):
+        span = (DRAFT.index(OFFENDING), DRAFT.index(OFFENDING) + len(OFFENDING))
+        bloated = "word " * 200
+        assert "grew" in replacement_rejection(DRAFT, span, bloated)
+
+    def test_a_replacement_echoing_surrounding_prose_is_rejected(self):
+        span = (DRAFT.index(OFFENDING), DRAFT.index(OFFENDING) + len(OFFENDING))
+        echoing = f"{REPLACEMENT} The lamp turned through the fog. She climbed"
+        assert "repeats surrounding prose" in replacement_rejection(DRAFT, span, echoing)
+
+    async def test_an_oversized_span_rewrite_falls_back_to_a_full_rewrite(
+        self, patched_llm
+    ):
+        calls = patched_llm("word " * 200, "A wholly rewritten beat.")
+
+        delta = await revise_prose(state_with([failure()]))
+
+        # First call was the span attempt; the second is the full rewrite.
+        assert len(calls) == 2
+        assert "<passage_to_rewrite>" in calls[0][1]["content"]
+        assert "<passage_to_rewrite>" not in calls[1][1]["content"]
+        assert delta["current_draft_text"] == "A wholly rewritten beat."
+
+    async def test_an_echoing_span_rewrite_falls_back_to_a_full_rewrite(
+        self, patched_llm
+    ):
+        echoing = f"{REPLACEMENT} The lamp turned through the fog. She climbed"
+        patched_llm(echoing, "A wholly rewritten beat.")
+
+        delta = await revise_prose(state_with([failure()]))
+
+        assert delta["current_draft_text"] == "A wholly rewritten beat."
+        assert echoing not in delta["current_draft_text"]
 
 
 class TestFullMode:

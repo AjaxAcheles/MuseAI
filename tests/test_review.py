@@ -78,7 +78,9 @@ def _patch_review_endpoint(monkeypatch, *, critic_responses: list[str], drafts: 
     async def fake_beat_llm(endpoint, messages, **kwargs):
         return _Response(BEATS_JSON)
 
-    async def fake_draft_llm(endpoint, messages, *, stream=False, on_token=None, **kw):
+    async def fake_draft_loop(
+        endpoint, messages, tools, tool_impls, max_iterations, *, on_token=None, **kw
+    ):
         draft = scripted_drafts.pop(0)
         await on_token(draft)
         return _Response(draft)
@@ -86,13 +88,13 @@ def _patch_review_endpoint(monkeypatch, *, critic_responses: list[str], drafts: 
     async def fake_critic_loop(endpoint, messages, tools, tool_impls, max_iterations, on_event=None, **kwargs):
         return _Response(scripted_critics.pop(0))
 
-    async def fake_revise_llm(endpoint, messages, **kwargs):
+    async def fake_revise_loop(endpoint, messages, tools, tool_impls, max_iterations, **kwargs):
         return _Response("draft still needing review")
 
     patch_planner_llm(monkeypatch, chapter=fake_chapter_llm, beat=fake_beat_llm)
-    monkeypatch.setattr(draft_prose_module, "call_llm", fake_draft_llm)
+    monkeypatch.setattr(draft_prose_module, "run_agent_loop", fake_draft_loop)
     monkeypatch.setattr(critics_module, "run_agent_loop", fake_critic_loop)
-    monkeypatch.setattr(revise_module, "call_llm", fake_revise_llm)
+    monkeypatch.setattr(revise_module, "run_agent_loop", fake_revise_loop)
 
 
 async def test_persistent_failures_park_at_review(config_factory, monkeypatch):

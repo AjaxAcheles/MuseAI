@@ -50,8 +50,7 @@ def _seed(config, *, planned_word_count: int = 900) -> None:
         db.upsert_beat(conn, id="previous", chapter_id=CHAPTER_ID, ordering=0,
                        prose="ten " * 10, word_count=10, status="completed")
         db.upsert_beat(conn, id=BEAT_ID, chapter_id=CHAPTER_ID, ordering=1,
-                       beat_spec=json.dumps(spec), pad_constraint="constraint",
-                       word_target=5, status="active")
+                       beat_spec=json.dumps(spec), pad_constraint="constraint", status="active")
         db.upsert_beat(conn, id="future", chapter_id=CHAPTER_ID, ordering=2,
                        word_count=planned_word_count, status="planned")
         db.upsert_character(conn, id=CHAR_ID, project_id=PROJECT_ID, name="Mara")

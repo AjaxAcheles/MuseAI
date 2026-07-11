@@ -60,6 +60,7 @@ PROSE_TOKENS = ["The post came ", "up the path ", "in a canvas sack, ", "and she
 class _Response:
     def __init__(self, text: str) -> None:
         self.text = text
+        self.tool_calls: list[dict] = []
         self.tokens_out = len(text.split())
         self.finish_reason = "stop"
 
@@ -81,14 +82,15 @@ async def test_the_plan_to_draft_slice_composes(project, monkeypatch):
     async def fake_beat_llm(endpoint, messages, **kwargs):
         return _Response(BEATS_JSON)
 
-    async def fake_draft_llm(endpoint, messages, *, stream=False, on_token=None, **kw):
-        assert stream is True
+    async def fake_draft_loop(
+        endpoint, messages, tools, tool_impls, max_iterations, *, on_token=None, **kw
+    ):
         for token in PROSE_TOKENS:
             await on_token(token)
         return _Response("".join(PROSE_TOKENS))
 
     patch_planner_llm(monkeypatch, chapter=fake_chapter_llm, beat=fake_beat_llm)
-    monkeypatch.setattr(draft_prose_module, "call_llm", fake_draft_llm)
+    monkeypatch.setattr(draft_prose_module, "run_agent_loop", fake_draft_loop)
 
     # The seed marks its first arc active.
     arc_id = "lantern-keeper-arc-1"
@@ -122,7 +124,6 @@ async def test_the_plan_to_draft_slice_composes(project, monkeypatch):
 
     assert [b["ordering"] for b in beats] == [1, 2]
     assert [b["status"] for b in beats] == ["active", "planned"]
-    assert [b["word_target"] for b in beats] == [550, 600]
     assert [b["id"] for b in beats] == [f"{chapter_id}-b01", f"{chapter_id}-b02"]
 
     # PAD came from the static table, not from a model.

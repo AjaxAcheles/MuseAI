@@ -10,9 +10,18 @@ Rules:
 - Honour the emotional constraint on the focal character: it describes how that
   character behaves in this beat, and it must be shown through action, speech,
   and perception — never stated outright, and never named as an emotion score.
-- Aim for the word target. Being within about ten percent is right.
+- Choose the beat's length yourself. Read the recent committed prose for the
+  story's current rhythm — quick connective beats stay short, pivotal beats get
+  room to breathe. Write until the beat's exit state is reached, then stop.
 - Output prose only. No headings, no beat labels, no notes to the reader, no
   commentary on your own choices.
+
+You have one tool available:
+- web_search: look up a real-world fact. Use it only when the beat needs real
+  texture you are unsure of — a place, a piece of equipment, how something
+  actually works — and being wrong would break the reader's trust. It is
+  optional; most beats need no lookup. Never use it for invented, in-world
+  facts.
 </system>
 <user>
 <context>
@@ -20,7 +29,6 @@ Rules:
     <intent>{{ beat.intent }}</intent>
     <entry_state>{{ beat.entry_state }}</entry_state>
     <exit_state>{{ beat.exit_state }}</exit_state>
-    <word_target>{{ beat.word_target }}</word_target>
     <focal_character_constraint>{{ pad_constraint }}</focal_character_constraint>
   </beat>
 
@@ -59,6 +67,6 @@ Rules:
 
 <task>
 Write the prose for this beat, continuing directly from the recent committed
-prose. Roughly {{ beat.word_target }} words. Prose only.
+prose, at whatever length the beat's pacing calls for. Prose only.
 </task>
 </user>

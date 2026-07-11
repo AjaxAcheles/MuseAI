@@ -33,6 +33,7 @@ from museai.core.stream_bus import bus
 from museai.fsm.nodes.deps import PlanningError, get_node_config
 from museai.fsm.pad import PAD_AXES, resolve_pad_constraint
 from museai.fsm.state import FSM_Pointer, OrchestratorState
+from museai.fsm.tools.web_search import TOOL_IMPLS, WEB_SEARCH_TOOL_SPEC
 from museai.llm.planning import call_llm_for_json_array
 from museai.llm.prompts import render_messages
 from museai.memory.db import (
@@ -327,15 +328,6 @@ def _target_pad(item: dict, ordering: int) -> dict[str, float]:
     return target
 
 
-def _word_target(item: dict, default: int) -> int:
-    """A beat's word target, falling back to the configured beat target."""
-    try:
-        value = int(item.get("word_target") or default)
-    except (TypeError, ValueError):
-        return default
-    return value if value > 0 else default
-
-
 def _row(beat: dict) -> dict:
     """The beat's column values, minus the spec kept for the emitted events."""
     return {key: value for key, value in beat.items() if not key.startswith("_")}
@@ -356,7 +348,6 @@ def _stored_beats(rows: list[sqlite3.Row]) -> list[dict]:
                 "ordering": row["ordering"],
                 "beat_spec": row["beat_spec"],
                 "pad_constraint": row["pad_constraint"],
-                "word_target": row["word_target"],
                 "_spec": json.loads(row["beat_spec"]) if row["beat_spec"] else {},
             }
         )
@@ -433,7 +424,6 @@ async def plan_beat(state: OrchestratorState) -> dict:
                 threads=threads,
                 characters=characters,
                 recent_prose=[row["prose"] for row in recent],
-                beat_word_target=config.generation.beat_word_target,
             )
             planned = await call_llm_for_json_array(
                 config.endpoint,
@@ -442,6 +432,9 @@ async def plan_beat(state: OrchestratorState) -> dict:
                 agent="beat_planner",
                 node="plan_beat",
                 retries=config.generation.planner_parse_retries,
+                tools=[WEB_SEARCH_TOOL_SPEC],
+                tool_impls=TOOL_IMPLS,
+                max_tool_iterations=config.generation.max_agent_iterations,
             )
 
             # If the plan comes back with the emotional register pinned at
@@ -478,6 +471,9 @@ async def plan_beat(state: OrchestratorState) -> dict:
                     agent="beat_planner",
                     node="plan_beat",
                     retries=config.generation.planner_parse_retries,
+                    tools=[WEB_SEARCH_TOOL_SPEC],
+                    tool_impls=TOOL_IMPLS,
+                    max_tool_iterations=config.generation.max_agent_iterations,
                 )
 
             beats = []
@@ -523,9 +519,6 @@ async def plan_beat(state: OrchestratorState) -> dict:
                         "pad_constraint": resolve_pad_constraint(
                             *(target_pad[axis] for axis in PAD_AXES)
                         ),
-                        "word_target": _word_target(
-                            item, config.generation.beat_word_target
-                        ),
                         "_spec": spec,
                     }
                 )
@@ -547,7 +540,6 @@ async def plan_beat(state: OrchestratorState) -> dict:
         beats=len(beats),
         active_beat_id=active["id"],
         active_beat_index=active_index,
-        word_target_total=sum(beat["word_target"] for beat in beats),
         reused=reused,
     )
     await bus.publish(
@@ -562,7 +554,6 @@ async def plan_beat(state: OrchestratorState) -> dict:
                     "id": beat["id"],
                     "ordering": beat["ordering"],
                     "intent": beat["_spec"]["intent"],
-                    "word_target": beat["word_target"],
                 }
                 for beat in beats
             ],

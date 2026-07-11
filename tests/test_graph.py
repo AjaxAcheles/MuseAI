@@ -77,7 +77,9 @@ def _patch_clean_endpoint(monkeypatch):
     async def fake_beat_llm(endpoint, messages, **kwargs):
         return _Response(BEATS_JSON)
 
-    async def fake_draft_llm(endpoint, messages, *, stream=False, on_token=None, **kw):
+    async def fake_draft_loop(
+        endpoint, messages, tools, tool_impls, max_iterations, *, on_token=None, **kw
+    ):
         draft = drafts.pop(0)
         for token in [draft]:
             await on_token(token)
@@ -87,7 +89,7 @@ def _patch_clean_endpoint(monkeypatch):
         return _Response("[]")
 
     patch_planner_llm(monkeypatch, chapter=fake_chapter_llm, beat=fake_beat_llm)
-    monkeypatch.setattr(draft_prose_module, "call_llm", fake_draft_llm)
+    monkeypatch.setattr(draft_prose_module, "run_agent_loop", fake_draft_loop)
     monkeypatch.setattr(critics_module, "run_agent_loop", fake_critic_loop)
 
 

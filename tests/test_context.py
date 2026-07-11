@@ -75,8 +75,7 @@ def _seed(config, *, passages=PASSAGES, threads=THREADS) -> None:
         )
         upsert_beat(
             conn, id=BEAT_ID, chapter_id=CHAPTER_ID, ordering=1,
-            beat_spec=json.dumps(BEAT_SPEC), pad_constraint=PAD_CONSTRAINT,
-            word_target=600, status="active",
+            beat_spec=json.dumps(BEAT_SPEC), pad_constraint=PAD_CONSTRAINT, status="active",
         )
         for thread_id, description, priority in threads:
             upsert_thread(
@@ -99,8 +98,7 @@ def _seed(config, *, passages=PASSAGES, threads=THREADS) -> None:
         for index, prose in enumerate(passages, start=1):
             upsert_beat(
                 conn, id=f"arc-1-c00-b{index:02d}", chapter_id="arc-1-c00",
-                ordering=index, beat_spec="{}", pad_constraint=PAD_CONSTRAINT,
-                word_target=600, prose=prose, word_count=len(prose.split()),
+                ordering=index, beat_spec="{}", pad_constraint=PAD_CONSTRAINT, prose=prose, word_count=len(prose.split()),
                 status="completed",
             )
     conn.close()
@@ -140,7 +138,6 @@ async def test_assembles_every_section_when_the_budget_is_ample(config_factory):
 
     _assert_protected(package)
     assert package["beat"]["id"] == BEAT_ID
-    assert package["beat"]["word_target"] == 600
     assert [t["id"] for t in package["threads"]] == ["thread-hi", "thread-mid", "thread-lo"]
     assert package["characters"][0]["pad"] == {
         "pleasure": -0.2, "arousal": 0.1, "dominance": 0.3

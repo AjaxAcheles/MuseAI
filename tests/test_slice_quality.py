@@ -120,7 +120,9 @@ def endpoint(monkeypatch):
         async def fake_beat_llm(endpoint, messages, **kwargs):
             return _Response(BEATS_JSON)
 
-        async def fake_draft_llm(endpoint, messages, *, stream=False, on_token=None, **kw):
+        async def fake_draft_loop(
+            endpoint, messages, tools, tool_impls, max_iterations, *, on_token=None, **kw
+        ):
             for token in PROSE_TOKENS:
                 await on_token(token)
             return _Response(DRAFT)
@@ -128,13 +130,13 @@ def endpoint(monkeypatch):
         async def fake_critic_loop(endpoint, messages, tools, tool_impls, max_iterations, on_event=None, **kwargs):
             return _Response(scripted.pop(0))
 
-        async def fake_revise_llm(endpoint, messages, **kwargs):
+        async def fake_revise_loop(endpoint, messages, tools, tool_impls, max_iterations, **kwargs):
             return _Response(REPAIRED)
 
         patch_planner_llm(monkeypatch, chapter=fake_chapter_llm, beat=fake_beat_llm)
-        monkeypatch.setattr(draft_prose_module, "call_llm", fake_draft_llm)
+        monkeypatch.setattr(draft_prose_module, "run_agent_loop", fake_draft_loop)
         monkeypatch.setattr(critics_module, "run_agent_loop", fake_critic_loop)
-        monkeypatch.setattr(revise_module, "call_llm", fake_revise_llm)
+        monkeypatch.setattr(revise_module, "run_agent_loop", fake_revise_loop)
 
     return _install
 

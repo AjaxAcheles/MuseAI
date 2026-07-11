@@ -20,7 +20,8 @@ from museai.core.stream_bus import bus
 from museai.fsm.nodes.assemble_context import drafter_messages
 from museai.fsm.nodes.deps import DraftingError, get_node_config
 from museai.fsm.state import OrchestratorState
-from museai.llm.client import call_llm
+from museai.fsm.tools.loop import run_agent_loop
+from museai.fsm.tools.web_search import TOOL_IMPLS, WEB_SEARCH_TOOL_SPEC
 
 PHASE = "Auditing"
 
@@ -47,11 +48,9 @@ async def draft_prose(state: OrchestratorState) -> dict:
         "draft_prose",
         event="start",
         beat_id=beat_id,
-        word_target=beat["word_target"],
         context_tokens=package["budget"]["tokens"],
     )
 
-    pieces: list[str] = []
     started = False
 
     async def on_token(token: str) -> None:
@@ -64,18 +63,35 @@ async def draft_prose(state: OrchestratorState) -> dict:
                     "beat_id": beat_id,
                     "chapter_id": package["chapter"]["id"],
                     "ordering": beat["ordering"],
-                    "word_target": beat["word_target"],
                 },
             )
-        pieces.append(token)
         await bus.publish("token", {"beat_id": beat_id, "text": token})
 
-    response = await call_llm(
-        config.endpoint, messages, agent="drafter", stream=True, on_token=on_token
+    async def on_tool_call(event: dict) -> None:
+        log_node_event(
+            "draft_prose",
+            event="tool_call",
+            beat_id=beat_id,
+            tool=event["tool"],
+            args=event["arguments"],
+        )
+        await bus.publish("drafter_tool", {"beat_id": beat_id, **event})
+
+    response = await run_agent_loop(
+        config.endpoint,
+        messages,
+        [WEB_SEARCH_TOOL_SPEC],
+        TOOL_IMPLS,
+        config.generation.max_agent_iterations,
+        on_event=on_tool_call,
+        agent="drafter",
+        on_token=on_token,
     )
 
-    draft = "".join(pieces)
-    if not draft.strip():
+    # The final turn's text is the draft. Tokens streamed to the browser may
+    # include earlier tool-requesting turns; the committed prose never does.
+    draft = response.text.strip()
+    if not draft:
         raise DraftingError(
             f"the endpoint returned no prose for beat {beat_id!r} "
             f"(finish_reason={response.finish_reason!r})"
@@ -86,7 +102,6 @@ async def draft_prose(state: OrchestratorState) -> dict:
         event="drafted",
         beat_id=beat_id,
         words=len(draft.split()),
-        word_target=beat["word_target"],
         tokens_out=response.tokens_out,
         finish_reason=response.finish_reason,
     )

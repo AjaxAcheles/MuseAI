@@ -634,3 +634,49 @@ class TestLogging:
         assert "[+400 chars]" in response["text"]
         # Truncation is a log concern only; the caller still gets everything.
         assert result.text == long_text
+
+
+class TestToolCallSummaries:
+    """chat_end carries structured tool calls for the View Chat renderer."""
+
+    def test_arguments_parse_from_the_wire_json(self):
+        from museai.llm.client import _tool_call_summaries
+
+        calls = [
+            {"id": "c1", "type": "function",
+             "function": {"name": "web_search", "arguments": '{"query": "moths"}'}},
+            {"id": "c2", "type": "function",
+             "function": {"name": "web_search", "arguments": "{broken"}},
+            {"function": {}},
+        ]
+        assert _tool_call_summaries(calls) == [
+            {"name": "web_search", "arguments": {"query": "moths"}},
+            {"name": "web_search", "arguments": "{broken"},
+            {"name": "", "arguments": None},
+        ]
+        assert _tool_call_summaries(None) == []
+
+    async def test_chat_end_records_the_structured_list_and_count(self, endpoint):
+        from museai.core import chat_log
+
+        payload = completion()
+        payload["choices"][0]["message"]["tool_calls"] = [
+            {"id": "c1", "type": "function",
+             "function": {"name": "web_search", "arguments": '{"query": "tides"}'}}
+        ]
+        payload["choices"][0]["message"]["content"] = ""
+        transport = httpx.MockTransport(lambda r: json_response(payload))
+
+        seen: list[dict] = []
+        original = chat_log.record
+        try:
+            chat_log.record = seen.append
+            await call_llm(endpoint, MESSAGES, transport=transport)
+        finally:
+            chat_log.record = original
+
+        end = next(r for r in seen if r["event"] == "chat_end")
+        assert end["tool_calls"] == [
+            {"name": "web_search", "arguments": {"query": "tides"}}
+        ]
+        assert end["tool_call_count"] == 1

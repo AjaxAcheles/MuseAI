@@ -33,10 +33,9 @@ endpoint:
 
 # Generation shape.
 generation:
-  word_count_target: 1500      # target words for the default short test manuscript
-  beat_word_target: 400        # target words per beat
+  word_count_target: 1500      # whole-manuscript stop signal; 0 or empty = no limit (outline decides)
   revision_retry_cap: 3        # max draft->audit->revise cycles per beat
-  max_agent_iterations: 6      # max tool-loop steps for the continuity critic
+  max_agent_iterations: 6      # max tool-loop steps for any tool-using agent
   recent_prose_beats: 4        # recent committed beats injected as context
   context_token_budget: 8000   # soft token ceiling on the assembled draft context
   passive_voice_threshold: 0.25  # max proportion of passive sentences per beat

@@ -82,6 +82,51 @@ async def test_loaded_seed_populates_the_database(config_factory, web_app):
         conn.close()
 
 
+async def test_seed_with_new_project_id_rewrites_config_yaml(
+    config_factory, web_app, tmp_path, monkeypatch
+):
+    """Loading a seed must point config.yaml (and the runtime) at that project.
+
+    A stale project_id is exactly what made a finished run export an empty
+    manuscript under the previous project's name.
+    """
+    import yaml
+
+    monkeypatch.setenv("MUSEAI_API_KEY", "secret-from-env")
+    config = config_factory()
+    app = await web_app(config)
+
+    # web_app registers tmp_path/config.yaml as MUSEAI_CONFIG_PATH but never
+    # writes it; the sync path needs the real file, with an env-ref api_key.
+    cfg_path = tmp_path / "config.yaml"
+    on_disk = config.model_dump()
+    on_disk["endpoint"]["api_key"] = "${MUSEAI_API_KEY}"
+    cfg_path.write_text(yaml.safe_dump(on_disk, sort_keys=False), encoding="utf-8")
+
+    seed = _example_seed()
+    assert seed["project"]["id"] != config.project_id
+    response = await app.test_client().post("/seed/submit", json=seed)
+    assert response.status_code == 200
+
+    raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    assert raw["project_id"] == seed["project"]["id"]
+    # The ${VAR} reference survives the rewrite; the secret never lands on disk.
+    assert raw["endpoint"]["api_key"] == "${MUSEAI_API_KEY}"
+
+    status = await (await app.test_client().get("/status")).get_json()
+    assert status["project"]["id"] == seed["project"]["id"]
+    assert status["seed_loaded"] is True
+
+
+async def test_seed_sync_failure_is_reported_not_silent(config_factory, web_app):
+    """No config.yaml on disk: the seed loads but the sync failure surfaces."""
+    app = await web_app(config_factory())
+    seed = _example_seed()  # its project id differs from the configured one
+    response = await app.test_client().post("/seed/submit", json=seed)
+    assert response.status_code == 400
+    assert "config file not found" in (await response.get_json())["error"]
+
+
 async def test_seed_without_arcs_is_rejected(config_factory, web_app):
     app = await web_app(config_factory())
     response = await app.test_client().post("/seed/submit", json={"project": {"id": "p1"}, "arcs": []})

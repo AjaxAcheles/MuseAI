@@ -864,6 +864,25 @@ code { color: var(--accent); }
   overflow-y: auto;
 }
 
+/* One collapsible card per tool call or tool result, reusing the details look. */
+.chat-tool-call {
+  border: 1px solid var(--line);
+  border-radius: calc(var(--radius) * 0.6);
+  background: var(--ink-2);
+}
+.chat-tool-call > summary {
+  cursor: pointer;
+  padding: 0.4rem 0.65rem;
+  font-size: 0.8rem;
+  font-family: var(--font-mono);
+  color: var(--text-2);
+  user-select: none;
+  word-break: break-word;
+}
+.chat-tool-call[open] > summary { border-bottom: 1px solid var(--line); }
+.chat-tool-call > pre { margin: 0.4rem 0.6rem 0.6rem; }
+.chat-response .chat-tool-call { margin-bottom: 0.5rem; font-family: var(--font-ui); }
+
 .chat-thinking-body {
   padding: 0.55rem 0.75rem;
   font-size: 0.85rem;

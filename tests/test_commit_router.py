@@ -125,3 +125,52 @@ def test_completed_outline_or_target_routes_to_export(config_factory):
 
     state = _state()
     assert commit_router(state) == EXPORT
+
+
+def test_a_null_word_target_still_exports_on_outline_completion(config_factory):
+    """No word limit (NULL/0 target): the outline alone ends the run."""
+    config = _config(config_factory)
+    conn = db.connect_db(config.db_path)
+    with conn:
+        db.upsert_project(conn, id=PROJECT_ID, genre="g", premise="p",
+                          word_count_target=None)
+        db.upsert_arc(conn, id="arc-1", project_id=PROJECT_ID, ordering=1,
+                      description="done", status="completed")
+        db.upsert_chapter(conn, id="arc-1-c01", arc_id="arc-1", ordering=1,
+                          description="done", status="completed")
+        db.upsert_beat(conn, id="b1", chapter_id="arc-1-c01", ordering=1,
+                       status="completed", word_count=999999)
+    conn.close()
+
+    assert commit_router(_state()) == EXPORT
+
+
+def test_a_zero_word_target_means_unlimited(config_factory):
+    """A 0 target must read as "no limit", never as "0 words is enough"."""
+    config = _config(config_factory)
+    conn = db.connect_db(config.db_path)
+    with conn:
+        db.upsert_project(conn, id=PROJECT_ID, genre="g", premise="p",
+                          word_count_target=0)
+        db.upsert_arc(conn, id="arc-1", project_id=PROJECT_ID, ordering=1,
+                      description="arc", status="active")
+        db.upsert_chapter(conn, id="arc-1-c01", arc_id="arc-1", ordering=1,
+                          description="chapter", status="active")
+        # A planned beat remains: the run must continue drafting it.
+        db.upsert_beat(conn, id="b1", chapter_id="arc-1-c01", ordering=1,
+                       status="planned")
+    conn.close()
+
+    assert commit_router(_state()) == ASSEMBLE
+
+
+def test_config_word_count_target_accepts_zero_empty_and_none(config_factory):
+    """0, "", and None all normalise to None; a negative target is rejected."""
+    import pytest
+
+    assert config_factory(word_count_target=0).generation.word_count_target is None
+    assert config_factory(word_count_target="").generation.word_count_target is None
+    assert config_factory(word_count_target=None).generation.word_count_target is None
+    assert config_factory(word_count_target=2000).generation.word_count_target == 2000
+    with pytest.raises(Exception, match="word_count_target"):
+        config_factory(word_count_target=-5)

@@ -7,19 +7,39 @@ endpoint:
   request_timeout: 60
   temperature: 0.9
 generation:
+  # 0 or empty means no word limit: the run ends when the outline is complete.
   word_count_target: 1500
-  beat_word_target: 400
   revision_retry_cap: 3
   max_agent_iterations: 6
   recent_prose_beats: 4
-  context_token_budget: 16000
+  context_token_budget: 32000
   passive_voice_threshold: 0.25
   critic_parse_retries: 2
   critic_degrade_threshold: 3
   planner_parse_retries: 2
   repetition_threshold: 0.9
   repetition_min_run: 3
+  repetition_allowlist: []
   emotion_word_threshold: 0.3
+  emotion_words:
+  - panic
+  - terror
+  - horror
+  - dread
+  - rage
+  - fury
+  - despair
+  - anguish
+  - misery
+  - grief
+  - guilt
+  - shame
+  - spite
+  - hatred
+  - anxiety
+  - fear
+  - elation
+  - euphoria
   planner_intensity_retries: 1
   intensity_hot_threshold: 0.6
   intensity_flat_fraction: 0.8

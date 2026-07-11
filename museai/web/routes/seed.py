@@ -6,12 +6,31 @@ import json
 from pathlib import Path
 from typing import Any
 
-from quart import Blueprint, jsonify, redirect, render_template, request, url_for
+from quart import Blueprint, current_app, jsonify, redirect, render_template, request, url_for
 
+from museai.core.config import ConfigError, persist_project_id
+from museai.core.logging_setup import get_fsm_logger
+from museai.core.runtime import init_resources
 from museai.seed.loader import load_seed
-from museai.web.app import get_config
+from museai.web.app import get_config, set_runtime
 
 bp = Blueprint("seed", __name__)
+
+
+def _sync_project_id(seed_project_id: str) -> None:
+    """Point ``config.yaml`` and the runtime at the freshly seeded project.
+
+    Without this, a stale ``project_id`` from a previous project makes the run
+    export under the wrong name with zero committed beats.
+    """
+    if seed_project_id == get_config().project_id:
+        return
+    path = Path(current_app.config["MUSEAI_CONFIG_PATH"])
+    reloaded = persist_project_id(seed_project_id, path)
+    set_runtime(reloaded, init_resources(reloaded))
+    get_fsm_logger().info(
+        "seed_project_sync project_id=%s config=%s", seed_project_id, path
+    )
 
 
 def _validate_seed(seed: Any) -> dict[str, Any]:
@@ -73,7 +92,8 @@ async def submit():
     try:
         seed_doc = await _seed_payload()
         load_seed(seed_doc, get_config())
-    except (KeyError, TypeError, ValueError) as exc:
+        _sync_project_id(seed_doc["project"]["id"])
+    except (ConfigError, KeyError, TypeError, ValueError) as exc:
         if request.is_json:
             return jsonify({"ok": False, "error": str(exc)}), 400
         # Re-render with the submitted text intact so the user's edits survive.

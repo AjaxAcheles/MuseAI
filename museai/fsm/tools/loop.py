@@ -161,6 +161,7 @@ async def run_agent_loop(
     max_iterations: int,
     on_event: EventCallback | None = None,
     agent: str = "system",
+    on_token: Callable[[str], Awaitable[None]] | None = None,
 ) -> LLMResponse:
     """Drive the model through tool calls until it answers in prose.
 
@@ -172,6 +173,10 @@ async def run_agent_loop(
     ``agent`` names the node driving the loop for the chat transcript; each
     model turn inside the loop appears there as its own call.
 
+    ``on_token`` streams every model turn's text tokens through to the caller
+    (the drafter's live view). Turns that only request tools emit little or no
+    text, so in practice the stream is the final answer.
+
     ``messages`` is not mutated; the loop works on its own copy.
     """
     if max_iterations < 1:
@@ -180,7 +185,9 @@ async def run_agent_loop(
     working: list[dict[str, Any]] = [dict(m) for m in messages]
 
     for _ in range(max_iterations):
-        response = await call_llm(endpoint, working, tools=tools, agent=agent, stream=True)
+        response = await call_llm(
+            endpoint, working, tools=tools, agent=agent, stream=True, on_token=on_token
+        )
         if not response.tool_calls:
             return response
 
@@ -199,4 +206,4 @@ async def run_agent_loop(
         "agent_loop max_iterations=%d reached; forcing a tool-free answer",
         max_iterations,
     )
-    return await call_llm(endpoint, working, agent=agent, stream=True)
+    return await call_llm(endpoint, working, agent=agent, stream=True, on_token=on_token)

@@ -278,7 +278,6 @@ async def commit_transaction(state: OrchestratorState) -> dict:
                 ordering=beat["ordering"],
                 beat_spec=beat["beat_spec"],
                 pad_constraint=beat["pad_constraint"],
-                word_target=beat["word_target"],
                 prose=prose,
                 word_count=count,
                 status="completed",

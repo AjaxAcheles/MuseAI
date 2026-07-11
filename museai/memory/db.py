@@ -60,7 +60,6 @@ CREATE TABLE IF NOT EXISTS Beats (
     ordering INTEGER,
     beat_spec TEXT,
     pad_constraint TEXT,
-    word_target INTEGER,
     prose TEXT,
     word_count INTEGER DEFAULT 0,
     status TEXT CHECK(status IN ('planned','active','completed'))
@@ -205,7 +204,6 @@ def upsert_beat(
     ordering: int,
     beat_spec: str | None = None,
     pad_constraint: str | None = None,
-    word_target: int | None = None,
     prose: str | None = None,
     word_count: int = 0,
     status: str = "planned",
@@ -213,14 +211,13 @@ def upsert_beat(
     conn.execute(
         """
         INSERT INTO Beats (id, chapter_id, ordering, beat_spec, pad_constraint,
-                           word_target, prose, word_count, status)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                           prose, word_count, status)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             chapter_id = excluded.chapter_id,
             ordering = excluded.ordering,
             beat_spec = excluded.beat_spec,
             pad_constraint = excluded.pad_constraint,
-            word_target = excluded.word_target,
             -- Prose is written once, by `commit`, and is the manuscript. A caller
             -- that passes no prose (the planners) is describing a beat, not
             -- unwriting it, so an absent value must never blank the column — nor
@@ -236,7 +233,7 @@ def upsert_beat(
             END
         """,
         (id, chapter_id, ordering, beat_spec, pad_constraint,
-         word_target, prose, word_count, status),
+         prose, word_count, status),
     )
 
 

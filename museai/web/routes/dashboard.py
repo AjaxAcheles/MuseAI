@@ -8,6 +8,7 @@ from typing import Any, AsyncIterator
 
 from quart import Blueprint, Response, jsonify, render_template
 
+from museai.core.logging_setup import get_fsm_logger
 from museai.core.stream_bus import bus
 from museai.fsm.export import committed_word_count
 from museai.fsm.manager import GenerationManagerError
@@ -39,7 +40,14 @@ def _seeded_project_id() -> str | None:
         if configured is not None:
             return cfg.project_id
         row = conn.execute("SELECT id FROM Projects ORDER BY id ASC LIMIT 1").fetchone()
-        return str(row["id"]) if row is not None else None
+        if row is None:
+            return None
+        # Seed loading keeps config.project_id in sync, so landing here means
+        # the config points at a project the DB does not have. Say so.
+        get_fsm_logger().warning(
+            "seeded_project_fallback configured=%s using=%s", cfg.project_id, row["id"]
+        )
+        return str(row["id"])
     finally:
         conn.close()
 
@@ -107,7 +115,11 @@ async def generate():
 
 
 def _word_target(project_id: str | None) -> int | None:
-    """Return the seeded project's word target, or ``None`` before seed load."""
+    """The project's word target, or ``None`` when unseeded or unlimited.
+
+    A falsy target on the project row (NULL or 0) means "no word limit"; the
+    config default only applies when it is itself set.
+    """
     if project_id is None:
         return None
     cfg = get_config()
@@ -118,7 +130,7 @@ def _word_target(project_id: str | None) -> int | None:
             return int(project["word_count_target"])
     finally:
         conn.close()
-    return cfg.generation.word_count_target
+    return cfg.generation.word_count_target or None
 
 
 def _project_summary(conn: sqlite3.Connection, project_id: str) -> dict[str, Any] | None:
@@ -194,7 +206,7 @@ async def status():
             "ok": True,
             "status": manager.status,
             "pointer": _pointer_dict(),
-            "project_word_total": committed_word_count(cfg),
+            "project_word_total": committed_word_count(cfg, project_id=project_id),
             "word_target": _word_target(project_id),
             "seed_loaded": seed_loaded,
             "can_generate": seed_loaded and manager.status in _STARTABLE,
@@ -238,7 +250,7 @@ async def committed():
         {
             "ok": True,
             "project_id": project_id,
-            "project_word_total": committed_word_count(cfg),
+            "project_word_total": committed_word_count(cfg, project_id=project_id),
             "beats": beats,
         }
     )

@@ -54,18 +54,76 @@
     return `Prompt · ${messages.length} message${messages.length === 1 ? "" : "s"} · ~${formatNumber(tokens)} tokens`;
   }
 
+  /**
+   * One shape for a tool call regardless of where it appeared: prompt-side
+   * assistant messages carry the wire form `{function: {name, arguments}}`
+   * with arguments as a JSON string; chat_end records carry the transcript
+   * summary `{name, arguments}` with arguments already parsed.
+   */
+  function normalizeToolCall(raw) {
+    if (raw && raw.function) {
+      let args = raw.function.arguments;
+      if (typeof args === "string" && args.trim()) {
+        try {
+          args = JSON.parse(args);
+        } catch (err) {
+          /* unparseable arguments stay a string */
+        }
+      }
+      return { name: raw.function.name || "", arguments: args };
+    }
+    return { name: (raw && raw.name) || "", arguments: raw ? raw.arguments : undefined };
+  }
+
+  function inlineArgs(args) {
+    if (args === undefined || args === null || args === "") return "";
+    const text = typeof args === "string" ? args : JSON.stringify(args);
+    return text.length > 80 ? `${text.slice(0, 77)}…` : text;
+  }
+
+  /** Collapsible card per tool call: `🔧 name(args)` with pretty args inside. */
+  function toolCallCards(toolCalls) {
+    return toolCalls
+      .map((raw) => {
+        const call = normalizeToolCall(raw);
+        const body =
+          typeof call.arguments === "string"
+            ? call.arguments
+            : JSON.stringify(call.arguments === undefined ? {} : call.arguments, null, 2);
+        return `
+          <details class="chat-tool-call">
+            <summary><span class="chat-role chat-role-tool">tool</span> 🔧 ${escapeHtml(call.name || "unknown")}(${escapeHtml(inlineArgs(call.arguments))})</summary>
+            <pre class="chat-prompt-tools">${escapeHtml(body)}</pre>
+          </details>`;
+      })
+      .join("");
+  }
+
   function promptMessagesHtml(messages) {
     return messages
       .map((message) => {
+        const role = message.role || "user";
         const content =
           typeof message.content === "string" ? message.content : JSON.stringify(message.content || "", null, 2);
-        const toolCalls = message.tool_calls
-          ? `<pre class="chat-prompt-tools">${escapeHtml(JSON.stringify(message.tool_calls, null, 2))}</pre>`
-          : "";
+        if (role === "tool") {
+          // A tool's result, named and collapsed: expanding a wall of search
+          // JSON is the reader's choice, not the default.
+          return `
+          <div class="chat-prompt-msg">
+            <details class="chat-tool-call">
+              <summary><span class="chat-role chat-role-tool">tool</span> ↩ result${message.name ? `: ${escapeHtml(message.name)}` : ""}</summary>
+              <pre class="chat-prompt-body">${escapeHtml(content)}</pre>
+            </details>
+          </div>`;
+        }
+        const toolCalls =
+          Array.isArray(message.tool_calls) && message.tool_calls.length > 0
+            ? toolCallCards(message.tool_calls)
+            : "";
         return `
           <div class="chat-prompt-msg">
-            <span class="chat-role chat-role-${escapeHtml(message.role || "user")}">${escapeHtml(message.role || "user")}</span>
-            <pre class="chat-prompt-body">${escapeHtml(content)}</pre>
+            <span class="chat-role chat-role-${escapeHtml(role)}">${escapeHtml(role)}</span>
+            ${content ? `<pre class="chat-prompt-body">${escapeHtml(content)}</pre>` : ""}
             ${toolCalls}
           </div>`;
       })
@@ -244,7 +302,14 @@
       } else if (end.text) {
         entry.responseEl.classList.add("rendered");
         renderMarkdownInto(entry.responseEl, end.text);
-      } else if (end.tool_calls) {
+      } else if (Array.isArray(end.tool_calls) && end.tool_calls.length > 0) {
+        const n = end.tool_calls.length;
+        entry.responseEl.innerHTML =
+          `<p class="chat-tool-note">Requested ${n} tool call${n === 1 ? "" : "s"} — the result feeds the next message.</p>` +
+          toolCallCards(end.tool_calls);
+      } else if (typeof end.tool_calls === "number" && end.tool_calls > 0) {
+        // Transcripts written before tool calls were recorded structurally
+        // only carry a count.
         entry.responseEl.innerHTML = `<p class="chat-tool-note">Requested ${end.tool_calls} tool call${end.tool_calls === 1 ? "" : "s"} — the result feeds the next message.</p>`;
       } else if (!entry.responseEl.hasChildNodes()) {
         entry.responseEl.innerHTML = `<p class="chat-tool-note">The model returned no prose.</p>`;

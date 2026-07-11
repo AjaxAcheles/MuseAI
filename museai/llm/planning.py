@@ -57,19 +57,40 @@ async def call_llm_for_json_array(
     agent: str,
     node: str,
     retries: int,
+    tools: Sequence[Mapping[str, Any]] | None = None,
+    tool_impls: Mapping[str, Any] | None = None,
+    max_tool_iterations: int = 1,
 ) -> list[dict]:
     """Call ``agent`` until it yields a usable JSON array of ``what``, or give up.
 
     ``what`` ("chapters", "beats") names the plan in errors and log lines; ``node``
     names the FSM node for the structured log. Raises
     :class:`StructuredOutputError` when every retry and the repair pass are spent.
+
+    When ``tools`` and ``tool_impls`` are given, each attempt runs the bounded
+    agent loop so the planner may gather context before answering; the loop
+    always terminates in a plain reply, which is parsed exactly as before.
     """
+    if tools is not None and tool_impls is not None:
+        # Imported here, not at module top: llm/ stays importable without fsm/,
+        # and the loop itself only depends on this package's client.
+        from museai.fsm.tools.loop import run_agent_loop
+
+        async def _ask(conv: list) -> Any:
+            return await run_agent_loop(
+                endpoint, conv, tools, tool_impls, max_tool_iterations, agent=agent
+            )
+    else:
+
+        async def _ask(conv: list) -> Any:
+            return await call_llm(endpoint, conv, agent=agent, stream=True)
+
     conversation = list(messages)
     last_text = ""
     last_error = ""
 
     for attempt in range(retries + 1):
-        response = await call_llm(endpoint, conversation, agent=agent, stream=True)
+        response = await _ask(conversation)
         last_text = response.text
         try:
             return parse_json_array(last_text, what=what)

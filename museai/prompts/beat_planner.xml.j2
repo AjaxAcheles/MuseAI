@@ -9,7 +9,6 @@ A beat has:
 - an entry state and an exit state: where the situation stands as the beat
   opens and closes. The exit state of one beat is the entry state of the next;
   the first beat's entry state must follow from the recent prose.
-- a word target near {{ beat_word_target }} words.
 - a target PAD for its focal character: the emotional state that
   character should be in as the beat ends, on three axes in the range -1.0 to
   1.0 — pleasure (displeasure to delight), arousal (calm to excitement), and
@@ -28,6 +27,13 @@ Vary the emotional intensity across the beats. A chapter where every beat sits a
 maximum arousal exhausts the reader and flattens the climax. Use quieter beats
 between the peaks, and reserve the highest arousal for the chapter's turning
 point.
+
+You have one tool available:
+- web_search: look up a real-world fact. Use it only when planning a beat that
+  hinges on a checkable real-world detail — a setting, a procedure, a date —
+  and being wrong would break the reader's trust. It is optional; most chapters
+  need no lookup. When you are done, still return the fenced JSON array and
+  nothing else.
 </system>
 <user>
 <context>
@@ -102,9 +108,10 @@ point.
 
 <task>
 Decompose this chapter into its ordered beats. Each beat states its intent, its
-entry and exit state, a word target near {{ beat_word_target }}, and the target
-PAD of its focal character at the beat's end. Where a beat resolves or advances
-an open thread, say so in "thread_updates".
+entry and exit state, and the target PAD of its focal character at the beat's
+end. Where a beat resolves or advances an open thread, say so in
+"thread_updates". The drafter decides each beat's length from the story's
+pacing — do not plan word counts.
 </task>
 
 <output_format>
@@ -117,7 +124,6 @@ Return a JSON array inside a single fenced code block. Each element:
     "intent": "The dramatic work this beat performs.",
     "entry_state": "Where the situation stands as the beat opens.",
     "exit_state": "Where it stands as the beat closes.",
-    "word_target": {{ beat_word_target }},
     "focal_character_id": "{{ characters[0].id if characters else 'the-character-id' }}",
     "target_pad": {"pleasure": 0.0, "arousal": 0.0, "dominance": 0.0},
     "thread_updates": [{"id": "{{ threads[0].id if threads else 'a-thread-id' }}", "status": "progressing"}]

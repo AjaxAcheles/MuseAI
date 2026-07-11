@@ -12,6 +12,11 @@ Rules:
   perception — never stated outright, and never named as an emotion score.
 - Do not add a summary, an apology, or a note about what you changed.
 - Output prose only. No headings, no labels, no commentary.
+
+You have one tool available:
+- web_search: look up a real-world fact. Use it only when fixing a finding
+  requires a checkable real-world detail you are unsure of. It is optional;
+  most revisions need no lookup. Never use it for invented, in-world facts.
 </system>
 <user>
 <context>
@@ -19,7 +24,6 @@ Rules:
     <intent>{{ beat.intent }}</intent>
     <entry_state>{{ beat.entry_state }}</entry_state>
     <exit_state>{{ beat.exit_state }}</exit_state>
-    <word_target>{{ beat.word_target }}</word_target>
     <focal_character_constraint>{{ pad_constraint }}</focal_character_constraint>
   </beat>
 
@@ -80,8 +84,9 @@ Rewrite that passage — and only that passage — so it no longer has the probl
 the critic named. It must drop into the surrounding prose seamlessly: match the
 sentence rhythm on either side of it, and keep it close to its original length.
 
-Output the rewritten passage alone. Do not repeat the rest of the beat, and do
-not wrap it in quotes or a code fence.
+Output the rewritten passage alone — nothing that comes before or after it in
+the draft. Repeating a surrounding sentence would make it appear twice when
+your rewrite is spliced back in. Do not wrap it in quotes or a code fence.
 </task>
 {% else %}
 <draft_beat>
@@ -91,7 +96,8 @@ not wrap it in quotes or a code fence.
 <task>
 Rewrite this beat so that every problem the critic named is fixed. Preserve
 everything the critic did not fault. Open from the beat's entry state, land on
-its exit state, and stay near {{ beat.word_target }} words.
+its exit state, and keep the revision close to the original draft's length and
+pacing.
 
 Output the full revised beat as prose. Nothing else.
 </task>

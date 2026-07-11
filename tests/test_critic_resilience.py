@@ -53,7 +53,7 @@ CLEAN = "[]"
 DRAFT = "The sun stood at noon. Mara lied about the letter."
 
 PACKAGE = {
-    "beat": {"id": "arc-1-c01-b01", "ordering": 1, "word_target": 600},
+    "beat": {"id": "arc-1-c01-b01", "ordering": 1},
     "pad_constraint": "Energy with nowhere to go.",
     "chapter": {"id": "arc-1-c01", "description": "Mara catalogs the letters.", "obligations": []},
     "threads": [],

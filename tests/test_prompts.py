@@ -67,7 +67,6 @@ BEAT = {
     "intent": "Mira finds the ledger and hides it.",
     "entry_state": "Mira is alone in the archive after hours.",
     "exit_state": "Mira has the ledger under her coat, and Vaun is at the door.",
-    "word_target": 600,
 }
 RECENT_PROSE = ["The archive smelled of dust and vinegar.", "Vaun had not called."]
 DRAFT_TEXT = "Mira pocketed the ledger. The archive was bright with noon sun."
@@ -117,7 +116,6 @@ def context_for(template: str) -> dict:
                 }
             ],
             "recent_prose": RECENT_PROSE,
-            "beat_word_target": 600,
         }
     if template == "drafter":
         return {
@@ -223,11 +221,17 @@ class TestRendering:
         )
         assert "<none/>" in rendered
 
-    def test_drafter_carries_the_pad_constraint_and_word_target(self):
+    def test_drafter_carries_the_pad_constraint_and_no_word_target(self):
         messages = render_messages("drafter", **context_for("drafter"))
         user = messages[1]["content"]
         assert "Guarded, alert, and quietly in control." in user
-        assert "600" in user
+        # Pacing is the drafter's call now; no numeric length target survives.
+        assert "word_target" not in user
+
+    def test_drafter_and_planners_offer_the_web_search_tool(self):
+        for template in ("drafter", "reviser", "beat_planner", "chapter_planner"):
+            messages = render_messages(template, **context_for(template))
+            assert "web_search" in messages[0]["content"], template
 
     def test_critic_offers_the_web_search_tool_and_scopes_the_check(self):
         messages = render_messages("continuity_critic", **context_for("continuity_critic"))

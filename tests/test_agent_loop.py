@@ -98,6 +98,27 @@ class TestToolExecution:
         assert messages[2]["tool_call_id"] == "call-1"
         assert "August 12" in messages[2]["content"]
 
+    async def test_on_token_reaches_every_model_turn(self, patched):
+        """The drafter streams through the loop: on_token must pass through."""
+        fake = patched(
+            response(tool_calls=[tool_call("web_search", "{}")]),
+            response(text="Prose after the lookup."),
+        )
+
+        async def on_token(token: str) -> None:  # pragma: no cover - identity only
+            pass
+
+        await run_agent_loop(
+            ENDPOINT,
+            MESSAGES,
+            TOOLS,
+            {"web_search": lambda **k: []},
+            max_iterations=4,
+            on_token=on_token,
+        )
+
+        assert [call.get("on_token") for call in fake.calls] == [on_token, on_token]
+
     async def test_a_response_without_tool_calls_returns_immediately(self, patched):
         fake = patched(response(text="No search needed."))
 

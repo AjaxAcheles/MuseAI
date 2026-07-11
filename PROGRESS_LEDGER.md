@@ -21,6 +21,7 @@ session ritual.
 | v1.13 | Planner resilience: re-prompt + JSON quote repair; idempotent planners (resume no longer destroys committed prose); ERROR/WARNING log levels | done |
 | v1.14 | Web UI polish: compact story rail + instant node tooltips; View Chat keeps in-flight thinking across reloads and auto-scrolls it; richer seed timeline; Database tab remembers its record type | done |
 | v1.15 | Manuscript-quality fixes: repetition guard + emotion-tell audit; beat-planner positional context + thread advancement (dead path reconnected); intensity-arc re-prompt; physical-continuity critic line | done |
+| v1.16 | Export/project sync (seed rewrites config.yaml; export keyed to the run); span-splice guard; structured tool calls in View Chat; per-beat word target removed; optional global target (0 = unlimited); web_search for every agent; arc/epigraph export format | done |
 
 Next up: v1 complete
 
@@ -1278,3 +1279,75 @@ check to `audit` (`EMOTION_TELL`, mirrors passive-voice) over a config vocabular
   leaves them `open` — no worse than before, and now visible in its context.
 - The stronger-model comparison is left for the user to run: point the endpoint
   at a stronger model and rerun the same seed; the fixes need no code change.
+
+## v1.16 — done
+
+Debugging pass driven by the `love-thy-doppelganger` run analysis: the empty
+`lantern-keeper.md` export, the span-splice duplication artifacts in the
+manuscript, invisible tool calls in View Chat, and a pacing rework.
+
+**Fixes / changes**
+
+- **Export/project sync.** Loading a seed now rewrites `project_id` in
+  `config.yaml` (raw-YAML edit, so the `${MUSEAI_API_KEY}` reference survives)
+  and reloads the runtime (`museai/web/routes/seed.py`,
+  `museai/core/config.py:persist_project_id`). Defense in depth:
+  `export_manuscript`/`committed_word_count` take an explicit `project_id`; the
+  manager exports the run's own `state["project_id"]`, the exports routes
+  resolve the running/seeded project, and the dashboard's silent
+  seeded-project fallback now logs a WARNING. Root cause of the 0-word
+  `lantern-keeper.md`: export was keyed to a stale `config.project_id`.
+- **Span-splice guard.** Span-mode revision rejects a replacement that grew
+  implausibly or repeats ≥8 consecutive words of the prose around the span,
+  and falls back to a full-beat rewrite (`revise.py:replacement_rejection`,
+  `span_rejected` log event). The reviser's span prompt now forbids repeating
+  surrounding sentences. This is the bug that left duplicated paragraphs in
+  the exported manuscript.
+- **Structured tool calls.** `chat_end` records carry `tool_calls` as
+  `[{name, arguments}]` plus `tool_call_count` (`llm/client.py`); View Chat
+  renders collapsible per-call cards and named, collapsed tool results
+  (`chat.js`, `.chat-tool-call` in `theme.css`). Legacy integer records still
+  render.
+- **Per-beat word target removed.** `beat_word_target` config, the
+  `Beats.word_target` column, planner/drafter/reviser prompt references, and
+  all plumbing are gone; the drafter chooses length from the story's rhythm
+  (recent committed prose stays injected). Old DBs need a reset.
+- **Optional global target.** `generation.word_count_target` accepts 0/empty/
+  None = no word limit; the commit router treats a falsy project target as
+  "outline decides"; the dashboard reports `word_target: null` and the UI
+  already shows "No target set."
+- **web_search for every agent.** Drafter and reviser now run through
+  `run_agent_loop` (with an `on_token` passthrough for the drafter's live
+  stream); `call_llm_for_json_array` gained `tools=`/`tool_impls=` so both
+  planners run the bounded loop inside the JSON parse ladder; all four prompt
+  templates carry a "you have one tool" block. Design for the next tool wave:
+  `docs/agent-tools.md`.
+- **Export format.** Arc headings, continuous chapter numbering across arcs,
+  and planner descriptions demoted to italic epigraphs under `## Chapter N`.
+
+**Done-check**
+
+- `uv run pytest -q` → **495 passed** (baseline 479), zero failures. New tests:
+  seed submit rewrites config.yaml and preserves the api-key env ref; sync
+  failure surfaces as 400; export follows the seeded project over a stale
+  config; two-arc export formatting; splice-guard rejections and fallback;
+  null/0 word target semantics; config target normalisation; structured
+  chat_end tool calls; loop `on_token` passthrough.
+- Live sandboxed headless run (llama3.2:3b via Ollama, scratch DB/logs — the
+  real `data/museai.db` untouched): chapters and beats planned through the
+  tool-enabled planner path, the drafter made real `web_search` calls
+  (`node=draft_prose event=tool_call`), beats drafted with no word target,
+  committed, and exported as `# Arc 1` / `## Chapter 1` / epigraph / prose
+  under the correct project name with a real word count.
+
+**Known limitations**
+
+- llama3.2:3b's critic often emits tool-call JSON as *text*; the v1.12 parse
+  ladder absorbs it (repair/degrade), but critic quality remains
+  model-limited.
+- The splice guard is deterministic and conservative: a rewrite that repeats
+  old-and-new phrasing *within* the span (under 8 shared words with the
+  surroundings) still splices; the prompt tightening is the mitigation there.
+- The style-echo loop and event-less beat specs (root causes of the
+  doppelganger manuscript's repetition/abstraction) are documented as
+  follow-ups in `docs/agent-tools.md`, not fixed here.

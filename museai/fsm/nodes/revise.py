@@ -30,7 +30,8 @@ from museai.core.logging_setup import get_fsm_logger, log_node_event
 from museai.core.stream_bus import bus
 from museai.fsm.nodes.deps import DraftingError, get_node_config
 from museai.fsm.state import FailureObject, OrchestratorState
-from museai.llm.client import call_llm
+from museai.fsm.tools.loop import run_agent_loop
+from museai.fsm.tools.web_search import TOOL_IMPLS, WEB_SEARCH_TOOL_SPEC
 from museai.llm.prompts import render_messages
 from museai.llm.tokenizer import count_message_tokens
 
@@ -101,6 +102,43 @@ def _overlapping(spans: list[tuple[int, int]]) -> bool:
     return any(a[1] > b[0] for a, b in zip(ordered, ordered[1:]))
 
 
+# A span rewrite the model padded with copies of the surrounding prose splices
+# in as duplicated paragraphs — artifacts that have reached exported
+# manuscripts. Implausible rewrites are rejected and the beat falls back to a
+# full rewrite instead.
+_SPAN_GROWTH_LIMIT = 3
+_SPAN_GROWTH_SLACK = 400  # chars — a very short span may legitimately grow more
+_ECHO_MIN_WORDS = 8
+
+
+def _verbatim_echo(replacement: str, surrounding: str) -> str | None:
+    """A run of ``_ECHO_MIN_WORDS`` words from ``replacement`` found verbatim
+    in the prose around the span, or ``None``. Whitespace-normalised on both
+    sides so a reflowed line still matches."""
+    words = replacement.split()
+    if len(words) < _ECHO_MIN_WORDS:
+        return None
+    surrounding_norm = " ".join(surrounding.split())
+    for start in range(len(words) - _ECHO_MIN_WORDS + 1):
+        window = " ".join(words[start : start + _ECHO_MIN_WORDS])
+        if window in surrounding_norm:
+            return window
+    return None
+
+
+def replacement_rejection(draft: str, span: tuple[int, int], replacement: str) -> str | None:
+    """Why this span rewrite must not be spliced, or ``None`` when it is safe."""
+    start, end = span
+    span_len = end - start
+    limit = max(_SPAN_GROWTH_LIMIT * span_len, span_len + _SPAN_GROWTH_SLACK)
+    if len(replacement) > limit:
+        return f"replacement grew a {span_len}-char span to {len(replacement)} chars"
+    echo = _verbatim_echo(replacement, draft[:start] + draft[end:])
+    if echo is not None:
+        return f"replacement repeats surrounding prose: {echo[:80]!r}"
+    return None
+
+
 def _reviser_messages(
     *,
     mode: str,
@@ -149,7 +187,14 @@ def _budgeted_messages(config, **kwargs) -> tuple[list[dict], bool]:
 
 async def _rewrite(config, messages: list[dict], what: str) -> str:
     """One reviser call. Empty prose is a hard failure, never a silent no-op."""
-    response = await call_llm(config.endpoint, messages, agent="reviser", stream=True)
+    response = await run_agent_loop(
+        config.endpoint,
+        messages,
+        [WEB_SEARCH_TOOL_SPEC],
+        TOOL_IMPLS,
+        config.generation.max_agent_iterations,
+        agent="reviser",
+    )
     revised = response.text.strip()
     if not revised:
         raise DraftingError(
@@ -187,6 +232,7 @@ async def revise_prose(state: OrchestratorState) -> dict:
     located = [(failure, locate(draft, failure.offending_text)) for failure in failures]
     spans = [span for _, span in located if span is not None]
     span_mode = len(spans) == len(failures) and not _overlapping(spans)
+    collapsed = False
 
     if span_mode:
         revised = draft
@@ -202,8 +248,22 @@ async def revise_prose(state: OrchestratorState) -> dict:
                 package=package,
             )
             replacement = await _rewrite(config, messages, f"span {start}:{end}")
+            rejection = replacement_rejection(draft, (start, end), replacement)
+            if rejection is not None:
+                # Splicing this would duplicate prose. The full rewrite below
+                # regenerates the beat against every failure instead.
+                log_node_event(
+                    "revise",
+                    event="span_rejected",
+                    beat_id=beat_id,
+                    span=f"{start}:{end}",
+                    reason=rejection,
+                )
+                span_mode = False
+                break
             revised = revised[:start] + replacement + revised[end:]
-    else:
+
+    if not span_mode:
         messages, collapsed = _budgeted_messages(
             config,
             mode="full",

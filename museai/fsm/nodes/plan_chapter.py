@@ -23,6 +23,7 @@ from museai.core.logging_setup import log_node_event
 from museai.core.stream_bus import bus
 from museai.fsm.nodes.deps import PlanningError, get_node_config
 from museai.fsm.state import FSM_Pointer, OrchestratorState
+from museai.fsm.tools.web_search import TOOL_IMPLS, WEB_SEARCH_TOOL_SPEC
 from museai.llm.planning import call_llm_for_json_array
 from museai.llm.prompts import render_messages
 from museai.memory.db import (
@@ -158,6 +159,9 @@ async def plan_chapter(state: OrchestratorState) -> dict:
                 agent="chapter_planner",
                 node="plan_chapter",
                 retries=config.generation.planner_parse_retries,
+                tools=[WEB_SEARCH_TOOL_SPEC],
+                tool_impls=TOOL_IMPLS,
+                max_tool_iterations=config.generation.max_agent_iterations,
             )
 
             chapters = []

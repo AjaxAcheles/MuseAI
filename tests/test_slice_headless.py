@@ -62,7 +62,9 @@ def _patch_clean_headless_endpoint(monkeypatch):
     async def fake_beat_llm(endpoint, messages, **kwargs):
         return _Response(BEATS_JSON)
 
-    async def fake_draft_llm(endpoint, messages, *, stream=False, on_token=None, **kw):
+    async def fake_draft_loop(
+        endpoint, messages, tools, tool_impls, max_iterations, *, on_token=None, **kw
+    ):
         draft = drafts.pop(0)
         await on_token(draft)
         return _Response(draft)
@@ -71,12 +73,18 @@ def _patch_clean_headless_endpoint(monkeypatch):
         return _Response("[]")
 
     patch_planner_llm(monkeypatch, chapter=fake_chapter_llm, beat=fake_beat_llm)
-    monkeypatch.setattr(draft_prose_module, "call_llm", fake_draft_llm)
+    monkeypatch.setattr(draft_prose_module, "run_agent_loop", fake_draft_loop)
     monkeypatch.setattr(critics_module, "run_agent_loop", fake_critic_loop)
 
 
 def _manuscript_prose_word_count(text: str) -> int:
-    prose_lines = [line for line in text.splitlines() if line.strip() and not line.startswith("## ")]
+    prose_lines = [
+        line
+        for line in text.splitlines()
+        if line.strip()
+        and not line.startswith("#")  # arc and chapter headings
+        and not (line.startswith("*") and line.endswith("*"))  # chapter epigraphs
+    ]
     return len("\n".join(prose_lines).split())
 
 

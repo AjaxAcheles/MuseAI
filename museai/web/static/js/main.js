@@ -672,7 +672,7 @@
         streamBuffer = "";
         if (streamBox) streamBox.hidden = false;
         if (liveStream) liveStream.textContent = "";
-        logActivity("beat_start", `Drafting beat ${data.beat_id} (target ${data.word_target} words)`, "drafter");
+        logActivity("beat_start", `Drafting beat ${data.beat_id}`, "drafter");
       },
 
       // Raw model output. Belongs here and nowhere else.

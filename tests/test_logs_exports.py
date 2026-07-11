@@ -144,6 +144,82 @@ async def test_export_excludes_uncommitted_drafts(config_factory, web_app, tmp_p
     assert "Draft line." not in written
 
 
+async def test_export_follows_the_seeded_project_not_a_stale_config(
+    config_factory, web_app, tmp_path, monkeypatch
+):
+    """A config.yaml pointing at a project the DB no longer has must not
+    produce an empty manuscript under the stale name."""
+    from museai.memory.db import connect_db, upsert_arc, upsert_project
+
+    monkeypatch.chdir(tmp_path)
+    config = config_factory(project_id="stale-ghost")
+    app = await web_app(config)
+
+    # The DB holds a different, real project — the stale-config scenario.
+    conn = connect_db(config.db_path)
+    with conn:
+        upsert_project(conn, id="real-project", genre="mystery", premise="p", word_count_target=100)
+        upsert_arc(conn, id="real-project-arc-1", project_id="real-project",
+                   ordering=0, description="arc", status="active")
+        from museai.memory.db import upsert_beat, upsert_chapter
+        upsert_chapter(conn, id="real-project-ch-1", arc_id="real-project-arc-1",
+                       ordering=0, description="ch", status="active")
+        upsert_beat(conn, id="real-beat", chapter_id="real-project-ch-1", ordering=0,
+                    prose="The real prose.", word_count=3, status="completed")
+    conn.close()
+
+    response = await app.test_client().post("/exports/manuscript")
+    assert response.status_code == 200
+    body = await response.get_json()
+    assert body["word_count"] == 3
+    assert body["path"].endswith("real-project.md")
+
+    written = (tmp_path / "data" / "output" / "real-project.md").read_text(encoding="utf-8")
+    assert "The real prose." in written
+    assert not (tmp_path / "data" / "output" / "stale-ghost.md").exists()
+
+
+def test_export_numbers_chapters_across_arcs_with_epigraphs(
+    config_factory, tmp_path, monkeypatch
+):
+    """Two arcs: arc headings, continuous chapter numbers, italic epigraphs."""
+    from museai.core.runtime import init_resources
+    from museai.fsm.export import export_manuscript
+    from museai.memory.db import connect_db, upsert_arc, upsert_beat, upsert_chapter
+
+    monkeypatch.chdir(tmp_path)
+    config = config_factory()
+    init_resources(config)
+    seed_project(config)
+    conn = connect_db(config.db_path)
+    with conn:
+        upsert_arc(conn, id="arc-2", project_id=config.project_id,
+                   ordering=1, description="second arc", status="active")
+        for arc_id, ordering, chapter_id, desc, beat, prose in [
+            ("test-project-arc-1", 0, "ch-1", "The setup.", "b1", "Arc one prose."),
+            ("arc-2", 1, "ch-2", "The payoff.", "b2", "Arc two prose."),
+        ]:
+            upsert_chapter(conn, id=chapter_id, arc_id=arc_id, ordering=ordering,
+                           description=desc, status="completed")
+            upsert_beat(conn, id=beat, chapter_id=chapter_id, ordering=0,
+                        prose=prose, word_count=3, status="completed")
+    conn.close()
+
+    path = export_manuscript(config)
+    text = path.read_text(encoding="utf-8")
+
+    assert "# Arc 1" in text
+    assert "# Arc 2" in text
+    # Numbering runs continuously across arcs — no "Chapter 1" restart.
+    assert "## Chapter 1" in text
+    assert "## Chapter 2" in text
+    assert text.count("## Chapter 1") == 1
+    # Planner descriptions ride under the heading as italic epigraphs.
+    assert "*The setup.*" in text
+    assert "*The payoff.*" in text
+    assert text.index("# Arc 1") < text.index("## Chapter 1") < text.index("# Arc 2") < text.index("## Chapter 2")
+
+
 async def test_download_404s_before_an_export(config_factory, web_app, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     app = await web_app(config_factory())

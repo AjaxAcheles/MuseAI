@@ -90,10 +90,11 @@ VALID_CHAPTER_PLAN = """```json
 
 
 class _Response:
-    """The only attribute the planning helper reads off an ``LLMResponse``."""
+    """What the planning helper and the agent loop read off an ``LLMResponse``."""
 
     def __init__(self, text: str) -> None:
         self.text = text
+        self.tool_calls: list[dict] = []
 
 
 @pytest.fixture
@@ -308,7 +309,6 @@ def _commit_a_beat(config, chapter_id: str, beat_id: str) -> None:
                 }
             ),
             pad_constraint="Some constraint.",
-            word_target=400,
             prose="The committed prose that must survive.",
             word_count=6,
             status="completed",
@@ -334,7 +334,7 @@ class TestUpsertNeverUnwritesProse:
         with conn:
             upsert_beat(
                 conn, id=beat_id, chapter_id=chapter_id, ordering=1,
-                beat_spec="{}", pad_constraint=None, word_target=400,
+                beat_spec="{}", pad_constraint=None,
                 status="planned",
             )
         row = conn.execute("SELECT * FROM Beats WHERE id=?", (beat_id,)).fetchone()
@@ -464,7 +464,7 @@ class TestPlannersReuseAnExistingPlan:
                         "focal_character_id": "char-mara",
                     }
                 ),
-                pad_constraint="c", word_target=400, status="planned",
+                pad_constraint="c", status="planned",
             )
         conn.close()
 
@@ -510,7 +510,7 @@ class TestPlannersReuseAnExistingPlan:
                         "focal_character_id": "char-mara",
                     }
                 ),
-                pad_constraint="c", word_target=400, status="planned",
+                pad_constraint="c", status="planned",
             )
         conn.close()
 

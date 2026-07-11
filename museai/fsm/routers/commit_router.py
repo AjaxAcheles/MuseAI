@@ -132,7 +132,6 @@ def commit_router(state: OrchestratorState) -> str:
                     ordering=beat["ordering"],
                     beat_spec=beat["beat_spec"],
                     pad_constraint=beat["pad_constraint"],
-                    word_target=beat["word_target"],
                     prose=beat["prose"],
                     word_count=beat["word_count"],
                     status="active",
@@ -225,9 +224,11 @@ def commit_router(state: OrchestratorState) -> str:
             )
             return PLAN_CHAPTER
 
+        # A falsy target (NULL or 0) means "no word limit": the outline alone
+        # decides when the manuscript is done.
         target = project["word_count_target"]
         total = _committed_words(conn, project_id)
-        if (target is not None and total >= int(target)) or _all_outline_completed(conn, project_id):
+        if (target and total >= int(target)) or _all_outline_completed(conn, project_id):
             log_node_event(
                 "commit_router",
                 event="route",

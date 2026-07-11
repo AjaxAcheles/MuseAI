@@ -222,7 +222,6 @@ async def assemble_context(state: OrchestratorState) -> dict:
                 "intent": spec.get("intent", ""),
                 "entry_state": spec.get("entry_state", ""),
                 "exit_state": spec.get("exit_state", ""),
-                "word_target": beat["word_target"],
                 "focal_character_id": spec.get("focal_character_id", ""),
                 # Phrases this beat's planner declared may recur verbatim. The
                 # repetition audit exempts a paragraph matching one of these, so a
