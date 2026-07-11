@@ -403,6 +403,27 @@ def get_open_threads(conn: sqlite3.Connection, project_id: str) -> list[sqlite3.
     ).fetchall()
 
 
+def get_threads_for_project(
+    conn: sqlite3.Connection, project_id: str
+) -> list[sqlite3.Row]:
+    """Every thread for a project, unresolved first, then closed.
+
+    The beat planner needs to see *closed* threads too — a resolved thread it
+    can no longer re-dramatize — not just the open ones. Ordered open →
+    progressing → closed, each band highest-priority first.
+    """
+    return conn.execute(
+        """
+        SELECT * FROM Threads
+        WHERE project_id=?
+        ORDER BY
+            CASE status WHEN 'open' THEN 0 WHEN 'progressing' THEN 1 ELSE 2 END,
+            priority_score DESC
+        """,
+        (project_id,),
+    ).fetchall()
+
+
 def get_characters(conn: sqlite3.Connection, project_id: str) -> list[sqlite3.Row]:
     return conn.execute(
         "SELECT * FROM Characters WHERE project_id=? ORDER BY name ASC",

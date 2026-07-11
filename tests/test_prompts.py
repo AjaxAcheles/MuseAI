@@ -88,6 +88,34 @@ def context_for(template: str) -> dict:
         return {
             **common,
             "chapter": CHAPTER,
+            "story_position": {
+                "arc_description": ARC["description"],
+                "chapter_ordering": 2,
+                "chapter_count": 3,
+            },
+            "sibling_chapters": [
+                {
+                    "ordering": 1,
+                    "description": "Mira is hired into the archive.",
+                    "obligations": ["Mira gains archive access."],
+                    "is_current": False,
+                    "status": "completed",
+                },
+                {
+                    "ordering": 2,
+                    "description": CHAPTER["description"],
+                    "obligations": CHAPTER["obligations"],
+                    "is_current": True,
+                    "status": "active",
+                },
+            ],
+            "already_dramatized": [
+                {
+                    "ordering": 1,
+                    "description": "Mira is hired into the archive.",
+                    "intents": ["Mira accepts the post despite her unease."],
+                }
+            ],
             "recent_prose": RECENT_PROSE,
             "beat_word_target": 600,
         }

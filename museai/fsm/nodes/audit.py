@@ -21,6 +21,7 @@ sends the reviser to rewrite prose that was already fine.
 from __future__ import annotations
 
 import re
+from difflib import SequenceMatcher
 
 from museai.core.logging_setup import log_node_event
 from museai.core.stream_bus import bus
@@ -29,6 +30,8 @@ from museai.fsm.state import FailureObject, OrchestratorState
 
 CRITIC_SOURCE = "programmatic_audit"
 ERROR_CODE = "PASSIVE_VOICE_DENSITY"
+OVERLAP_ERROR_CODE = "PARAGRAPH_OVERLAP"
+EMOTION_ERROR_CODE = "EMOTION_TELL"
 
 # The offending sentence quoted back to the reviser. Enough to locate it.
 _QUOTE_CHARS = 240
@@ -120,15 +123,121 @@ def passive_voice_density(text: str) -> tuple[float, list[str]]:
     return len(passives) / len(sentences), passives
 
 
+# ------------------------------------------------------------ repetition guard
+
+# Paragraphs are separated by a blank line. A drafted beat that reproduces a
+# committed one copies whole paragraphs, so paragraph is the right unit: a lone
+# repeated *sentence* sitting inside an otherwise-new paragraph never trips this,
+# which is what lets a short deliberate refrain through.
+_PARAGRAPH_SPLIT = re.compile(r"\n\s*\n")
+
+# For comparison only: collapse whitespace and drop punctuation/case so that
+# "He said, 'stop.'" and "He said 'Stop'" read as the same prose. The offending
+# text quoted to the reviser is always the original, never this normalized form.
+_NON_COMPARE = re.compile(r"[^\w\s]")
+
+
+def split_paragraphs(text: str) -> list[str]:
+    """Split prose into non-empty paragraphs, preserving the original text."""
+    return [p.strip() for p in _PARAGRAPH_SPLIT.split(text) if p.strip()]
+
+
+def _normalize_for_compare(text: str) -> str:
+    return " ".join(_NON_COMPARE.sub(" ", text).lower().split())
+
+
+def _is_allowlisted(paragraph_norm: str, allowlist_norm: list[str]) -> bool:
+    """A paragraph is exempt if it carries a declared refrain (as a substring)."""
+    return any(phrase and phrase in paragraph_norm for phrase in allowlist_norm)
+
+
+def paragraph_overlaps(
+    draft: str,
+    committed: list[str],
+    *,
+    threshold: float,
+    min_sentences: int,
+    allowlist: list[str],
+) -> list[str]:
+    """Return drafted paragraphs that duplicate committed (or earlier draft) prose.
+
+    A paragraph is faulted when its normalized similarity to any committed
+    paragraph — or any *earlier* paragraph in the same draft — reaches
+    ``threshold`` AND it is at least ``min_sentences`` sentences long (the size
+    gate that lets short deliberate refrains pass) AND it is not allowlisted.
+    """
+    allowlist_norm = [_normalize_for_compare(p) for p in allowlist]
+    # Each committed entry is a whole beat's prose; compare paragraph-to-paragraph,
+    # so split every committed passage into its paragraphs first.
+    committed_norm = [
+        _normalize_for_compare(para)
+        for passage in committed
+        for para in split_paragraphs(passage)
+    ]
+
+    draft_paragraphs = split_paragraphs(draft)
+    offenders: list[str] = []
+    seen_norm: list[str] = []
+    for paragraph in draft_paragraphs:
+        norm = _normalize_for_compare(paragraph)
+        # Compare against committed prose and paragraphs already seen in this
+        # draft, so a beat that repeats itself is caught too.
+        corpus = committed_norm + seen_norm
+        seen_norm.append(norm)
+        if not norm or len(split_sentences(paragraph)) < min_sentences:
+            continue
+        if _is_allowlisted(norm, allowlist_norm):
+            continue
+        best = max(
+            (SequenceMatcher(None, norm, other).ratio() for other in corpus if other),
+            default=0.0,
+        )
+        if best >= threshold:
+            offenders.append(paragraph)
+    return offenders
+
+
+# ---------------------------------------------------------- emotion-tell guard
+
+
+def _emotion_pattern(words: list[str]) -> re.Pattern[str] | None:
+    """A whole-word alternation of the configured emotion vocabulary."""
+    cleaned = [re.escape(w.strip()) for w in words if w.strip()]
+    if not cleaned:
+        return None
+    return re.compile(rf"\b(?:{'|'.join(cleaned)})\b", re.IGNORECASE)
+
+
+def emotion_word_density(text: str, pattern: re.Pattern[str] | None) -> tuple[float, list[str]]:
+    """Proportion of sentences that name an emotion outright, and those sentences.
+
+    A named emotion is the classic *tell*: "she felt pure panic" states the score
+    the prose was supposed to dramatize. An empty draft, or no vocabulary, is 0.0.
+    """
+    if pattern is None:
+        return 0.0, []
+    sentences = split_sentences(text)
+    if not sentences:
+        return 0.0, []
+    offenders = [s for s in sentences if pattern.search(s)]
+    return len(offenders) / len(sentences), offenders
+
+
 async def audit(state: OrchestratorState) -> dict:
     """Run the programmatic checks over ``current_draft_text``.
 
     Returns the state delta ``{"critic_failures": [...]}``. An empty list resets
     the reducer, which is what a fresh audit of a new draft should do: the
     previous cycle's findings describe prose that no longer exists.
+
+    Three model-free checks run here: passive-voice density, verbatim paragraph
+    overlap against committed prose, and named-emotion density. All three append
+    ``FailureObject``s to the same list, which flows into the existing
+    draft→audit→revise loop.
     """
     config = get_node_config()
-    threshold = config.generation.passive_voice_threshold
+    generation = config.generation
+    threshold = generation.passive_voice_threshold
     draft = state["current_draft_text"]
     beat_index = state["fsm_pointer"].beat_index
 
@@ -150,6 +259,56 @@ async def audit(state: OrchestratorState) -> dict:
             )
         )
 
+    # --- repetition guard ---------------------------------------------------
+    package = state.get("active_context_package") or {}
+    recent_prose = package.get("recent_prose") or []
+    # Effective allowlist: author-declared config phrases + this beat's declared
+    # refrain. The drafter can never write to either, so it cannot exempt its
+    # own copies.
+    beat = package.get("beat") or {}
+    allowlist = list(generation.repetition_allowlist) + list(
+        beat.get("intended_refrain") or []
+    )
+    overlaps = paragraph_overlaps(
+        draft,
+        recent_prose,
+        threshold=generation.repetition_threshold,
+        min_sentences=generation.repetition_min_run,
+        allowlist=allowlist,
+    )
+    for paragraph in overlaps:
+        failures.append(
+            FailureObject(
+                error_code=OVERLAP_ERROR_CODE,
+                offending_text=paragraph[:_QUOTE_CHARS],
+                suggested_fix=(
+                    "This paragraph duplicates prose already committed earlier in "
+                    "the manuscript. Do not restate it — write fresh prose that "
+                    "moves the beat forward from where the story now stands."
+                ),
+                critic_source=CRITIC_SOURCE,
+            )
+        )
+
+    # --- emotion-tell guard -------------------------------------------------
+    emotion_pattern = _emotion_pattern(generation.emotion_words)
+    emotion_density, emotion_sentences = emotion_word_density(draft, emotion_pattern)
+    emotion_breached = emotion_density > generation.emotion_word_threshold
+    if emotion_breached:
+        failures.append(
+            FailureObject(
+                error_code=EMOTION_ERROR_CODE,
+                offending_text=emotion_sentences[0][:_QUOTE_CHARS],
+                suggested_fix=(
+                    f"{emotion_density:.0%} of sentences name an emotion outright, "
+                    f"over the {generation.emotion_word_threshold:.0%} limit. Show "
+                    f"the feeling through action, gesture, and perception instead "
+                    f"of stating it."
+                ),
+                critic_source=CRITIC_SOURCE,
+            )
+        )
+
     log_node_event(
         "audit",
         event="audited",
@@ -157,6 +316,9 @@ async def audit(state: OrchestratorState) -> dict:
         passive_density=f"{density:.3f}",
         threshold=threshold,
         passive_sentences=len(passives),
+        paragraph_overlaps=len(overlaps),
+        emotion_density=f"{emotion_density:.3f}",
+        emotion_sentences=len(emotion_sentences),
         failures=len(failures),
     )
     await bus.publish(
@@ -165,6 +327,8 @@ async def audit(state: OrchestratorState) -> dict:
             "beat_index": beat_index,
             "passive_density": round(density, 3),
             "threshold": threshold,
+            "paragraph_overlaps": len(overlaps),
+            "emotion_density": round(emotion_density, 3),
             "failures": [f.model_dump() for f in failures],
         },
     )

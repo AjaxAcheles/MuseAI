@@ -81,6 +81,27 @@ Database · Settings · Logs · Exports**. A typical session:
    the quoting and says so in Live Activity under **Warnings**. A plan that had
    to be repaired is not literally what the model wrote, so it is never silent.
 
+   The programmatic **audit** in front of the critic checks three things, all
+   model-free. Passive-voice density, as before. **Verbatim repetition**: a beat
+   that copies a whole paragraph from already-committed prose is faulted and sent
+   back to the reviser, so the manuscript does not stall on duplicated passages.
+   Short lines stay under the size gate, so a deliberate refrain is never touched
+   — and the beat planner can mark a line as an `intended_refrain`, which the
+   audit then allows (that declaration is announced in Live Activity, so a human
+   can see and veto it). **Named-emotion density**: a beat that keeps stating the
+   feeling ("pure, paralyzing panic") rather than showing it is faulted once it
+   crosses `emotion_word_threshold`. All three feed the same draft→audit→revise
+   loop that already backs the critic.
+
+   The beat planner now sees where a chapter sits in its arc — the sibling
+   chapters, and what earlier chapters have already dramatized — so it stops
+   re-staging events another chapter already delivered. It also advances the
+   story's open **threads**: when a beat resolves or moves a thread, the plan says
+   so, and a resolved thread is shown to later planning as closed, not re-opened.
+   And if a plan comes back with every beat pinned at maximum emotional intensity,
+   the planner is re-prompted once (`planner_intensity_retries`) for a varied arc
+   with quieter beats between the peaks.
+
 6. Generation resumes where it stopped. Pressing **Generate** after a crash,
    a stop, or a restart reuses the arc's existing chapters and the current
    chapter's existing beats instead of re-planning them, and picks up at the

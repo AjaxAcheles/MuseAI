@@ -377,6 +377,190 @@ async def test_plan_beat_raises_on_unparseable_plan(seeded, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
+# plan_beat: pacing context, threads, refrains, intensity                     #
+# --------------------------------------------------------------------------- #
+
+# A beat that closes the open thread. thread_updates was a dead field before:
+# the planner never emitted it and plan_beat stripped it. Both are fixed now.
+BEATS_CLOSING_THREAD = """```json
+[
+  {"ordering": 1, "intent": "Mara admits who wrote the letters.",
+   "entry_state": "Denial.", "exit_state": "Confession.",
+   "word_target": 500, "focal_character_id": "char-mara",
+   "target_pad": {"pleasure": -0.2, "arousal": 0.3, "dominance": 0.1},
+   "thread_updates": [{"id": "thread-1", "status": "closed"}]}
+]
+```"""
+
+BEATS_WITH_REFRAIN = """```json
+[
+  {"ordering": 1, "intent": "Establish the keeper's creed.",
+   "entry_state": "Dawn.", "exit_state": "The creed spoken.",
+   "word_target": 500, "focal_character_id": "char-mara",
+   "target_pad": {"pleasure": 0.1, "arousal": -0.2, "dominance": 0.4},
+   "intended_refrain": ["The lantern must never go dark."]}
+]
+```"""
+
+# Three beats, every one at high arousal: a flat, exhausting arc.
+FLAT_HOT_BEATS = """```json
+[
+  {"ordering": 1, "intent": "Terror one.", "entry_state": "a", "exit_state": "b",
+   "word_target": 400, "focal_character_id": "char-mara",
+   "target_pad": {"pleasure": -0.5, "arousal": 0.9, "dominance": -0.3}},
+  {"ordering": 2, "intent": "Terror two.", "entry_state": "b", "exit_state": "c",
+   "word_target": 400, "focal_character_id": "char-mara",
+   "target_pad": {"pleasure": -0.6, "arousal": 0.9, "dominance": -0.4}},
+  {"ordering": 3, "intent": "Terror three.", "entry_state": "c", "exit_state": "d",
+   "word_target": 400, "focal_character_id": "char-mara",
+   "target_pad": {"pleasure": -0.7, "arousal": 0.95, "dominance": -0.5}}
+]
+```"""
+
+# The varied re-plan: one peak, two calmer beats. Distinct word targets so the
+# test can tell which plan was accepted.
+VARIED_BEATS = """```json
+[
+  {"ordering": 1, "intent": "A quiet opening.", "entry_state": "a", "exit_state": "b",
+   "word_target": 333, "focal_character_id": "char-mara",
+   "target_pad": {"pleasure": 0.1, "arousal": -0.3, "dominance": 0.2}},
+  {"ordering": 2, "intent": "The peak.", "entry_state": "b", "exit_state": "c",
+   "word_target": 333, "focal_character_id": "char-mara",
+   "target_pad": {"pleasure": -0.6, "arousal": 0.9, "dominance": -0.4}},
+  {"ordering": 3, "intent": "The settling.", "entry_state": "c", "exit_state": "d",
+   "word_target": 333, "focal_character_id": "char-mara",
+   "target_pad": {"pleasure": 0.0, "arousal": 0.1, "dominance": 0.3}}
+]
+```"""
+
+
+async def test_plan_beat_stores_thread_updates_in_the_spec(seeded, monkeypatch):
+    chapter_id = _seed_active_chapter(seeded)
+
+    async def fake_call_llm(endpoint, messages, **kwargs):
+        return _response(BEATS_CLOSING_THREAD)
+
+    patch_planner_llm(monkeypatch, beat=fake_call_llm)
+    await plan_beat(_state(chapter_id))
+
+    conn = connect_db(seeded.db_path)
+    rows = get_beats_for_chapter(conn, chapter_id)
+    conn.close()
+    spec = json.loads(rows[0]["beat_spec"])
+    # Exactly the shape commit's _apply_thread_updates reads off beat_spec.
+    assert spec["thread_updates"] == [{"id": "thread-1", "status": "closed"}]
+
+
+async def test_thread_update_round_trips_planner_to_commit_to_db(seeded, monkeypatch):
+    from museai.fsm.nodes.commit import commit_transaction
+
+    chapter_id = _seed_active_chapter(seeded)
+
+    async def fake_call_llm(endpoint, messages, **kwargs):
+        return _response(BEATS_CLOSING_THREAD)
+
+    patch_planner_llm(monkeypatch, beat=fake_call_llm)
+    delta = await plan_beat(_state(chapter_id))
+
+    # Commit the beat the planner just made active; its thread_update must apply.
+    commit_state = make_initial_state(
+        PROJECT_ID, delta["fsm_pointer"], current_draft_text="She said it plainly."
+    )
+    await commit_transaction(commit_state)
+
+    conn = connect_db(seeded.db_path)
+    thread = conn.execute("SELECT status FROM Threads WHERE id=?", ("thread-1",)).fetchone()
+    conn.close()
+    assert thread["status"] == "closed"
+
+
+async def test_plan_beat_stores_and_announces_an_intended_refrain(seeded, monkeypatch):
+    chapter_id = _seed_active_chapter(seeded)
+
+    async def fake_call_llm(endpoint, messages, **kwargs):
+        return _response(BEATS_WITH_REFRAIN)
+
+    patch_planner_llm(monkeypatch, beat=fake_call_llm)
+
+    queue = bus.subscribe()
+    try:
+        await plan_beat(_state(chapter_id))
+        events = [queue.get_nowait() for _ in range(queue.qsize())]
+    finally:
+        bus.unsubscribe(queue)
+
+    conn = connect_db(seeded.db_path)
+    rows = get_beats_for_chapter(conn, chapter_id)
+    conn.close()
+    spec = json.loads(rows[0]["beat_spec"])
+    assert spec["intended_refrain"] == ["The lantern must never go dark."]
+
+    # Never silent: a human must be able to see the exemption and veto it.
+    refrains = [e["data"] for e in events if e["type"] == "planner_refrain"]
+    assert len(refrains) == 1
+    assert refrains[0]["phrase"] == "The lantern must never go dark."
+
+
+async def test_plan_beat_reprompts_once_for_a_flat_hot_arc(seeded, monkeypatch):
+    chapter_id = _seed_active_chapter(seeded)
+    replies = [FLAT_HOT_BEATS, VARIED_BEATS]
+
+    async def fake_call_llm(endpoint, messages, **kwargs):
+        return _response(replies.pop(0))
+
+    patch_planner_llm(monkeypatch, beat=fake_call_llm)
+
+    queue = bus.subscribe()
+    try:
+        await plan_beat(_state(chapter_id))
+        events = [queue.get_nowait() for _ in range(queue.qsize())]
+    finally:
+        bus.unsubscribe(queue)
+
+    conn = connect_db(seeded.db_path)
+    rows = get_beats_for_chapter(conn, chapter_id)
+    conn.close()
+
+    # The flat-hot plan was re-prompted, and the varied re-plan (word_target 333)
+    # is what got stored — not the flat one (word_target 400).
+    assert replies == []  # both replies consumed: one re-prompt happened
+    assert [row["word_target"] for row in rows] == [333, 333, 333]
+    assert any(e["type"] == "planner_intensity" for e in events)
+
+
+async def test_plan_beat_accepts_a_varied_arc_without_reprompting(seeded, monkeypatch):
+    chapter_id = _seed_active_chapter(seeded)
+    calls = []
+
+    async def fake_call_llm(endpoint, messages, **kwargs):
+        calls.append(messages)
+        return _response(VARIED_BEATS)
+
+    patch_planner_llm(monkeypatch, beat=fake_call_llm)
+    await plan_beat(_state(chapter_id))
+
+    # A varied plan is accepted on the first call; no intensity re-prompt.
+    assert len(calls) == 1
+
+
+async def test_plan_beat_gives_the_planner_story_position_and_threads(seeded, monkeypatch):
+    chapter_id = _seed_active_chapter(seeded)
+    captured = []
+
+    async def fake_call_llm(endpoint, messages, **kwargs):
+        captured.append(messages)
+        return _response(BEATS_JSON)
+
+    patch_planner_llm(monkeypatch, beat=fake_call_llm)
+    await plan_beat(_state(chapter_id))
+
+    user = captured[0][1]["content"]
+    assert "Chapter 1 of 1" in user            # positional context
+    assert 'current="true"' in user            # this chapter marked among siblings
+    assert "Who is writing the letters?" in user  # the open thread, with status
+
+
+# --------------------------------------------------------------------------- #
 # The PAD baseline table                                                      #
 # --------------------------------------------------------------------------- #
 

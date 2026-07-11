@@ -56,6 +56,8 @@
     critic_summary: "critics",
     critic_health: "warnings",
     planner_repaired: "warnings",
+    planner_refrain: "planner",
+    planner_intensity: "warnings",
     word_count: "commit",
     pointer_update: "commit",
     manuscript_ready: "commit",
@@ -738,6 +740,30 @@
           "planner"
         );
         toast(`Recovered a malformed ${what} plan by repairing its JSON.`, "warning");
+      },
+
+      /**
+       * The planner declared a line may recur verbatim, exempting it from the
+       * repetition guard. Surfaced (never silent) so a human can see it and, if
+       * it is laundering copied prose, remove it from the plan.
+       */
+      planner_refrain(data) {
+        logActivity(
+          "planner_refrain",
+          `Planner declared a repeating line for ${data.beat_id}: "${data.phrase}"`,
+          "planner"
+        );
+      },
+
+      // A plan came back pinned at high arousal and was re-prompted for a varied
+      // emotional arc.
+      planner_intensity(data) {
+        logActivity(
+          "planner_intensity",
+          `Re-prompted the beat planner for a varied emotional arc (${data.beats} beats were nearly all high-arousal) in ${data.chapter_id}.`,
+          "planner"
+        );
+        toast("Re-prompted the planner for a varied emotional arc.", "warning");
       },
 
       word_count(data) {

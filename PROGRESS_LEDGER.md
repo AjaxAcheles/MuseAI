@@ -20,6 +20,7 @@ session ritual.
 | v1.12 | Critic resilience: re-prompt + degrade instead of killing the run; PAD focal-character resolution; crash salvage; test log isolation | done |
 | v1.13 | Planner resilience: re-prompt + JSON quote repair; idempotent planners (resume no longer destroys committed prose); ERROR/WARNING log levels | done |
 | v1.14 | Web UI polish: compact story rail + instant node tooltips; View Chat keeps in-flight thinking across reloads and auto-scrolls it; richer seed timeline; Database tab remembers its record type | done |
+| v1.15 | Manuscript-quality fixes: repetition guard + emotion-tell audit; beat-planner positional context + thread advancement (dead path reconnected); intensity-arc re-prompt; physical-continuity critic line | done |
 
 Next up: v1 complete
 
@@ -1184,3 +1185,96 @@ bare `"` in story text — dialogue — would have ended the attribute.
 - The seq guard dedupes only against the history partial; it does not attempt
   general SSE replay protection (EventSource reconnects already re-subscribe
   cleanly through `bus.last_snapshot`).
+
+## v1.15 — done
+
+Five reader-reported manuscript faults from the `lantern-keeper` run, traced to
+source and fixed in code. Two were genuine engine bugs; three are model-quality
+issues given the strongest deterministic mitigation available. All fixes are
+model-agnostic and additive — no graph, routing, or commit changes.
+
+**#1 Verbatim copy-paste (code).** Confirmed in the DB, not the exporter: beat
+c03-b04 reproduced 5 whole paragraphs from c03-b03. The drafter was handed prior
+committed prose under "continue seamlessly" and a weak model reproduced it; the
+audit only checked passive voice, and the critic's only codes were
+contradictions (a copy contradicts nothing). Fix: a size-gated paragraph-overlap
+check in `audit` (`paragraph_overlaps`, `difflib.SequenceMatcher`) that faults a
+drafted paragraph duplicating committed prose (or an earlier draft paragraph) and
+feeds it to the existing revise loop as `PARAGRAPH_OVERLAP`. A short line stays
+under the size gate (`repetition_min_run`), so a deliberate refrain passes. The
+beat planner may declare an `intended_refrain`, stored in `beat_spec`, which the
+audit exempts — and every declaration is logged + published (`planner_refrain`)
+so a human can veto it. Only the planner can write the allowlist, never the
+drafter, so a copy-happy model cannot exempt its own paste. The drafter and
+beat-planner prompts also now wrap recent prose with an explicit "continue from —
+do not restate" note.
+
+**#2 Pacing loop / no forward motion (code, two parts).** (A) The beat planner
+saw only its own one-line chapter — never the arc, its position, sibling
+chapters, or what earlier chapters dramatized — so ch4 re-planned the confession
+ch3 had committed. It now receives `story_position`, `sibling_chapters`, and
+`already_dramatized` (prior beat intents), read straight from the DB. (B) Threads
+never advanced: `commit._apply_thread_updates` was fully built but the beat
+schema never emitted `thread_updates` and `plan_beat` stripped the field. Both
+reconnected — the beat schema asks for `thread_updates`, `plan_beat` whitelists
+it into `beat_spec`, and the planner is shown all threads (open · progressing ·
+closed, via new `get_threads_for_project`) with closed ones marked resolved.
+
+**#3 Erratic physical movement (model).** No cheap deterministic spatial check
+exists. Added an `INCOHERENT_BLOCKING` line to the continuity critic's checklist;
+model-dependent, and relieved indirectly by #2 not re-staging the same room.
+
+**#4 Emotional register pinned at max (split).** The planner chose high-arousal
+PAD for ~all 16 beats. Added an arc rule to both planner prompts, plus a
+post-plan check in `plan_beat`: if more than `intensity_flat_fraction` of beats
+exceed `intensity_hot_threshold` arousal, re-prompt once
+(`planner_intensity_retries`) for a varied arc, then accept. Emits
+`planner_intensity`.
+
+**#5 Tell-after-show (model, partial).** The drafter prompt already forbade it
+and the model did it anyway (capability limit). Added an emotion-word-density
+check to `audit` (`EMOTION_TELL`, mirrors passive-voice) over a config vocabulary
+(`emotion_words`), faulting a beat that names emotions in more than
+`emotion_word_threshold` of its sentences.
+
+**Config (new `GenerationConfig` keys, in both config files + conftest):**
+`repetition_threshold`, `repetition_min_run`, `repetition_allowlist` (default
+`[]`), `emotion_word_threshold`, `emotion_words` (defaulted vocabulary),
+`planner_intensity_retries`, `intensity_hot_threshold`, `intensity_flat_fraction`.
+
+**Files:** `museai/fsm/nodes/audit.py`, `museai/fsm/nodes/plan_beat.py`,
+`museai/fsm/nodes/assemble_context.py`, `museai/memory/db.py`,
+`museai/core/config.py`, `config.yaml`, `config.example.yaml`,
+`museai/prompts/{beat_planner,chapter_planner,drafter,continuity_critic}.xml.j2`,
+`museai/web/static/js/main.js` (new event handlers), `tests/conftest.py`,
+`tests/{test_audit,test_planners,test_db,test_prompts}.py`, `README.md`.
+
+**Done-check**
+
+- `uv run pytest -q` → **479 passed** (baseline 457), zero failures. New tests:
+  paragraph-overlap catches the real c03-b03/b04 payload and respects the size
+  gate + allowlist; intra-draft repetition; emotion density + whole-word matching;
+  `thread_updates` round-trips planner→`beat_spec`→commit→`Threads` (thread-1
+  closed); `intended_refrain` stored + announced; intensity re-prompt fires once
+  then accepts, and a varied plan is accepted on the first call; planner receives
+  positional/sibling/thread context; `get_threads_for_project` ordering.
+- Live gemma4 run of `seeds/example.json` against a scratch DB (the live
+  `data/museai.db` manuscript untouched): see metrics recorded on completion.
+
+**Known limitations**
+
+- The repetition allowlist is agent-writable by the *planner* (per the user's
+  decision). Mitigations: the drafter — which produces the copies — cannot write
+  it; the planner declares refrains prospectively; every addition is logged and
+  published for human veto. Not a cryptographic guarantee.
+- The overlap check is paragraph-level: a 3-sentence copy spliced into the middle
+  of an otherwise-new paragraph will not trip it. The observed bug was
+  whole-paragraph/multi-paragraph copies, which it catches.
+- `PARAGRAPH_OVERLAP` and `EMOTION_TELL` are heuristics; `INCOHERENT_BLOCKING` is
+  fully model-dependent. #3, #4-diction, and #5-subtle cases improve materially
+  only with a stronger model.
+- The intensity re-prompt is bounded to one round, then accepts the plan.
+- Threads advance only if the planner emits updates; a planner that never does
+  leaves them `open` — no worse than before, and now visible in its context.
+- The stronger-model comparison is left for the user to run: point the endpoint
+  at a stronger model and rerun the same seed; the fixes need no code change.

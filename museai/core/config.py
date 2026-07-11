@@ -93,18 +93,56 @@ class GenerationConfig(BaseModel):
     # JSON array. A planner cannot degrade the way the critic can — there is no
     # honest empty plan — so this budget, then a quote repair, then the run dies.
     planner_parse_retries: int
+    # --- Repetition guard (audit) ------------------------------------------
+    # Similarity at or above which two paragraphs count as "the same" prose.
+    # A proportion: 0.9 means 90% of the difflib ratio.
+    repetition_threshold: float
+    # A duplicated run must reach this many consecutive near-duplicate sentences
+    # (or a whole paragraph) before it is faulted. Short deliberate refrains stay
+    # under the gate and are never touched.
+    repetition_min_run: int
+    # Phrases the author has declared may recur verbatim. The beat planner may
+    # also register a refrain per beat (`intended_refrain`); both are exempt.
+    repetition_allowlist: list[str] = []
+    # --- Emotion-tell guard (audit) ----------------------------------------
+    # Proportion of a beat's sentences that may name an emotion outright before
+    # the audit faults the draft for telling rather than showing.
+    emotion_word_threshold: float
+    # The named-emotion vocabulary the guard counts. Data, not logic: overridable
+    # in config, with a sensible default so a fresh config need not restate it.
+    emotion_words: list[str] = [
+        "panic", "terror", "horror", "dread", "rage", "fury", "despair",
+        "anguish", "misery", "grief", "guilt", "shame", "spite", "hatred",
+        "anxiety", "fear", "elation", "euphoria",
+    ]
+    # --- Intensity arc (beat planner) --------------------------------------
+    # How many times the beat planner is re-prompted for a varied emotional arc
+    # when its plan comes back nearly all high-arousal. Bounded, then accepted.
+    planner_intensity_retries: int
+    # Absolute target-arousal above which a beat counts as "hot".
+    intensity_hot_threshold: float
+    # Fraction of a chapter's beats that may be hot before the plan is re-prompted.
+    intensity_flat_fraction: float
 
-    @field_validator("passive_voice_threshold")
+    @field_validator(
+        "passive_voice_threshold",
+        "repetition_threshold",
+        "emotion_word_threshold",
+        "intensity_hot_threshold",
+        "intensity_flat_fraction",
+    )
     @classmethod
-    def _proportion(cls, value: float) -> float:
+    def _proportion(cls, value: float, info: ValidationInfo) -> float:
         """A threshold outside 0..1 silently disables the gate. Fail at boot."""
         if not 0.0 <= value <= 1.0:
             raise ValueError(
-                f"passive_voice_threshold is a proportion in 0..1, got {value}"
+                f"{info.field_name} is a proportion in 0..1, got {value}"
             )
         return value
 
-    @field_validator("critic_parse_retries", "planner_parse_retries")
+    @field_validator(
+        "critic_parse_retries", "planner_parse_retries", "planner_intensity_retries"
+    )
     @classmethod
     def _non_negative(cls, value: int, info: ValidationInfo) -> int:
         """0 is legal — never re-prompt — but a negative budget is a typo."""
@@ -112,12 +150,12 @@ class GenerationConfig(BaseModel):
             raise ValueError(f"{info.field_name} must be >= 0, got {value}")
         return value
 
-    @field_validator("critic_degrade_threshold")
+    @field_validator("critic_degrade_threshold", "repetition_min_run")
     @classmethod
-    def _positive(cls, value: int) -> int:
+    def _positive(cls, value: int, info: ValidationInfo) -> int:
         """A threshold of 0 would degrade before the first failure ever happened."""
         if value < 1:
-            raise ValueError(f"critic_degrade_threshold must be >= 1, got {value}")
+            raise ValueError(f"{info.field_name} must be >= 1, got {value}")
         return value
 
 

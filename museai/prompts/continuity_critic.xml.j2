@@ -18,9 +18,14 @@ Report a problem only when the draft actually contradicts the context. Report:
 - contradictions of a character's stated description or behaviour,
 - a thread advanced in a way that conflicts with its stated status,
 - an unfulfilled obligation that this beat's own exit state required,
-- a real-world claim you verified to be false.
+- a real-world claim you verified to be false,
+- incoherent physical blocking: a character occupying a position the prose does
+  not move them to — pressed against a wall in one line and leaning on a desk
+  across the room in the next with no movement between — which breaks the
+  reader's ability to picture the space.
 
 Do not report matters of taste, pacing, or style. Those are not continuity.
+Physical blocking is the exception: it is spatial continuity, not style.
 If the draft is clean, that is the expected outcome — say so with an empty array.
 </system>
 <user>
@@ -84,7 +89,7 @@ Return a JSON array inside a single fenced code block. Each element:
 
 Use one of these error codes:
 CONTRADICTS_PRIOR_PROSE, CONTRADICTS_CHARACTER, CONTRADICTS_THREAD,
-UNFULFILLED_OBLIGATION, FALSE_REAL_WORLD_CLAIM.
+UNFULFILLED_OBLIGATION, FALSE_REAL_WORLD_CLAIM, INCOHERENT_BLOCKING.
 
 Set "critic_source" to "continuity_critic" on every element.
 If the draft has no continuity problems, return an empty array: []

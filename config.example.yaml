@@ -43,3 +43,11 @@ generation:
   critic_parse_retries: 2        # re-prompts when the critic's JSON will not parse
   critic_degrade_threshold: 3    # consecutive unreadable critics before degrading + warning
   planner_parse_retries: 2       # re-prompts when a planner's JSON will not parse
+  repetition_threshold: 0.9      # paragraph similarity (0..1) that counts as duplicated prose
+  repetition_min_run: 3          # consecutive near-duplicate sentences before a copy is faulted
+  emotion_word_threshold: 0.3    # max proportion of sentences that may name an emotion outright
+  planner_intensity_retries: 1   # re-prompts for a varied emotional arc when a plan is all high-arousal
+  intensity_hot_threshold: 0.6   # |target arousal| at/above which a beat counts as "hot"
+  intensity_flat_fraction: 0.8   # fraction of a chapter's beats that may be hot before re-prompting
+  # repetition_allowlist: []     # optional: phrases allowed to recur verbatim (author-declared)
+  # emotion_words: [...]         # optional: override the named-emotion vocabulary the guard counts

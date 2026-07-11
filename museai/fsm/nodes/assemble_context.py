@@ -103,6 +103,21 @@ def _resolve_beat(
     )
 
 
+def _intended_refrain(raw: object) -> list[str]:
+    """Normalize a planner's ``intended_refrain`` to a list of non-empty strings.
+
+    The planner may emit a single phrase or a list; either way the audit wants a
+    flat list of phrases that this beat is permitted to repeat verbatim.
+    """
+    if not raw:
+        return []
+    if isinstance(raw, str):
+        return [raw.strip()] if raw.strip() else []
+    if isinstance(raw, list):
+        return [str(item).strip() for item in raw if str(item).strip()]
+    return []
+
+
 def _obligations(raw: str | None) -> list[str]:
     if not raw:
         return []
@@ -209,6 +224,11 @@ async def assemble_context(state: OrchestratorState) -> dict:
                 "exit_state": spec.get("exit_state", ""),
                 "word_target": beat["word_target"],
                 "focal_character_id": spec.get("focal_character_id", ""),
+                # Phrases this beat's planner declared may recur verbatim. The
+                # repetition audit exempts a paragraph matching one of these, so a
+                # deliberate refrain is not faulted as a copy. Only the planner
+                # writes this — never the drafter.
+                "intended_refrain": _intended_refrain(spec.get("intended_refrain")),
             },
             "pad_constraint": beat["pad_constraint"],
             "chapter": {

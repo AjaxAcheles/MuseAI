@@ -17,9 +17,25 @@ A beat has:
 
 Beats must, together, satisfy every one of the chapter's obligations. Order the
 beats. Beat ordering starts at 1.
+
+This chapter is one chapter of a larger arc. Plan only the work THIS chapter is
+responsible for. Do not re-dramatize an event an earlier chapter already
+delivered (see <already_dramatized>), and do not do the job a later chapter is
+assigned (see <sibling_chapters>). If a thread is already closed, it is resolved
+— do not reopen it or dramatize its resolution again.
+
+Vary the emotional intensity across the beats. A chapter where every beat sits at
+maximum arousal exhausts the reader and flattens the climax. Use quieter beats
+between the peaks, and reserve the highest arousal for the chapter's turning
+point.
 </system>
 <user>
 <context>
+  <story_position>
+    <arc>{{ story_position.arc_description }}</arc>
+    <this_chapter>Chapter {{ story_position.chapter_ordering }} of {{ story_position.chapter_count }}</this_chapter>
+  </story_position>
+
   <chapter>
     <description>{{ chapter.description }}</description>
     <obligations>
@@ -31,13 +47,38 @@ beats. Beat ordering starts at 1.
     </obligations>
   </chapter>
 
-  <open_threads>
+  <sibling_chapters>
+{% for sib in sibling_chapters %}
+    <chapter ordering="{{ sib.ordering }}" status="{{ sib.status }}"{{ ' current="true"' if sib.is_current else '' }}>
+      <description>{{ sib.description }}</description>
+{% for obligation in sib.obligations %}
+      <obligation>{{ obligation }}</obligation>
+{% endfor %}
+    </chapter>
+{% else %}
+    <none/>
+{% endfor %}
+  </sibling_chapters>
+
+  <already_dramatized>
+{% for chap in already_dramatized %}
+    <chapter ordering="{{ chap.ordering }}">{{ chap.description }}
+{% for intent in chap.intents %}
+      <beat_intent>{{ intent }}</beat_intent>
+{% endfor %}
+    </chapter>
+{% else %}
+    <none/>
+{% endfor %}
+  </already_dramatized>
+
+  <threads>
 {% for thread in threads %}
     <thread id="{{ thread.id }}" status="{{ thread.status }}">{{ thread.description }}</thread>
 {% else %}
     <none/>
 {% endfor %}
-  </open_threads>
+  </threads>
 
   <characters>
 {% for character in characters %}
@@ -50,7 +91,7 @@ beats. Beat ordering starts at 1.
 {% endfor %}
   </characters>
 
-  <recent_committed_prose>
+  <recent_committed_prose note="Continue the story FROM the end of this prose. Do NOT restate or reuse any of its sentences — the next beats move forward from here, they do not repeat it.">
 {% for passage in recent_prose %}
     <passage>{{ passage }}</passage>
 {% else %}
@@ -62,7 +103,8 @@ beats. Beat ordering starts at 1.
 <task>
 Decompose this chapter into its ordered beats. Each beat states its intent, its
 entry and exit state, a word target near {{ beat_word_target }}, and the target
-PAD of its focal character at the beat's end.
+PAD of its focal character at the beat's end. Where a beat resolves or advances
+an open thread, say so in "thread_updates".
 </task>
 
 <output_format>
@@ -77,7 +119,8 @@ Return a JSON array inside a single fenced code block. Each element:
     "exit_state": "Where it stands as the beat closes.",
     "word_target": {{ beat_word_target }},
     "focal_character_id": "{{ characters[0].id if characters else 'the-character-id' }}",
-    "target_pad": {"pleasure": 0.0, "arousal": 0.0, "dominance": 0.0}
+    "target_pad": {"pleasure": 0.0, "arousal": 0.0, "dominance": 0.0},
+    "thread_updates": [{"id": "{{ threads[0].id if threads else 'a-thread-id' }}", "status": "progressing"}]
   }
 ]
 ```
@@ -85,6 +128,19 @@ Return a JSON array inside a single fenced code block. Each element:
 "focal_character_id" must be copied verbatim from the id attribute of one
 <character> in the context above. Do not abbreviate it, do not invent a new id,
 and do not prefix it with the field name.
+
+"thread_updates" is OPTIONAL and belongs only on beats that actually move a
+thread. Each id must be copied verbatim from a <thread> above; "status" must be
+"progressing" (the beat advances it) or "closed" (the beat resolves it). A thread
+can only move forward — never mark an already-closed thread open. Omit the field
+on beats that touch no thread. Across the whole chapter, at least one beat should
+advance or close a thread.
+
+If — and only if — a line is deliberately meant to recur verbatim later (a
+refrain, a repeated warning, a motif), add "intended_refrain": ["the exact
+line"] to the beat that establishes it. Do NOT use this to license copying
+ordinary prose; it exists solely for lines a reader is meant to recognize on
+purpose. Omit it otherwise.
 
 Every PAD value must be a number between -1.0 and 1.0.
 

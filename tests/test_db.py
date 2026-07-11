@@ -118,6 +118,25 @@ def test_get_open_threads_priority_order(conn):
     assert [t["id"] for t in threads] == ["t2", "t1"]
 
 
+def test_get_threads_for_project_returns_all_statuses_unresolved_first(conn):
+    pid = _seed_project(conn)
+    with conn:
+        db.upsert_thread(conn, id="t-closed", project_id=pid, description="done",
+                         status="closed", priority_score=1.0)
+        db.upsert_thread(conn, id="t-open-low", project_id=pid, description="low",
+                         status="open", priority_score=0.2)
+        db.upsert_thread(conn, id="t-open-high", project_id=pid, description="high",
+                         status="open", priority_score=0.9)
+        db.upsert_thread(conn, id="t-prog", project_id=pid, description="mid",
+                         status="progressing", priority_score=0.5)
+    threads = db.get_threads_for_project(conn, pid)
+    # open (by priority) → progressing → closed. The planner needs the closed one
+    # visible so it does not re-dramatize a resolved thread.
+    assert [t["id"] for t in threads] == [
+        "t-open-high", "t-open-low", "t-prog", "t-closed"
+    ]
+
+
 def test_recent_committed_beats_newest_last(conn):
     pid = _seed_project(conn)
     with conn:
