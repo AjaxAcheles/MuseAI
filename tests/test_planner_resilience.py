@@ -28,6 +28,7 @@ from museai.fsm.state import FSM_Pointer, OrchestratorState, make_initial_state
 from museai.llm import planning as planning_module
 from museai.llm.planning import call_llm_for_json_array
 from museai.llm.structured import (
+    FakeToolCallTextError,
     StructuredOutputError,
     parse_json_array,
     repair_json_text,
@@ -100,6 +101,13 @@ TOOL_CALL_CHAPTER_REPLY = """```
 TOOL_CALL_BEAT_REPLY = """```
 {"name": "get_chapter_context", "parameters": {"chapter_id": "<chapter>"}}
 {"name": "get_character_emotion_history", "parameters": {"character_id": "char-mara"}}
+```"""
+
+RECENT_FAKE_TOOL_CHAIN = """```
+{"name": "get_full_outline", "parameters": {"format": "array"}}
+{"name": "check_plan_node", "parameters": {"plan_node": "{'description': 'One.', 'obligations': ['an event that must occur']}"}}
+{"name": "get_canonical_state", "parameters": {"scope": "chapters"}}
+{"name": "check_plan_node", "parameters": {"plan_node": "{\"ordering\": 1, \"description\": \"One.\"}"}}
 ```"""
 
 
@@ -245,12 +253,21 @@ class TestToolCallShapedPlannerReplies:
     """Small models sometimes answer with tool-call JSON instead of a plan array."""
 
     def test_a_tool_call_object_is_not_a_chapter_plan(self):
-        with pytest.raises(StructuredOutputError, match="looks like a tool call"):
+        with pytest.raises(FakeToolCallTextError, match="tools were not executed"):
             parse_json_array(TOOL_CALL_CHAPTER_REPLY, what="chapters")
 
     def test_multiple_tool_call_objects_are_not_a_beat_plan(self):
-        with pytest.raises(StructuredOutputError, match="looks like a tool call"):
+        with pytest.raises(FakeToolCallTextError, match="tools were not executed"):
             parse_json_array(TOOL_CALL_BEAT_REPLY, what="beats", repair=True)
+
+    def test_recent_fake_tool_chain_is_reported_as_tool_protocol_confusion(self):
+        with pytest.raises(FakeToolCallTextError) as excinfo:
+            parse_json_array(RECENT_FAKE_TOOL_CHAIN, what="chapters", repair=True)
+
+        message = str(excinfo.value)
+        assert "tool calls as plain text" in message
+        assert "get_full_outline" in message
+        assert "check_plan_node" in message
 
     def test_planner_extraction_prefers_an_array_over_an_earlier_object(self):
         raw = """The first thing is not the answer:
@@ -296,6 +313,23 @@ class TestPlannerRetryLadder:
         assert correction["role"] == "user"
         assert "could not be parsed" in correction["content"]
         assert "escape every double quote" in correction["content"]
+
+    async def test_fake_tool_text_gets_a_specific_correction_without_replaying_it(
+        self, seeded, scripted, caplog
+    ):
+        seen = scripted([RECENT_FAKE_TOOL_CHAIN, VALID_BEAT_PLAN])
+        with caplog.at_level(logging.WARNING, logger="museai"):
+            beats = await _plan_beats(seeded, retries=2)
+
+        assert len(beats) == 1
+        assert len(seen) == 2
+        assert seen[1][-2]["role"] == "assistant"
+        assert "omitted" in seen[1][-2]["content"]
+        assert "get_full_outline" not in seen[1][-2]["content"]
+        correction = seen[1][-1]["content"]
+        assert "tool calls as plain text" in correction
+        assert "use the provided tool-call channel" in correction
+        assert any("event=fake_tool_call_text" in r.getMessage() for r in caplog.records)
 
     async def test_the_model_gets_exactly_the_configured_number_of_retries(
         self, seeded, scripted

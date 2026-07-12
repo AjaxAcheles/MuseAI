@@ -1,7 +1,7 @@
 project_id: the-last-postcard
 endpoint:
   base_url: http://127.0.0.1:11434/v1
-  api_key: ${MUSEAI_API_KEY}
+  api_key: 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
   model_name: cryptidbleh/gemma4-claude-opus-4.6:latest
   tokenizer_family: char_heuristic
   request_timeout: 60

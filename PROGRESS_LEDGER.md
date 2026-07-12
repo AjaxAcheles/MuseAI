@@ -1453,11 +1453,20 @@ beat plan array:
 - `museai/llm/structured.py`: planner salvage extraction now prefers a balanced
   `[...]` span before falling back to the first balanced object span, so an
   explanatory object before a real array no longer masks the actual plan.
+- `museai/llm/structured.py`: multi-object fake tool-call chains are now reported
+  as `FakeToolCallTextError` before JSON repair, so the logs distinguish tool
+  protocol confusion from ordinary malformed JSON.
+- `museai/llm/planning.py`: fake tool-call text logs as
+  `event=fake_tool_call_text` and gets a targeted correction that says no tool
+  was executed, tells the model to use the real tool-call channel if needed, and
+  omits the bad transcript from the retry conversation so the model is not shown
+  a long fake-call example to imitate.
 - `tests/test_planner_resilience.py`: added production-shaped regressions for a
   fenced chapter-planner tool call, multiple unwrapped beat-planner tool calls,
-  and array-preferred salvage.
+  the 14:28–14:29 multi-tool fake-call chain, the safer retry prompt, and
+  array-preferred salvage.
 
 **Done-check**
 
-- `uv run pytest -q tests/test_planner_resilience.py` → `27 passed`.
-- `uv run pytest -q tests/test_planner_resilience.py tests/test_planners.py tests/test_prompts.py tests/test_critic_resilience.py` → `161 passed`.
+- `uv run pytest -q tests/test_planner_resilience.py` → `29 passed`.
+- `uv run pytest -q tests/test_planner_resilience.py tests/test_planners.py tests/test_prompts.py tests/test_critic_resilience.py` → `163 passed`.

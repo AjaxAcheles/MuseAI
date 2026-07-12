@@ -66,6 +66,10 @@ class StructuredOutputError(ValueError):
     """The model's response could not be read as a list of failure objects."""
 
 
+class FakeToolCallTextError(StructuredOutputError):
+    """The planner wrote tool-call-shaped JSON as text instead of using tools."""
+
+
 def _strip_fences(text: str) -> str:
     """Remove markdown code fences, keeping the fenced body.
 
@@ -143,6 +147,49 @@ def _first_balanced_span_with_opener(text: str, opener: str) -> str | None:
         if span is not None:
             return span
     return None
+
+
+def _balanced_spans_with_opener(text: str, opener: str) -> list[str]:
+    """Return every balanced span that starts with ``opener``.
+
+    Planner replies sometimes contain fake tool-call objects whose arguments
+    themselves contain JSON-looking fragments. Callers can try every array span
+    before accepting an earlier object, so a real plan later in the text is not
+    masked by an incidental nested array.
+    """
+    spans: list[str] = []
+    index = 0
+    while index < len(text):
+        if text[index] != opener:
+            index += 1
+            continue
+        span = _balanced_span_from(text, index)
+        if span is None:
+            index += 1
+            continue
+        spans.append(span)
+        index += max(1, len(span))
+    return spans
+
+
+def _fake_tool_names(text: str) -> list[str]:
+    """Names of tool-call-shaped objects the model wrote as plain text."""
+    names: list[str] = []
+    for match in re.finditer(r'"name"\s*:\s*"([A-Za-z_][\w-]*)"', text):
+        tail = text[match.end() : match.end() + 160]
+        if re.search(r'"parameters"\s*:', tail) and match.group(1) not in names:
+            names.append(match.group(1))
+    return names
+
+
+def _fake_tool_call_error(what: str, names: list[str]) -> FakeToolCallTextError:
+    listed = ", ".join(names[:6])
+    if len(names) > 6:
+        listed = f"{listed}, ..."
+    return FakeToolCallTextError(
+        f"{what} reply wrote tool calls as plain text instead of returning the "
+        f"planner JSON array; tools were not executed: {listed or 'unknown'}"
+    )
 
 
 def _validate(data: Any, *, lenient: bool = False) -> list[FailureObject]:
@@ -247,7 +294,7 @@ def _as_object_array(data: Any, what: str) -> list[dict]:
                 f"got {type(element).__name__}"
             )
         if "name" in element and isinstance(element.get("parameters"), dict):
-            raise StructuredOutputError(
+            raise FakeToolCallTextError(
                 f"{what} element {index} looks like a tool call, not a planner "
                 f"object: {element.get('name')!r}"
             )
@@ -318,26 +365,60 @@ def parse_json_array(raw_text: str, *, what: str, repair: bool = False) -> list[
 
     # Pass 2: lenient extraction.
     stripped = _strip_fences(raw_text)
-    candidate = _first_balanced_span_with_opener(stripped, "[") or _first_balanced_span(
-        stripped
-    )
+    shape_error: StructuredOutputError | None = None
+    for candidate in _balanced_spans_with_opener(stripped, "["):
+        try:
+            return _as_object_array(json.loads(candidate), what)
+        except FakeToolCallTextError:
+            raise
+        except StructuredOutputError as exc:
+            shape_error = exc
+        except json.JSONDecodeError:
+            pass
+
+    names = _fake_tool_names(stripped)
+    if names:
+        raise _fake_tool_call_error(what, names)
+
+    candidate = _first_balanced_span(stripped)
     if candidate is not None:
         try:
             return _as_object_array(json.loads(candidate), what)
+        except FakeToolCallTextError:
+            raise
+        except StructuredOutputError as exc:
+            shape_error = exc
         except json.JSONDecodeError:
             pass
 
     # Pass 3: repair the model's quoting, then extract again.
     if repair:
         repaired = repair_json_text(stripped)
-        candidate = _first_balanced_span_with_opener(repaired, "[") or _first_balanced_span(
-            repaired
-        )
+        for candidate in _balanced_spans_with_opener(repaired, "["):
+            try:
+                return _as_object_array(json.loads(candidate), what)
+            except FakeToolCallTextError:
+                raise
+            except StructuredOutputError as exc:
+                shape_error = exc
+            except json.JSONDecodeError:
+                pass
+        names = _fake_tool_names(repaired)
+        if names:
+            raise _fake_tool_call_error(what, names)
+        candidate = _first_balanced_span(repaired)
         if candidate is not None:
             try:
                 return _as_object_array(json.loads(candidate), what)
+            except FakeToolCallTextError:
+                raise
+            except StructuredOutputError as exc:
+                shape_error = exc
             except json.JSONDecodeError:
                 pass
+
+    if shape_error is not None:
+        raise shape_error
 
     raise StructuredOutputError(
         f"could not extract a JSON array of {what} from the model response: "

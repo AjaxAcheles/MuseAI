@@ -34,7 +34,11 @@ from museai.core.config import EndpointConfig
 from museai.core.logging_setup import log_node_event
 from museai.core.stream_bus import bus
 from museai.llm.client import call_llm
-from museai.llm.structured import StructuredOutputError, parse_json_array
+from museai.llm.structured import (
+    FakeToolCallTextError,
+    StructuredOutputError,
+    parse_json_array,
+)
 
 # Carries the validation error verbatim. A model that wrote `("It was stronger")`
 # inside a string needs to see which line broke, not a generic scolding — and it
@@ -46,6 +50,21 @@ _CORRECTION_TEMPLATE = (
     "use single quotes for dialogue — an unescaped quote ends the string early "
     "and makes the whole array unreadable. Do not return the example values "
     "from the schema."
+)
+
+_FAKE_TOOL_CORRECTION_TEMPLATE = (
+    "Your previous reply wrote tool calls as plain text, so no tool was executed: "
+    "{error}\n\n"
+    "Do not write {{\"name\": ..., \"parameters\": ...}} objects in your response. "
+    "If you still need a tool, use the provided tool-call channel. If you have "
+    "enough context, return only the fenced JSON array described in the output "
+    "format. Do not include tool calls, notes, schema examples, or prose outside "
+    "the array."
+)
+
+_INVALID_REPLY_MARKER = (
+    "[Previous assistant reply omitted: it was invalid planner output and "
+    "contained tool-call-shaped JSON as plain text rather than a JSON plan array.]"
 )
 
 
@@ -106,10 +125,11 @@ async def call_llm_for_json_array(
             return parse_json_array(last_text, what=what)
         except StructuredOutputError as exc:
             last_error = str(exc)
+            fake_tool_text = isinstance(exc, FakeToolCallTextError)
             log_node_event(
                 node,
                 level=logging.WARNING,
-                event="parse_failed",
+                event="fake_tool_call_text" if fake_tool_text else "parse_failed",
                 what=what,
                 attempt=attempt + 1,
                 retries=retries,
@@ -117,10 +137,14 @@ async def call_llm_for_json_array(
             )
             if attempt == retries:
                 break
+            assistant_content = _INVALID_REPLY_MARKER if fake_tool_text else last_text
+            correction = (
+                _FAKE_TOOL_CORRECTION_TEMPLATE if fake_tool_text else _CORRECTION_TEMPLATE
+            ).format(error=last_error)
             conversation = [
                 *conversation,
-                {"role": "assistant", "content": last_text},
-                {"role": "user", "content": _CORRECTION_TEMPLATE.format(error=last_error)},
+                {"role": "assistant", "content": assistant_content},
+                {"role": "user", "content": correction},
             ]
 
     # Last rung: the model will not fix its own quoting, so we do — and say so.
