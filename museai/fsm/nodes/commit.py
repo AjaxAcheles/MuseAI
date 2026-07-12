@@ -12,6 +12,7 @@ the intent.
 from __future__ import annotations
 
 import json
+import logging
 import re
 import sqlite3
 from datetime import datetime, timezone
@@ -22,7 +23,7 @@ from museai.core.logging_setup import log_node_event
 from museai.core.stream_bus import bus
 from museai.fsm.nodes.deps import get_node_config
 from museai.fsm.pad import PAD_AXES
-from museai.fsm.state import OrchestratorState
+from museai.fsm.state import UNFULFILLED_OBLIGATION, OrchestratorState
 from museai.memory.db import (
     connect_db,
     create_commit_intent,
@@ -233,13 +234,34 @@ def _project_total_words(conn: sqlite3.Connection, project_id: str) -> int:
 
 
 async def commit_transaction(state: OrchestratorState) -> dict:
-    """Commit the current draft at the active beat boundary."""
+    """Commit the current draft at the active beat boundary.
+
+    Story-state advancement is gated on the beat having earned it. The prose
+    itself always commits — a multi-hour run must not die at the boundary —
+    but the beat's planned ``thread_updates`` are applied only when the critic
+    neither reported an unfulfilled obligation against this draft nor was
+    itself unreliable (its output unreadable after every retry). A withheld
+    advance is recorded in the durable event, so canon never claims a change
+    the prose did not deliver.
+    """
     config = get_node_config()
     pointer = state["fsm_pointer"]
     project_id = state["project_id"]
     prose = state["current_draft_text"]
     count = _word_count(prose)
     committed_at = _utc_now()
+
+    unfulfilled = [
+        failure
+        for failure in state["critic_failures"]
+        if failure.error_code == UNFULFILLED_OBLIGATION
+    ]
+    critic_unreliable = state["critic_parse_failure_streak"] > 0
+    withheld_reason = ""
+    if unfulfilled:
+        withheld_reason = "unfulfilled_obligation"
+    elif critic_unreliable:
+        withheld_reason = "critic_unreliable"
 
     log_node_event(
         "commit_transaction",
@@ -284,7 +306,12 @@ async def commit_transaction(state: OrchestratorState) -> dict:
             )
             for pad in pad_states:
                 upsert_character_emotions(conn, **pad)
-            thread_updates = _apply_thread_updates(conn, project_id, spec)
+            if withheld_reason:
+                thread_updates = []
+                withheld_updates = _requested_thread_updates(spec)
+            else:
+                thread_updates = _apply_thread_updates(conn, project_id, spec)
+                withheld_updates = []
 
             chapter_status = _chapter_status_after_commit(conn, chapter["id"])
             upsert_chapter(
@@ -316,6 +343,14 @@ async def commit_transaction(state: OrchestratorState) -> dict:
             "pad_states": pad_states,
             "word_count": count,
         }
+        if withheld_reason:
+            # The advance the plan requested but the prose did not earn. Kept
+            # out of "thread_updates" so a reconcile replay stays honest.
+            event["thread_updates_withheld"] = {
+                "reason": withheld_reason,
+                "requested": withheld_updates,
+                "unfulfilled_findings": [f.model_dump() for f in unfulfilled],
+            }
         append_event(config.event_log_path, event)
 
         with conn:
@@ -333,6 +368,27 @@ async def commit_transaction(state: OrchestratorState) -> dict:
         word_count=count,
         project_total=total_words,
     )
+    if withheld_reason:
+        # WARNING: the prose is committed but the story state did not advance.
+        # A run where this repeats is producing prose that misses its plan.
+        log_node_event(
+            "commit_transaction",
+            level=logging.WARNING,
+            event="thread_updates_withheld",
+            beat_id=beat["id"],
+            reason=withheld_reason,
+            requested=len(withheld_updates),
+            unfulfilled=len(unfulfilled),
+        )
+        await bus.publish(
+            "commit_gate",
+            {
+                "beat_id": beat["id"],
+                "reason": withheld_reason,
+                "requested": withheld_updates,
+                "unfulfilled_findings": [f.model_dump() for f in unfulfilled],
+            },
+        )
     log_node_event("commit_transaction", event="phase_change", phase=PHASE)
     await bus.publish(
         "phase_change",

@@ -66,6 +66,11 @@ BEATS_JSON = """```json
 [
   {"ordering": 1, "intent": "Mara finds the letter in the day's post.",
    "entry_state": "A routine morning.", "exit_state": "Mara is holding her own handwriting.",
+   "required_change": "Mara can no longer treat the post as routine.",
+   "observable_event": "Mara opens a letter written in her own hand.",
+   "beat_function": "discovery",
+   "discharges": ["Mara dates the earliest letter.", "Not a real obligation."],
+   "thread_updates": [{"id": "thread-1", "status": "progressing"}],
    "word_target": 550, "focal_character_id": "char-mara",
    "target_pad": {"pleasure": -0.6, "arousal": 0.8, "dominance": -0.4}},
   {"ordering": 2, "intent": "Mara files the letter and says nothing.",
@@ -298,9 +303,48 @@ async def test_plan_beat_writes_ordered_rows_with_pad_constraints(seeded, monkey
     assert spec["focal_character_id"] == "char-mara"
     assert spec["target_pad"] == {"pleasure": -0.6, "arousal": 0.8, "dominance": -0.4}
 
+    # The concrete plot mandate is stored with the spec.
+    assert spec["required_change"] == "Mara can no longer treat the post as routine."
+    assert spec["observable_event"] == "Mara opens a letter written in her own hand."
+    assert spec["beat_function"] == "discovery"
+    # Only entries matching a chapter obligation survive into discharges.
+    assert spec["discharges"] == ["Mara dates the earliest letter."]
+    assert spec["thread_updates"] == [{"id": "thread-1", "status": "progressing"}]
+
+    # A beat that declared no required_change falls back to its exit state, so
+    # every stored beat carries a non-empty change.
+    spec2 = json.loads(rows[1]["beat_spec"])
+    assert spec2["required_change"] == "The letter is locked away."
+    assert "observable_event" not in spec2
+    assert "discharges" not in spec2
+
     pointer = delta["fsm_pointer"]
     assert pointer.chapter_id == chapter_id
     assert pointer.beat_index == 0
+
+
+async def test_plan_beat_publishes_an_obligation_gap(seeded, monkeypatch):
+    """An obligation no beat discharges is surfaced loudly, not silently lost."""
+    chapter_id = _seed_active_chapter(
+        seeded,
+        obligations=["Mara dates the earliest letter.", "Mara hides it from Idris."],
+    )
+
+    async def fake_call_llm(endpoint, messages, **kwargs):
+        return _response(BEATS_JSON)
+
+    patch_planner_llm(monkeypatch, beat=fake_call_llm)
+
+    queue = bus.subscribe()
+    try:
+        await plan_beat(_state(chapter_id))
+        events = [queue.get_nowait() for _ in range(queue.qsize())]
+    finally:
+        bus.unsubscribe(queue)
+
+    by_type = {event["type"]: event["data"] for event in events}
+    assert by_type["planner_obligation_gap"]["unassigned"] == ["Mara hides it from Idris."]
+    assert by_type["planner_obligation_gap"]["chapter_id"] == chapter_id
 
 
 async def test_plan_beat_only_plans_the_active_chapter(seeded, monkeypatch):

@@ -35,8 +35,8 @@ CHECK_PLAN_NODE_TOOL_SPEC: dict[str, Any] = {
                     "description": (
                         "One element of your plan: a chapter "
                         "({description, obligations}) or a beat ({intent, "
-                        "entry_state, exit_state, target_pad, "
-                        "focal_character_id, ...})."
+                        "entry_state, exit_state, required_change, "
+                        "observable_event, target_pad, focal_character_id, ...})."
                     ),
                 },
             },
@@ -67,6 +67,24 @@ def _check_beat(node: dict, characters: list, threads: list) -> list[str]:
     for field in ("entry_state", "exit_state"):
         if not str(node.get(field) or "").strip():
             problems.append(f"a beat needs a non-empty {field}")
+    if not str(node.get("required_change") or "").strip():
+        problems.append(
+            "a beat needs a non-empty required_change — the one meaningful "
+            "change it produces (it may be interior: a realization, a decision)"
+        )
+    if not str(node.get("observable_event") or "").strip():
+        problems.append(
+            "a beat needs a non-empty observable_event — what the reader sees "
+            "on the page that carries its change"
+        )
+    discharges = node.get("discharges")
+    if discharges is not None:
+        if not isinstance(discharges, list):
+            problems.append("discharges must be a list of obligation strings")
+        else:
+            for index, entry in enumerate(discharges, start=1):
+                if not str(entry or "").strip():
+                    problems.append(f"discharges[{index}] is empty")
 
     pad = node.get("target_pad")
     if not isinstance(pad, dict):

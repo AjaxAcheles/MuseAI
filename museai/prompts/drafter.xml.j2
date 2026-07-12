@@ -4,12 +4,22 @@ seamlessly from the prose that precedes it, in that prose's established
 narrative voice, tense, and point of view.
 
 Rules:
+- Deliver this beat's required change. Open from the beat's entry state and
+  land on its exit state: by the final line, the situation must be different
+  from the first. The change may be wholly interior — a realization, a
+  decision, a shift in what a character is willing to do — but it must happen
+  on the page, in this beat. If the beat names an observable event, that event
+  must appear on the page, not be implied to have happened elsewhere.
+- If the beat lists obligations it discharges or planned thread updates, the
+  prose must earn them: the event or decision that delivers each one has to
+  occur in this beat.
 - Write this beat only. Do not begin the next one, and do not summarise or
   conclude the chapter.
-- Open from the beat's entry state and land on its exit state.
-- Honour the emotional constraint on the focal character: it describes how that
-  character behaves in this beat, and it must be shown through action, speech,
-  and perception — never stated outright, and never named as an emotion score.
+- The <manner> element describes how the focal character carries themselves
+  while the beat happens. Show it through action, speech, and perception —
+  never stated outright, and never named as an emotion score. Manner colours
+  the beat; it is not what the beat is about, and dwelling on it must never
+  displace the change the beat exists to deliver.
 - Choose the beat's length yourself. Read the recent committed prose for the
   story's current rhythm — quick connective beats stay short, pivotal beats get
   room to breathe. Write until the beat's exit state is reached, then stop.
@@ -38,12 +48,36 @@ You have read-only story tools. All are optional; most beats need none.
 </system>
 <user>
 <context>
-  <beat>
+  <this_beat_must_deliver>
     <intent>{{ beat.intent }}</intent>
+{% if beat.get('required_change') %}
+    <required_change>{{ beat.required_change }}</required_change>
+{% endif %}
+{% if beat.get('observable_event') %}
+    <observable_event>{{ beat.observable_event }}</observable_event>
+{% endif %}
+{% if beat.get('beat_function') %}
+    <function>{{ beat.beat_function }}</function>
+{% endif %}
     <entry_state>{{ beat.entry_state }}</entry_state>
     <exit_state>{{ beat.exit_state }}</exit_state>
-    <focal_character_constraint>{{ pad_constraint }}</focal_character_constraint>
-  </beat>
+{% if beat.get('discharges') %}
+    <discharges_chapter_obligations>
+{% for obligation in beat.discharges %}
+      <obligation>{{ obligation }}</obligation>
+{% endfor %}
+    </discharges_chapter_obligations>
+{% endif %}
+    <planned_thread_updates>
+{% for update in beat.get('thread_updates') or [] %}
+      <update thread="{{ update.id }}" new_status="{{ update.status }}"/>
+{% else %}
+      <none/>
+{% endfor %}
+    </planned_thread_updates>
+  </this_beat_must_deliver>
+
+  <manner>{{ pad_constraint }}</manner>
 
   <chapter_obligations>
 {% for obligation in chapter.obligations %}
@@ -80,6 +114,8 @@ You have read-only story tools. All are optional; most beats need none.
 
 <task>
 Write the prose for this beat, continuing directly from the recent committed
-prose, at whatever length the beat's pacing calls for. Prose only.
+prose, at whatever length the beat's pacing calls for. Deliver the change in
+<this_beat_must_deliver>; let <manner> colour how the focal character moves
+through it. Prose only.
 </task>
 </user>

@@ -167,7 +167,7 @@ async def plan_chapter(state: OrchestratorState) -> dict:
                 )
 
             planned = await call_llm_for_json_array(
-                config.endpoint,
+                config.endpoint_for("chapter_planner"),
                 messages,
                 what="chapters",
                 agent="chapter_planner",

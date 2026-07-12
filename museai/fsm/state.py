@@ -25,6 +25,13 @@ class FSM_Pointer(BaseModel):
     beat_index: int
 
 
+# The critic's error code for a draft that failed its own mandate: exit state
+# never reached, required change not produced, a listed obligation or thread
+# movement not delivered. The commit node reads it to withhold story-state
+# advancement the prose did not earn.
+UNFULFILLED_OBLIGATION = "UNFULFILLED_OBLIGATION"
+
+
 class FailureObject(BaseModel):
     """A single continuity-critic finding against the current draft."""
 

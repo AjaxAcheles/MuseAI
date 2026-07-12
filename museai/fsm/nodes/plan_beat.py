@@ -243,6 +243,28 @@ def _intended_refrain(raw: object) -> list[str]:
     return []
 
 
+def _discharges(item: dict, obligations: list[str]) -> list[str]:
+    """Match a beat's declared ``discharges`` against the chapter's obligations.
+
+    Deterministic: an entry is kept only when it matches one of the chapter's
+    obligations (case-insensitive, whitespace-normalized), and the canonical
+    obligation text is stored. A beat cannot discharge a promise the chapter
+    never made, so unmatched entries are dropped — the caller logs them.
+    """
+    raw = item.get("discharges")
+    if isinstance(raw, str):
+        raw = [raw]
+    if not raw or not isinstance(raw, list):
+        return []
+    canonical = {" ".join(str(o).split()).casefold(): o for o in obligations}
+    matched: list[str] = []
+    for entry in raw:
+        key = " ".join(str(entry).split()).casefold()
+        if key in canonical and canonical[key] not in matched:
+            matched.append(canonical[key])
+    return matched
+
+
 def _thread_updates(item: dict) -> list[dict]:
     """Validate a beat's ``thread_updates`` into ``{id, status}`` dicts.
 
@@ -408,11 +430,12 @@ async def plan_beat(state: OrchestratorState) -> dict:
                 threads=len(threads),
             )
 
+            obligations = _chapter_obligations(chapter["obligations"])
             messages = render_messages(
                 "beat_planner",
                 chapter={
                     "description": chapter["description"],
-                    "obligations": _chapter_obligations(chapter["obligations"]),
+                    "obligations": obligations,
                 },
                 story_position={
                     "arc_description": _arc_description(conn, chapter["arc_id"]),
@@ -440,7 +463,7 @@ async def plan_beat(state: OrchestratorState) -> dict:
                 )
 
             planned = await call_llm_for_json_array(
-                config.endpoint,
+                config.endpoint_for("beat_planner"),
                 messages,
                 what="beats",
                 agent="beat_planner",
@@ -481,7 +504,7 @@ async def plan_beat(state: OrchestratorState) -> dict:
                     {"role": "user", "content": _INTENSITY_CORRECTION},
                 ]
                 planned = await call_llm_for_json_array(
-                    config.endpoint,
+                    config.endpoint_for("beat_planner"),
                     messages,
                     what="beats",
                     agent="beat_planner",
@@ -511,13 +534,41 @@ async def plan_beat(state: OrchestratorState) -> dict:
                         raw_focal,
                     )
 
+                exit_state = str(item.get("exit_state") or "").strip()
+
+                # The plot mandate. A beat with no declared change is a beat
+                # that plans to change nothing — fall back to the exit state,
+                # which is itself a statement of the required transition, so
+                # every stored beat carries a non-empty required_change.
+                required_change = str(item.get("required_change") or "").strip()
+                if not required_change:
+                    required_change = exit_state or intent
+                    logger.warning(
+                        "node=plan_beat beat %d declared no required_change; "
+                        "falling back to its exit state",
+                        ordering,
+                    )
+
                 spec = {
                     "intent": intent,
                     "entry_state": str(item.get("entry_state") or "").strip(),
-                    "exit_state": str(item.get("exit_state") or "").strip(),
+                    "exit_state": exit_state,
+                    "required_change": required_change,
                     "target_pad": target_pad,
                     "focal_character_id": focal,
                 }
+                # The on-page anchor of the change and the beat's structural
+                # function. Stored only when the planner supplied them, so a
+                # pre-existing spec reads back unchanged.
+                observable_event = str(item.get("observable_event") or "").strip()
+                if observable_event:
+                    spec["observable_event"] = observable_event
+                beat_function = str(item.get("beat_function") or "").strip()
+                if beat_function:
+                    spec["beat_function"] = beat_function
+                discharges = _discharges(item, obligations)
+                if discharges:
+                    spec["discharges"] = discharges
                 # Thread advances the beat declares — consumed unchanged by the
                 # commit node. Refrains the beat is permitted to repeat verbatim —
                 # read by the repetition audit. Both stored only when non-empty,
@@ -539,6 +590,31 @@ async def plan_beat(state: OrchestratorState) -> dict:
                         ),
                         "_spec": spec,
                     }
+                )
+
+            # Deterministic coverage check: every chapter obligation should be
+            # assigned to a beat that discharges it. A gap is surfaced loudly —
+            # it means the chapter's promises have no beat responsible for them
+            # — but it is not fatal: the critic still audits the prose, and an
+            # older or weaker plan without discharges must not kill the run.
+            assigned = {
+                obligation
+                for beat in beats
+                for obligation in beat["_spec"].get("discharges", [])
+            }
+            unassigned = [o for o in obligations if o not in assigned]
+            if unassigned:
+                log_node_event(
+                    "plan_beat",
+                    level=logging.WARNING,
+                    event="obligation_gap",
+                    chapter_id=chapter["id"],
+                    unassigned=len(unassigned),
+                    obligations=len(obligations),
+                )
+                await bus.publish(
+                    "planner_obligation_gap",
+                    {"chapter_id": chapter["id"], "unassigned": unassigned},
                 )
             active = beats[0]
 

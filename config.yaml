@@ -6,6 +6,15 @@ endpoint:
   tokenizer_family: char_heuristic
   request_timeout: 60
   temperature: 0.88
+# Per-agent inference overrides (optional). Each agent role may override any
+# endpoint field; whatever is unset inherits from `endpoint` above. Roles:
+# chapter_planner, beat_planner, drafter, reviser, critic. Example:
+# agents:
+#   drafter:
+#     temperature: 0.9
+#   critic:
+#     model_name: a-stronger-model
+#     temperature: 0.2
 generation:
   word_count_target: null
   revision_retry_cap: 4

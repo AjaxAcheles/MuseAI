@@ -41,8 +41,13 @@ BEAT_SPEC = {
     "intent": "Mara finds the letter in the day's post.",
     "entry_state": "A routine morning.",
     "exit_state": "Mara is holding her own handwriting.",
+    "required_change": "Mara can no longer treat the post as routine.",
+    "observable_event": "Mara opens a letter written in her own hand.",
+    "beat_function": "discovery",
+    "discharges": ["Mara dates the earliest letter."],
     "target_pad": {"pleasure": -0.6, "arousal": 0.8, "dominance": -0.4},
     "focal_character_id": "char-mara",
+    "thread_updates": [{"id": "thread-hi", "status": "progressing"}],
 }
 
 # Committed prose, oldest first. Each passage is distinctive enough to assert on.
@@ -138,6 +143,16 @@ async def test_assembles_every_section_when_the_budget_is_ample(config_factory):
 
     _assert_protected(package)
     assert package["beat"]["id"] == BEAT_ID
+    # The planned thread movement is surfaced: the drafter must earn it and
+    # the critic must be able to check it.
+    assert package["beat"]["thread_updates"] == [
+        {"id": "thread-hi", "status": "progressing"}
+    ]
+    # The plot mandate travels with the beat into every downstream prompt.
+    assert package["beat"]["required_change"] == BEAT_SPEC["required_change"]
+    assert package["beat"]["observable_event"] == BEAT_SPEC["observable_event"]
+    assert package["beat"]["beat_function"] == "discovery"
+    assert package["beat"]["discharges"] == ["Mara dates the earliest letter."]
     assert [t["id"] for t in package["threads"]] == ["thread-hi", "thread-mid", "thread-lo"]
     assert package["characters"][0]["pad"] == {
         "pleasure": -0.2, "arousal": 0.1, "dominance": 0.3
@@ -150,9 +165,9 @@ async def test_assembles_every_section_when_the_budget_is_ample(config_factory):
 
 
 async def test_over_budget_drops_the_oldest_prose_first(config_factory):
-    # A budget that fits the protected core (~780 tokens with the drafter's
+    # A budget that fits the protected core (~900 tokens with the drafter's
     # tool block) plus roughly one ~390-token passage.
-    config = config_factory(project_id=PROJECT_ID, context_token_budget=1200)
+    config = config_factory(project_id=PROJECT_ID, context_token_budget=1350)
     _seed(config)
     set_node_config(config)
 
@@ -170,7 +185,7 @@ async def test_over_budget_drops_the_oldest_prose_first(config_factory):
 async def test_prose_is_exhausted_before_any_thread_is_dropped(config_factory):
     # Tight enough that every passage must go, roomy enough that the (small)
     # threads all fit once the prose is gone.
-    config = config_factory(project_id=PROJECT_ID, context_token_budget=800)
+    config = config_factory(project_id=PROJECT_ID, context_token_budget=1200)
     _seed(config)
     set_node_config(config)
 

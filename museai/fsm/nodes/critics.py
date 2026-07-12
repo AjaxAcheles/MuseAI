@@ -57,6 +57,7 @@ def critic_messages(draft_text: str, package: dict) -> list[dict]:
     return render_messages(
         CRITIC_NAME,
         draft_text=draft_text,
+        beat=package["beat"],
         chapter=package["chapter"],
         threads=package["threads"],
         characters=package["characters"],
@@ -148,7 +149,7 @@ async def adversarial_critics(state: OrchestratorState) -> dict:
 
     for attempt in range(generation.critic_parse_retries + 1):
         response = await run_agent_loop(
-            config.endpoint,
+            config.endpoint_for("critic"),
             messages,
             tool_specs_for("critic"),
             tool_impls_for("critic"),

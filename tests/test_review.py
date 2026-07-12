@@ -68,7 +68,13 @@ def _seed(config) -> None:
     bus.last_snapshot.clear()
 
 
-def _patch_review_endpoint(monkeypatch, *, critic_responses: list[str], drafts: list[str]):
+def _patch_review_endpoint(
+    monkeypatch,
+    *,
+    critic_responses: list[str],
+    drafts: list[str],
+    beats_json: str = BEATS_JSON,
+):
     scripted_critics = list(critic_responses)
     scripted_drafts = list(drafts)
 
@@ -76,7 +82,7 @@ def _patch_review_endpoint(monkeypatch, *, critic_responses: list[str], drafts: 
         return _Response(CHAPTERS_JSON)
 
     async def fake_beat_llm(endpoint, messages, **kwargs):
-        return _Response(BEATS_JSON)
+        return _Response(beats_json)
 
     async def fake_draft_loop(
         endpoint, messages, tools, tool_impls, max_iterations, *, on_token=None, **kw
@@ -135,6 +141,58 @@ async def test_resolve_review_accept_commits_best_seen_draft(config_factory, mon
     assert beat["status"] == "completed"
     assert beat["prose"] == "draft needing review"
     conn.close()
+
+
+UNFULFILLED_JSON = """[
+  {"error_code": "UNFULFILLED_OBLIGATION", "offending_text": "draft",
+   "suggested_fix": "Deliver the beat's required change on the page.",
+   "critic_source": "continuity_critic"}
+]"""
+
+BEATS_WITH_THREAD_JSON = """[
+  {"ordering": 1, "intent": "The letter arrives.",
+   "entry_state": "Routine watch.", "exit_state": "Mara must decide.",
+   "required_change": "Mara can no longer ignore the letters.",
+   "observable_event": "Mara reads the letter aloud.",
+   "focal_character_id": "review-project-char-1",
+   "target_pad": {"pleasure": -0.5, "arousal": 0.6, "dominance": -0.2},
+   "thread_updates": [{"id": "review-project-thread-1", "status": "closed"}]}
+]"""
+
+
+async def test_accepting_an_unfulfilled_beat_commits_prose_but_not_the_thread(
+    config_factory, monkeypatch
+):
+    """A human accepting the writing does not launder the story state: the
+    thread the beat planned to close stays open when the critic reported the
+    required change never happened."""
+    config = config_factory(project_id=PROJECT_ID, revision_retry_cap=1)
+    _seed(config)
+    _patch_review_endpoint(
+        monkeypatch,
+        critic_responses=[UNFULFILLED_JSON, UNFULFILLED_JSON],
+        drafts=["draft needing review"],
+        beats_json=BEATS_WITH_THREAD_JSON,
+    )
+
+    manager = GenerationManager(config)
+    await manager.start(PROJECT_ID)
+    assert await manager.wait() == "review"
+
+    await manager.resolve_review("accept")
+    assert await manager.wait() == "done"
+
+    conn = db.connect_db(config.db_path)
+    beat = conn.execute("SELECT * FROM Beats").fetchone()
+    thread = conn.execute(
+        "SELECT * FROM Threads WHERE id=?", ("review-project-thread-1",)
+    ).fetchone()
+    conn.close()
+
+    assert beat["status"] == "completed"
+    assert beat["prose"] == "draft needing review"
+    # The planned closure was withheld: the prose never earned it.
+    assert thread["status"] == "open"
 
 
 async def test_resolve_review_regenerate_reenters_drafting_with_retry_reset(

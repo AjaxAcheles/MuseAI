@@ -32,6 +32,25 @@ class ConfigError(RuntimeError):
     """Raised when configuration cannot be loaded or is invalid."""
 
 
+# The five LLM-powered agent roles. Every ``agents:`` key must be one of these.
+AGENT_ROLES = ("chapter_planner", "beat_planner", "drafter", "reviser", "critic")
+
+
+def _resolve_env_api_key(value: str) -> str:
+    """Resolve a ``${VAR}`` api_key from the environment (via .env)."""
+    match = _ENV_REF.match(value.strip())
+    if not match:
+        return value
+    var = match.group(1)
+    resolved = os.environ.get(var)
+    if resolved is None or resolved == "":
+        raise ValueError(
+            f"api_key references environment variable ${{{var}}}, "
+            f"but it is unset or empty"
+        )
+    return resolved
+
+
 class EndpointConfig(BaseModel):
     """LLM endpoint description.
 
@@ -51,18 +70,32 @@ class EndpointConfig(BaseModel):
     @field_validator("api_key")
     @classmethod
     def _resolve_env_ref(cls, value: str) -> str:
-        """Resolve a ``${VAR}`` api_key from the environment (via .env)."""
-        match = _ENV_REF.match(value.strip())
-        if not match:
-            return value
-        var = match.group(1)
-        resolved = os.environ.get(var)
-        if resolved is None or resolved == "":
-            raise ValueError(
-                f"api_key references environment variable ${{{var}}}, "
-                f"but it is unset or empty"
-            )
-        return resolved
+        return _resolve_env_api_key(value)
+
+
+class AgentEndpointOverride(BaseModel):
+    """Sparse per-agent override of the shared endpoint.
+
+    Every field is optional: only the fields set here differ for that agent,
+    and everything left unset is inherited from the top-level ``endpoint``. A
+    config with no ``agents:`` section behaves exactly as before.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    base_url: str | None = None
+    api_key: str | None = None
+    model_name: str | None = None
+    tokenizer_family: Literal["tiktoken", "char_heuristic"] | None = None
+    request_timeout: int | None = None
+    temperature: float | None = None
+
+    @field_validator("api_key")
+    @classmethod
+    def _resolve_env_ref(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return _resolve_env_api_key(value)
 
 
 class GenerationConfig(BaseModel):
@@ -190,6 +223,11 @@ class AppConfig(BaseModel):
     endpoint: EndpointConfig
     generation: GenerationConfig
 
+    # Sparse per-agent inference overrides, keyed by agent role. An agent with
+    # no entry uses ``endpoint`` unchanged, so existing single-endpoint configs
+    # keep working without modification.
+    agents: dict[str, AgentEndpointOverride] = {}
+
     log_level: str = "INFO"
     host: str = "127.0.0.1"
     port: int = 8000
@@ -199,6 +237,40 @@ class AppConfig(BaseModel):
     allow_reset: bool = True
     # Seconds the agents' web_search tool waits on a search engine.
     web_search_timeout: int = 10
+
+    @field_validator("agents")
+    @classmethod
+    def _known_agent_roles(
+        cls, value: dict[str, AgentEndpointOverride]
+    ) -> dict[str, AgentEndpointOverride]:
+        """A typo'd agent role must fail at boot, not silently use the default."""
+        unknown = sorted(set(value) - set(AGENT_ROLES))
+        if unknown:
+            raise ValueError(
+                f"unknown agent role(s) in agents: {unknown}; "
+                f"known roles: {', '.join(AGENT_ROLES)}"
+            )
+        return value
+
+    def endpoint_for(self, agent: str) -> EndpointConfig:
+        """The inference endpoint one agent role actually uses.
+
+        The shared ``endpoint`` with that agent's sparse overrides applied.
+        An agent with no override — or a role this config never mentions —
+        gets the shared endpoint itself.
+        """
+        override = self.agents.get(agent)
+        if override is None:
+            return self.endpoint
+        merged = self.endpoint.model_dump()
+        merged.update(
+            {
+                key: value
+                for key, value in override.model_dump().items()
+                if value is not None
+            }
+        )
+        return EndpointConfig(**merged)
 
 
 def persist_project_id(project_id: str, path: str | Path = "config.yaml") -> AppConfig:

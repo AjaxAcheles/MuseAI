@@ -78,7 +78,7 @@ async def draft_prose(state: OrchestratorState) -> dict:
         await bus.publish("drafter_tool", {"beat_id": beat_id, **event})
 
     response = await run_agent_loop(
-        config.endpoint,
+        config.endpoint_for("drafter"),
         messages,
         tool_specs_for("drafter"),
         tool_impls_for("drafter"),

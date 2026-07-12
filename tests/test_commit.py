@@ -122,6 +122,88 @@ async def test_commit_writes_pending_intent_then_flips_to_committed(config_facto
     }
 
 
+def _unfulfilled_failure() -> FailureObject:
+    return FailureObject(
+        error_code="UNFULFILLED_OBLIGATION",
+        offending_text="The lamp turns twice.",
+        suggested_fix="Deliver the beat's required change on the page.",
+        critic_source="continuity_critic",
+    )
+
+
+def _read_commit_event(config) -> dict:
+    with open(config.event_log_path, encoding="utf-8") as fh:
+        events = [json.loads(line) for line in fh if line.strip()]
+    return next(e for e in events if e["type"] == "beat_commit")
+
+
+@pytest.mark.asyncio
+async def test_an_unfulfilled_obligation_withholds_the_thread_advance(config_factory):
+    """The prose commits, but story state the draft never earned does not."""
+    config = _config(config_factory)
+    _seed(config)
+    state = _state()
+    state["critic_failures"].append(_unfulfilled_failure())
+
+    await commit_transaction(state)
+
+    conn = db.connect_db(config.db_path)
+    beat = conn.execute("SELECT * FROM Beats WHERE id=?", (BEAT_ID,)).fetchone()
+    thread = conn.execute("SELECT * FROM Threads WHERE id=?", (THREAD_ID,)).fetchone()
+    conn.close()
+
+    # The beat itself commits — a long run must not die at the boundary...
+    assert beat["status"] == "completed"
+    assert beat["prose"] == "The lamp turns twice."
+    # ...but the planned thread advance is withheld.
+    assert thread["status"] == "open"
+
+    event = _read_commit_event(config)
+    assert event["thread_updates"] == []
+    withheld = event["thread_updates_withheld"]
+    assert withheld["reason"] == "unfulfilled_obligation"
+    assert withheld["requested"][0]["id"] == THREAD_ID
+    assert withheld["unfulfilled_findings"][0]["error_code"] == "UNFULFILLED_OBLIGATION"
+    assert bus.last_snapshot["commit_gate"]["reason"] == "unfulfilled_obligation"
+
+
+@pytest.mark.asyncio
+async def test_an_unreliable_critic_withholds_the_thread_advance(config_factory):
+    """A beat whose critic never parsed cannot vouch for its own plan."""
+    config = _config(config_factory)
+    _seed(config)
+    state = _state()
+    state["critic_parse_failure_streak"] = 1
+
+    await commit_transaction(state)
+
+    conn = db.connect_db(config.db_path)
+    thread = conn.execute("SELECT * FROM Threads WHERE id=?", (THREAD_ID,)).fetchone()
+    conn.close()
+    assert thread["status"] == "open"
+
+    event = _read_commit_event(config)
+    assert event["thread_updates_withheld"]["reason"] == "critic_unreliable"
+
+
+@pytest.mark.asyncio
+async def test_a_fulfilled_beat_still_advances_its_thread(config_factory):
+    """Non-obligation failures in state do not gate the advance."""
+    config = _config(config_factory)
+    _seed(config)
+
+    await commit_transaction(_state())  # carries an unrelated "X" failure
+
+    conn = db.connect_db(config.db_path)
+    thread = conn.execute("SELECT * FROM Threads WHERE id=?", (THREAD_ID,)).fetchone()
+    conn.close()
+    assert thread["status"] == "progressing"
+
+    event = _read_commit_event(config)
+    assert "thread_updates_withheld" not in event
+    assert event["thread_updates"][0]["id"] == THREAD_ID
+
+
 @pytest.mark.asyncio
 async def test_pending_intent_with_appended_event_is_recoverable(config_factory, monkeypatch):
     config = _config(config_factory)

@@ -6,10 +6,15 @@ nothing else.
 Rules:
 - Fix only what the critic named. Prose the critic did not fault is correct
   prose; leave its wording, rhythm, and imagery alone.
+- Preserve the beat's required change. The draft exists to deliver the change
+  in <this_beat_must_deliver>; your fix must never remove or weaken it. If a
+  finding says the change or an obligation was not delivered, the fix is to
+  deliver it on the page.
 - Keep the established narrative voice, tense, and point of view.
-- Honour the emotional constraint on the focal character: it describes how that
-  character behaves, and it must be shown through action, speech, and
-  perception — never stated outright, and never named as an emotion score.
+- The <manner> element describes how the focal character carries themselves.
+  Show it through action, speech, and perception — never stated outright, and
+  never named as an emotion score. Manner colours the prose; it is not what
+  the beat is about. Never fix a finding by adding emotional description.
 - Do not add a summary, an apology, or a note about what you changed.
 - Output prose only. No headings, no labels, no commentary.
 
@@ -34,12 +39,33 @@ You have read-only story tools. All are optional; most revisions need none.
 </system>
 <user>
 <context>
-  <beat>
+  <this_beat_must_deliver>
     <intent>{{ beat.intent }}</intent>
+{% if beat.get('required_change') %}
+    <required_change>{{ beat.required_change }}</required_change>
+{% endif %}
+{% if beat.get('observable_event') %}
+    <observable_event>{{ beat.observable_event }}</observable_event>
+{% endif %}
     <entry_state>{{ beat.entry_state }}</entry_state>
     <exit_state>{{ beat.exit_state }}</exit_state>
-    <focal_character_constraint>{{ pad_constraint }}</focal_character_constraint>
-  </beat>
+{% if beat.get('discharges') %}
+    <discharges_chapter_obligations>
+{% for obligation in beat.discharges %}
+      <obligation>{{ obligation }}</obligation>
+{% endfor %}
+    </discharges_chapter_obligations>
+{% endif %}
+{% if beat.get('thread_updates') %}
+    <planned_thread_updates>
+{% for update in beat.thread_updates %}
+      <update thread="{{ update.id }}" new_status="{{ update.status }}"/>
+{% endfor %}
+    </planned_thread_updates>
+{% endif %}
+  </this_beat_must_deliver>
+
+  <manner>{{ pad_constraint }}</manner>
 
   <chapter_obligations>
 {% for obligation in chapter.obligations %}

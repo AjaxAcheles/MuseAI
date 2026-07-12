@@ -20,7 +20,13 @@ from museai.core.stream_bus import bus
 from museai.fsm.export import committed_word_count, export_manuscript
 from museai.fsm.graph import GraphEntry, build_graph
 from museai.fsm.nodes.deps import set_node_config
-from museai.fsm.state import FSM_Pointer, OrchestratorState, accumulate_or_reset, make_initial_state
+from museai.fsm.state import (
+    UNFULFILLED_OBLIGATION,
+    FSM_Pointer,
+    OrchestratorState,
+    accumulate_or_reset,
+    make_initial_state,
+)
 from museai.memory.db import connect_db, reset_active_beats
 
 RunStatus = Literal["idle", "running", "paused", "review", "stopped", "done", "error"]
@@ -92,11 +98,19 @@ class GenerationManager:
             accepted = edited_text or self.state["best_seen_draft"]
             if not accepted:
                 raise GenerationManagerError("accept requires an edited_text or a best_seen_draft")
+            # Accepting the prose is a judgement about the writing, not about
+            # the story state. Unfulfilled-obligation findings survive into the
+            # commit so it can withhold thread advancement the prose never
+            # earned; every other finding is cleared as before.
             self.state.update(
                 {
                     "current_draft_text": accepted,
                     "streaming_buffer": accepted,
-                    "critic_failures": [],
+                    "critic_failures": [
+                        failure
+                        for failure in self.state["critic_failures"]
+                        if failure.error_code == UNFULFILLED_OBLIGATION
+                    ],
                     "review_requested": False,
                     "pause_requested": False,
                     "hard_stop_asserted": False,

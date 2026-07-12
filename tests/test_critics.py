@@ -26,6 +26,7 @@ PACKAGE = {
         "entry_state": "A routine morning.",
         "exit_state": "Mara is holding her own handwriting.",
         "focal_character_id": "char-mara",
+        "thread_updates": [{"id": "t1", "status": "progressing"}],
     },
     "pad_constraint": "Energy with nowhere to go.",
     "chapter": {
@@ -142,6 +143,14 @@ class TestPrompt:
         assert "She never lies." in body
         assert "The lamp turned through the fog at midnight." in body
 
+    def test_the_beat_goal_reaches_the_prompt(self):
+        """The critic can only enforce an exit state it has been shown."""
+        body = critic_messages(DRAFT, PACKAGE)[1]["content"]
+        assert "<beat_goal>" in body
+        assert "Mara finds the letter." in body
+        assert "Mara is holding her own handwriting." in body
+        assert '<update thread="t1" new_status="progressing"/>' in body
+
 
 class TestCleanPass:
     async def test_a_clean_critic_reports_no_failures(self, patched_loop):
@@ -183,7 +192,29 @@ class TestCleanPass:
         assert call["max_iterations"] == 6
 
 
+UNFULFILLED_RESPONSE = """```json
+[
+  {
+    "error_code": "UNFULFILLED_OBLIGATION",
+    "offending_text": "Mara lied about the letter.",
+    "suggested_fix": "The exit state requires Mara holding her own handwriting; deliver it on the page.",
+    "critic_source": "continuity_critic"
+  }
+]
+```"""
+
+
 class TestFailures:
+    async def test_an_unfulfilled_obligation_is_parsed_and_returned(self, patched_loop):
+        """The critic can report a beat that failed its own mandate."""
+        patched_loop(UNFULFILLED_RESPONSE)
+
+        delta = await adversarial_critics(state_with())
+
+        failures = delta["critic_failures"]
+        assert len(failures) == 1
+        assert failures[0].error_code == "UNFULFILLED_OBLIGATION"
+
     async def test_a_failure_array_is_parsed_and_returned(self, patched_loop):
         patched_loop(ONE_FAILURE_RESPONSE)
 

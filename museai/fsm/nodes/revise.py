@@ -169,7 +169,7 @@ def _reviser_messages(
 
 def _budgeted_messages(config, **kwargs) -> tuple[list[dict], bool]:
     """Render at full context, collapsing to the hard constraints if over budget."""
-    endpoint = config.endpoint
+    endpoint = config.endpoint_for("reviser")
     budget = config.generation.context_token_budget
 
     messages = _reviser_messages(collapsed=False, **kwargs)
@@ -200,7 +200,7 @@ async def _rewrite(config, messages: list[dict], what: str, beat_id: str) -> str
         await bus.publish("reviser_tool", {"beat_id": beat_id, **event})
 
     response = await run_agent_loop(
-        config.endpoint,
+        config.endpoint_for("reviser"),
         messages,
         tool_specs_for("reviser"),
         tool_impls_for("reviser"),

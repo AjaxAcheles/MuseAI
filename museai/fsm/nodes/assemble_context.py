@@ -63,7 +63,8 @@ def drafter_messages(package: dict) -> list[dict]:
 
 
 def _count(package: dict, config) -> int:
-    endpoint = config.endpoint
+    # The budget is measured against the endpoint the drafter will send to.
+    endpoint = config.endpoint_for("drafter")
     return count_message_tokens(
         drafter_messages(package), endpoint.tokenizer_family, endpoint.model_name
     )
@@ -117,6 +118,22 @@ def _intended_refrain(raw: object) -> list[str]:
     if isinstance(raw, list):
         return [str(item).strip() for item in raw if str(item).strip()]
     return []
+
+
+def _thread_updates(raw: object) -> list[dict]:
+    """Normalize a beat spec's ``thread_updates`` to ``{id, status}`` dicts.
+
+    The planner validated these at planning time; they are surfaced here so the
+    drafter is told which thread movement the beat must earn and the critic can
+    check that the prose actually delivered it.
+    """
+    if not isinstance(raw, list):
+        return []
+    updates = []
+    for item in raw:
+        if isinstance(item, dict) and item.get("id") and item.get("status"):
+            updates.append({"id": str(item["id"]), "status": str(item["status"])})
+    return updates
 
 
 def _obligations(raw: str | None) -> list[str]:
@@ -223,12 +240,23 @@ async def assemble_context(state: OrchestratorState) -> dict:
                 "intent": spec.get("intent", ""),
                 "entry_state": spec.get("entry_state", ""),
                 "exit_state": spec.get("exit_state", ""),
+                # The plot mandate: the change this beat must produce, the
+                # on-page event that carries it, its structural function, and
+                # the chapter obligations it discharges. Older specs read back
+                # as empty — the templates render nothing for them.
+                "required_change": spec.get("required_change", ""),
+                "observable_event": spec.get("observable_event", ""),
+                "beat_function": spec.get("beat_function", ""),
+                "discharges": [str(o) for o in (spec.get("discharges") or []) if str(o).strip()],
                 "focal_character_id": spec.get("focal_character_id", ""),
                 # Phrases this beat's planner declared may recur verbatim. The
                 # repetition audit exempts a paragraph matching one of these, so a
                 # deliberate refrain is not faulted as a copy. Only the planner
                 # writes this — never the drafter.
                 "intended_refrain": _intended_refrain(spec.get("intended_refrain")),
+                # The thread movement this beat was planned to produce. Shown to
+                # the drafter as a deliverable and to the critic as a check.
+                "thread_updates": _thread_updates(spec.get("thread_updates")),
             },
             "pad_constraint": beat["pad_constraint"],
             "chapter": {

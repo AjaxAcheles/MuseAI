@@ -67,6 +67,10 @@ BEAT = {
     "intent": "Mira finds the ledger and hides it.",
     "entry_state": "Mira is alone in the archive after hours.",
     "exit_state": "Mira has the ledger under her coat, and Vaun is at the door.",
+    "required_change": "The forgery stops being a rumour and becomes evidence in Mira's hands.",
+    "observable_event": "Mira pulls the ledger from the shelf and hides it under her coat.",
+    "beat_function": "discovery",
+    "discharges": ["Mira finds the ledger."],
 }
 RECENT_PROSE = ["The archive smelled of dust and vinegar.", "Vaun had not called."]
 DRAFT_TEXT = "Mira pocketed the ledger. The archive was bright with noon sun."
@@ -128,6 +132,7 @@ def context_for(template: str) -> dict:
     if template == "continuity_critic":
         return {
             **common,
+            "beat": BEAT,
             "chapter": CHAPTER,
             "recent_prose": RECENT_PROSE,
             "draft_text": DRAFT_TEXT,
@@ -249,6 +254,50 @@ class TestRendering:
         system = messages[0]["content"]
         assert "scoped to the material" in system
         assert "continuity_critic" in messages[1]["content"]
+
+    def test_critic_sees_the_beat_goal(self):
+        """The critic must be shown the mandate it is asked to enforce."""
+        messages = render_messages("continuity_critic", **context_for("continuity_critic"))
+        user = messages[1]["content"]
+        assert "<beat_goal>" in user
+        assert BEAT["intent"] in user
+        assert BEAT["exit_state"] in user
+        assert BEAT["required_change"] in user
+        assert BEAT["observable_event"] in user
+        assert "Mira finds the ledger." in user  # the discharged obligation
+        assert "UNFULFILLED_OBLIGATION" in messages[0]["content"]
+
+    def test_critic_sees_planned_thread_updates(self):
+        beat = {**BEAT, "thread_updates": [{"id": "t1", "status": "progressing"}]}
+        context = {**context_for("continuity_critic"), "beat": beat}
+        user = render_messages("continuity_critic", **context)[1]["content"]
+        assert '<update thread="t1" new_status="progressing"/>' in user
+
+    def test_drafter_reads_the_change_before_the_manner(self):
+        """The plot mandate leads the context; PAD is a modifier on it."""
+        user = render_messages("drafter", **context_for("drafter"))[1]["content"]
+        assert user.index("<this_beat_must_deliver>") < user.index("<manner>")
+        assert user.index(BEAT["required_change"]) < user.index("<manner>")
+        assert BEAT["exit_state"] in user
+        assert BEAT["observable_event"] in user
+        assert "Mira finds the ledger." in user  # the discharged obligation
+
+    def test_reviser_reads_the_change_before_the_manner(self):
+        """The reviser preserves the beat's required change; manner stays subordinate."""
+        for mode in ("span", "full"):
+            context = {**context_for("reviser"), "mode": mode}
+            messages = render_messages("reviser", **context)
+            user = messages[1]["content"]
+            assert user.index("<this_beat_must_deliver>") < user.index("<manner>")
+            assert BEAT["required_change"] in user
+            assert "<focal_character_constraint>" not in user
+            assert "Preserve the beat's required change" in messages[0]["content"]
+
+    def test_drafter_sees_planned_thread_updates(self):
+        beat = {**BEAT, "thread_updates": [{"id": "t2", "status": "resolved"}]}
+        context = {**context_for("drafter"), "beat": beat}
+        user = render_messages("drafter", **context)[1]["content"]
+        assert '<update thread="t2" new_status="resolved"/>' in user
 
 
 class TestRenderMessagesParser:

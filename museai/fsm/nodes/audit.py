@@ -301,9 +301,10 @@ async def audit(state: OrchestratorState) -> dict:
                 offending_text=emotion_sentences[0][:_QUOTE_CHARS],
                 suggested_fix=(
                     f"{emotion_density:.0%} of sentences name an emotion outright, "
-                    f"over the {generation.emotion_word_threshold:.0%} limit. Show "
-                    f"the feeling through action, gesture, and perception instead "
-                    f"of stating it."
+                    f"over the {generation.emotion_word_threshold:.0%} limit. Cut "
+                    f"or understate the named emotions — let the beat's events and "
+                    f"the character's choices imply the feeling. Do not add new "
+                    f"emotional description to compensate."
                 ),
                 critic_source=CRITIC_SOURCE,
             )

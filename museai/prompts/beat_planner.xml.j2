@@ -9,10 +9,24 @@ A beat has:
 - an entry state and an exit state: where the situation stands as the beat
   opens and closes. The exit state of one beat is the entry state of the next;
   the first beat's entry state must follow from the recent prose.
+- a required_change: the one meaningful change this beat produces. It may be
+  wholly interior — a realization, a decision, a shift in what a character is
+  willing to do — but by the end of the beat the situation must be different.
+  A beat that changes nothing is not a beat; cut it or give it work.
+- an observable_event: what shows on the page — an action, an exchange, a
+  discovery, a choice made visible. Even an interior beat needs an on-page
+  anchor the reader can see.
+- a beat_function: why the beat exists structurally — e.g. reveal, reversal,
+  confrontation, decision, discovery, consequence, reaction, setup, payoff,
+  raising the stakes.
+- discharges: which of the chapter's obligations this beat delivers, copied
+  verbatim from the <obligations> list. Every chapter obligation must be
+  assigned to at least one beat.
 - a target PAD for its focal character: the emotional state that
   character should be in as the beat ends, on three axes in the range -1.0 to
   1.0 — pleasure (displeasure to delight), arousal (calm to excitement), and
-  dominance (submissive to in control).
+  dominance (submissive to in control). The PAD colours how the character
+  moves through the beat; the required_change is what the beat is for.
 
 Beats must, together, satisfy every one of the chapter's obligations. Order the
 beats. Beat ordering starts at 1.
@@ -123,8 +137,10 @@ else.
 
 <task>
 Decompose this chapter into its ordered beats. Each beat states its intent, its
-entry and exit state, and the target PAD of its focal character at the beat's
-end. Where a beat resolves or advances an open thread, say so in
+entry and exit state, the required change it produces, the observable event
+that anchors that change on the page, its structural function, which chapter
+obligations it discharges, and the target PAD of its focal character at the
+beat's end. Where a beat resolves or advances an open thread, say so in
 "thread_updates". The drafter decides each beat's length from the story's
 pacing — do not plan word counts.
 </task>
@@ -139,12 +155,21 @@ Return a JSON array inside a single fenced code block. Each element:
     "intent": "The dramatic work this beat performs.",
     "entry_state": "Where the situation stands as the beat opens.",
     "exit_state": "Where it stands as the beat closes.",
+    "required_change": "The one meaningful change this beat produces.",
+    "observable_event": "What the reader sees on the page that carries the change.",
+    "beat_function": "reveal",
+    "discharges": [{{ '"%s"' % chapter.obligations[0] if chapter.obligations else '"an obligation copied verbatim"' }}],
     "focal_character_id": "{{ characters[0].id if characters else 'the-character-id' }}",
     "target_pad": {"pleasure": 0.0, "arousal": 0.0, "dominance": 0.0},
     "thread_updates": [{"id": "{{ threads[0].id if threads else 'a-thread-id' }}", "status": "progressing"}]
   }
 ]
 ```
+
+"discharges" entries must be copied verbatim from the chapter's <obligations>
+above; an entry that matches no obligation is dropped. A beat that delivers no
+obligation may use an empty list, but every obligation must appear in some
+beat's "discharges".
 
 "focal_character_id" must be copied verbatim from the id attribute of one
 <character> in the context above. Do not abbreviate it, do not invent a new id,

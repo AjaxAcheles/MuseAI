@@ -377,11 +377,26 @@ class TestCheckPlanNode:
             "intent": "Mara answers the letter.",
             "entry_state": "The reply is unread.",
             "exit_state": "The reply is sent.",
+            "required_change": "Mara commits herself in writing.",
+            "observable_event": "Mara seals and posts the reply.",
             "target_pad": {"pleasure": 0.2, "arousal": 0.3, "dominance": 0.5},
             "focal_character_id": "Mara Voss",
             "thread_updates": [{"id": "thread-letters", "status": "closed"}],
         })
         assert verdict == {"valid": True, "node_type": "beat", "problems": []}
+
+    def test_a_beat_without_a_change_or_event_is_named(self, world):
+        verdict = check_plan_node({
+            "intent": "Mara broods.",
+            "entry_state": "a",
+            "exit_state": "b",
+            "target_pad": {"pleasure": 0.0, "arousal": 0.0, "dominance": 0.0},
+            "focal_character_id": "Mara Voss",
+        })
+        assert verdict["valid"] is False
+        problems = " | ".join(verdict["problems"])
+        assert "required_change" in problems
+        assert "observable_event" in problems
 
     def test_a_beat_with_bad_pad_and_unknown_thread_is_named(self, world):
         verdict = check_plan_node({
