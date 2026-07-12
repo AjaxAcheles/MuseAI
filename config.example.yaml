@@ -28,8 +28,16 @@ endpoint:
   model_name: "your-model-name"
   # "tiktoken" or "char_heuristic" only.
   tokenizer_family: "char_heuristic"
-  request_timeout: 60
+  request_timeout: 60      # connect/write timeout, seconds
+  # Max silent gap between streamed chunks, seconds. Separate from
+  # request_timeout: a reasoning model legitimately pauses minutes mid-stream.
+  stream_read_timeout: 300
   temperature: 0.7
+  # Sent as max_tokens when set. Leave null to omit the field — some endpoints
+  # bill hidden reasoning against this budget, and some apply a small default
+  # cap when it is absent. Truncation (finish_reason "length") is detected and
+  # reported either way.
+  max_output_tokens: null
 
 # Generation shape.
 generation:
@@ -49,6 +57,6 @@ generation:
   intensity_hot_threshold: 0.6   # |target arousal| at/above which a beat counts as "hot"
   intensity_flat_fraction: 0.8   # fraction of a chapter's beats that may be hot before re-prompting
   research_mode: false           # offer web_search to the agents; off = story-canon tools only
-  tool_call_cap: 3               # max calls to any one tool within a single agent loop
+  tool_call_cap: 6               # max calls to any one tool within a single agent loop
   # repetition_allowlist: []     # optional: phrases allowed to recur verbatim (author-declared)
   # emotion_words: [...]         # optional: override the named-emotion vocabulary the guard counts

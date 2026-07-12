@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any
+from typing import Any, Sequence
 
 from pydantic import ConfigDict, ValidationError
 
@@ -68,6 +68,15 @@ class StructuredOutputError(ValueError):
 
 class FakeToolCallTextError(StructuredOutputError):
     """The planner wrote tool-call-shaped JSON as text instead of using tools."""
+
+
+class TruncatedResponseError(StructuredOutputError):
+    """The model's reply was cut off at the endpoint's token limit.
+
+    Raised by callers that see ``finish_reason == "length"`` — the parsers here
+    never see a finish reason. A truncated reply must not be parsed: a cleanly
+    balanced inner fragment of a half-written plan can masquerade as the plan.
+    """
 
 
 def _strip_fences(text: str) -> str:
@@ -226,13 +235,71 @@ def _validate(data: Any, *, lenient: bool = False) -> list[FailureObject]:
     return findings
 
 
+# --- Clean-verdict recognition (critic only) --------------------------------
+# A critic sometimes phrases "no issues" as prose instead of `[]`. Rejecting
+# that burns every re-prompt and pushes the run toward degraded mode over a
+# draft the critic just said was fine. The reading below is deliberately
+# narrow: any JSON-ish bracket, any schema vocabulary, any hedge, or anything
+# beyond a short sentence still fails and re-prompts.
+_CLEAN_VERDICT_MAX_CHARS = 240
+
+_CLEAN_PHRASES = re.compile(
+    r"\b(clean|clear|no (?:continuity )?(?:issues?|errors?|problems?)|"
+    r"no continuity|none(?: found)?|nothing(?: to report| found)?|looks good)\b",
+    re.IGNORECASE,
+)
+
+# Schema vocabulary: a reply naming a field or an error code is talking about
+# findings, however it is phrased. Lower-cased comparison catches CONTRADICTS.
+_SCHEMA_MARKERS = (
+    "error_code",
+    "offending_text",
+    "suggested_fix",
+    "critic_source",
+    "contradicts",
+    "unfulfilled",
+    "false_real_world",
+)
+
+# Hedges: "clean, but…" is not a clean verdict, and neither is a reply that
+# trails off mid-thought.
+_HEDGE_MARKERS = re.compile(
+    r"\b(but|however|although|though|except|unsure|not sure|maybe|might|"
+    r"possibl[ey]|perhaps)\b",
+    re.IGNORECASE,
+)
+
+
+def is_clean_verdict(text: str) -> bool:
+    """Whether a prose critic reply unambiguously says the draft is clean.
+
+    True only when the text is short, contains no ``[`` or ``{`` at all, none
+    of the failure-object vocabulary, no hedging, and affirmatively matches a
+    clean-ish phrase. Conservative by construction: a truncated or equivocating
+    reply returns False and stays a parse failure.
+    """
+    stripped = text.strip()
+    if not stripped or len(stripped) > _CLEAN_VERDICT_MAX_CHARS:
+        return False
+    if "[" in stripped or "{" in stripped:
+        return False
+    lowered = stripped.lower()
+    if any(marker in lowered for marker in _SCHEMA_MARKERS):
+        return False
+    if _HEDGE_MARKERS.search(stripped):
+        return False
+    return bool(_CLEAN_PHRASES.search(stripped))
+
+
 def parse_failure_objects(raw_text: str, *, lenient: bool = False) -> list[FailureObject]:
     """Parse a critic response into validated failure objects.
 
     Two bounded extraction passes — the response as given, then fence-stripped
-    and reduced to its first balanced span — and never a loop. Re-prompting is
-    the caller's job (see ``fsm/nodes/critics.py``), which is why no retry budget
-    is threaded through here.
+    and scanned for balanced spans (every ``[...]`` candidate, then the first
+    ``{...}``, matching the planners' search so a bracketed preamble cannot
+    mask the payload) — and never a loop. Re-prompting is the caller's job
+    (see ``fsm/nodes/critics.py``), which is why no retry budget is threaded
+    through here.
 
     ``lenient`` relaxes *element* validation only: unknown keys are ignored and
     an element that still will not validate is skipped rather than failing the
@@ -242,7 +309,9 @@ def parse_failure_objects(raw_text: str, *, lenient: bool = False) -> list[Failu
     The raised :class:`StructuredOutputError` carries the underlying validation
     detail, because that text is what gets fed back to the model on a re-prompt.
 
-    An empty array returns ``[]`` — a clean draft, not a failure.
+    An empty array returns ``[]`` — a clean draft, not a failure. So does an
+    unambiguous prose clean verdict (see :func:`is_clean_verdict`), logged at
+    WARNING because the critic still broke its output contract.
     """
     if not raw_text or not raw_text.strip():
         raise StructuredOutputError(
@@ -256,21 +325,56 @@ def parse_failure_objects(raw_text: str, *, lenient: bool = False) -> list[Failu
     except json.JSONDecodeError:
         pass
 
-    # Pass 2: strip fences and prose, then take the first balanced span.
-    candidate = _first_balanced_span(_strip_fences(raw_text))
+    # Pass 2: strip fences and prose, then try every balanced array span — a
+    # preamble like "I found 1 issue [see below]:" must not mask the real
+    # array behind it — before falling back to the first object span.
+    stripped = _strip_fences(raw_text)
+    shape_error: StructuredOutputError | None = None
+    for candidate in _balanced_spans_with_opener(stripped, "["):
+        try:
+            return _validate(json.loads(candidate), lenient=lenient)
+        except StructuredOutputError as exc:
+            shape_error = exc
+        except json.JSONDecodeError:
+            pass
+
+    candidate = _first_balanced_span_with_opener(stripped, "{")
     if candidate is not None:
         try:
             return _validate(json.loads(candidate), lenient=lenient)
+        except StructuredOutputError as exc:
+            shape_error = exc
         except json.JSONDecodeError:
             pass
+
+    # A reply that carried JSON-ish spans was talking findings, however badly;
+    # is_clean_verdict rejects any text containing a bracket, so these two
+    # rungs cannot both apply to one reply.
+    if is_clean_verdict(raw_text):
+        get_fsm_logger().warning(
+            "critic_clean_prose verdict accepted as []: %r", raw_text.strip()[:120]
+        )
+        return []
+
+    if shape_error is not None:
+        raise shape_error
 
     raise StructuredOutputError(
         f"could not extract JSON failure objects from critic response: {raw_text[:200]!r}"
     )
 
 
-def _as_object_array(data: Any, what: str) -> list[dict]:
-    """Coerce parsed JSON to a non-empty list of objects."""
+def _as_object_array(
+    data: Any, what: str, element_keys: Sequence[str] | None = None
+) -> list[dict]:
+    """Coerce parsed JSON to a non-empty list of objects.
+
+    ``element_keys``, when given, requires every element to carry at least one
+    of those keys. This is what stops a *truncated* reply from being accepted:
+    a plan cut off mid-JSON often leaves some inner array — ``thread_updates``,
+    ``obligations`` — as the only balanced span, and without a key check that
+    fragment parses cleanly and becomes "the plan".
+    """
     if isinstance(data, dict):
         data = [data]
     if not isinstance(data, list):
@@ -297,6 +401,12 @@ def _as_object_array(data: Any, what: str) -> list[dict]:
             raise FakeToolCallTextError(
                 f"{what} element {index} looks like a tool call, not a planner "
                 f"object: {element.get('name')!r}"
+            )
+        if element_keys and not any(key in element for key in element_keys):
+            raise StructuredOutputError(
+                f"{what} element {index} has none of the expected keys "
+                f"({', '.join(element_keys)}); it looks like a fragment of a "
+                f"larger reply, not a {what} plan"
             )
     return list(data)
 
@@ -336,7 +446,13 @@ def repair_json_text(text: str) -> str:
     return "\n".join(repaired)
 
 
-def parse_json_array(raw_text: str, *, what: str, repair: bool = False) -> list[dict]:
+def parse_json_array(
+    raw_text: str,
+    *,
+    what: str,
+    repair: bool = False,
+    element_keys: Sequence[str] | None = None,
+) -> list[dict]:
     """Parse a planner response into a non-empty list of JSON objects.
 
     Same two bounded passes as :func:`parse_failure_objects`, but the elements
@@ -348,6 +464,12 @@ def parse_json_array(raw_text: str, *, what: str, repair: bool = False) -> list[
     a hard failure: a plan must contain at least one element, and returning
     ``[]`` here would let a node silently write nothing.
 
+    ``element_keys``, when given, rejects any candidate array whose elements
+    carry none of those keys — the guard that keeps a truncated reply's inner
+    ``thread_updates`` or ``obligations`` array from being accepted as the
+    plan. Extraction still tries every balanced span, so a real plan later in
+    the text is found; acceptance is what narrows.
+
     ``repair`` adds a third pass that runs :func:`repair_json_text` over the
     response. It is off by default and belongs to callers that have already
     spent their re-prompts — see ``museai/llm/planning.py``.
@@ -357,7 +479,7 @@ def parse_json_array(raw_text: str, *, what: str, repair: bool = False) -> list[
 
     # Pass 1: strict.
     try:
-        return _as_object_array(json.loads(raw_text), what)
+        return _as_object_array(json.loads(raw_text), what, element_keys)
     except StructuredOutputError:
         raise  # parsed as JSON, but the shape is wrong — a re-prompt won't fix it
     except json.JSONDecodeError:
@@ -368,7 +490,7 @@ def parse_json_array(raw_text: str, *, what: str, repair: bool = False) -> list[
     shape_error: StructuredOutputError | None = None
     for candidate in _balanced_spans_with_opener(stripped, "["):
         try:
-            return _as_object_array(json.loads(candidate), what)
+            return _as_object_array(json.loads(candidate), what, element_keys)
         except FakeToolCallTextError:
             raise
         except StructuredOutputError as exc:
@@ -383,7 +505,7 @@ def parse_json_array(raw_text: str, *, what: str, repair: bool = False) -> list[
     candidate = _first_balanced_span(stripped)
     if candidate is not None:
         try:
-            return _as_object_array(json.loads(candidate), what)
+            return _as_object_array(json.loads(candidate), what, element_keys)
         except FakeToolCallTextError:
             raise
         except StructuredOutputError as exc:
@@ -396,7 +518,7 @@ def parse_json_array(raw_text: str, *, what: str, repair: bool = False) -> list[
         repaired = repair_json_text(stripped)
         for candidate in _balanced_spans_with_opener(repaired, "["):
             try:
-                return _as_object_array(json.loads(candidate), what)
+                return _as_object_array(json.loads(candidate), what, element_keys)
             except FakeToolCallTextError:
                 raise
             except StructuredOutputError as exc:
@@ -409,7 +531,7 @@ def parse_json_array(raw_text: str, *, what: str, repair: bool = False) -> list[
         candidate = _first_balanced_span(repaired)
         if candidate is not None:
             try:
-                return _as_object_array(json.loads(candidate), what)
+                return _as_object_array(json.loads(candidate), what, element_keys)
             except FakeToolCallTextError:
                 raise
             except StructuredOutputError as exc:

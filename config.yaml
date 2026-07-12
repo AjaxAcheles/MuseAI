@@ -5,7 +5,14 @@ endpoint:
   model_name: cryptidbleh/gemma4-claude-opus-4.6:latest
   tokenizer_family: char_heuristic
   request_timeout: 60
+  # Maximum silent gap between streamed chunks. Separate from request_timeout
+  # (connect/write): a reasoning model legitimately pauses minutes mid-stream.
+  stream_read_timeout: 300
   temperature: 0.88
+  # Sent as max_tokens when set. Leave null to omit the field — some endpoints
+  # bill hidden reasoning against this budget. Truncation (finish_reason
+  # "length") is detected and reported either way.
+  max_output_tokens: null
 generation:
   word_count_target: null
   revision_retry_cap: 4
@@ -62,7 +69,9 @@ generation:
   intensity_hot_threshold: 0.6
   intensity_flat_fraction: 0.8
   research_mode: false
-  tool_call_cap: 3
+  # Per tool name, across one whole agent loop. 6, not 3: a critic that issues
+  # one batch of three parallel searches must still be able to search again.
+  tool_call_cap: 6
 agents: {}
 log_level: INFO
 host: 127.0.0.1

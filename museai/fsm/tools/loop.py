@@ -146,8 +146,16 @@ async def _run_tool_calls(
         function = call.get("function") or {}
         name = function.get("name") or ""
         kwargs, error = _parse_arguments(function.get("arguments"))
+        # A malformed call — bad arguments, unknown tool — never burns the
+        # budget: nothing ran, and charging for it can blind an agent whose
+        # remaining calls would have been well-formed.
         if error is not None:
             content = _error_payload(name, "bad_arguments", error)
+        elif name not in tool_impls:
+            known = ", ".join(sorted(tool_impls)) or "none"
+            content = _error_payload(
+                name, "unknown_tool", f"unknown tool {name!r}; available tools: {known}"
+            )
         elif call_cap is not None and call_counts.get(name, 0) >= call_cap:
             content = _error_payload(
                 name,
@@ -194,6 +202,7 @@ async def run_agent_loop(
     agent: str = "system",
     on_token: Callable[[str], Awaitable[None]] | None = None,
     tool_call_cap: int | None = None,
+    conversation_out: list[dict[str, Any]] | None = None,
 ) -> LLMResponse:
     """Drive the model through tool calls until it answers in prose.
 
@@ -212,6 +221,12 @@ async def run_agent_loop(
     ``tool_call_cap`` bounds how many times any *one* tool may run across the
     whole loop; ``None`` leaves them uncapped.
 
+    ``conversation_out``, when given, is filled with the loop's working message
+    list — the original messages plus every assistant tool-call turn and tool
+    result, *without* the final reply. A caller re-prompting after a bad reply
+    continues from it, so the retry keeps the tool results this attempt already
+    paid for instead of re-running every tool.
+
     ``messages`` is not mutated; the loop works on its own copy.
     """
     if max_iterations < 1:
@@ -220,11 +235,22 @@ async def run_agent_loop(
     working: list[dict[str, Any]] = [dict(m) for m in messages]
     call_counts: dict[str, int] = {}
 
+    def _export_conversation() -> None:
+        if conversation_out is not None:
+            conversation_out[:] = [dict(m) for m in working]
+
     for _ in range(max_iterations):
         response = await call_llm(
-            endpoint, working, tools=tools, agent=agent, stream=True, on_token=on_token
+            endpoint,
+            working,
+            tools=tools,
+            agent=agent,
+            stream=True,
+            on_token=on_token,
+            retry_on_empty=True,
         )
         if not response.tool_calls:
+            _export_conversation()
             return response
 
         working.append(
@@ -246,4 +272,8 @@ async def run_agent_loop(
         "agent_loop max_iterations=%d reached; forcing a tool-free answer",
         max_iterations,
     )
-    return await call_llm(endpoint, working, agent=agent, stream=True, on_token=on_token)
+    response = await call_llm(
+        endpoint, working, agent=agent, stream=True, on_token=on_token, retry_on_empty=True
+    )
+    _export_conversation()
+    return response

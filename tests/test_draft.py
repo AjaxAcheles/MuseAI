@@ -173,6 +173,43 @@ async def test_an_empty_stream_is_a_hard_failure(configured, monkeypatch):
         await draft_prose(_state())
 
 
+async def test_a_truncated_draft_is_refused_rather_than_committed(
+    configured, monkeypatch
+):
+    """finish_reason "length" means the beat stops mid-sentence. Committing it
+    plants malformed prose in the manuscript; failing loudly names the knob."""
+
+    async def truncated(endpoint, messages, *, stream=False, on_token=None, **kwargs):
+        for token in TOKENS:
+            await on_token(token)
+        reply = _Response("".join(TOKENS))
+        reply.finish_reason = "length"
+        return reply
+
+    monkeypatch.setattr(loop_module, "call_llm", truncated)
+
+    with pytest.raises(DraftingError, match="max_output_tokens"):
+        await draft_prose(_state())
+
+
+async def test_an_empty_truncated_draft_names_the_cause_not_just_the_symptom(
+    configured, monkeypatch
+):
+    """A reasoning model can burn its whole budget inside <think>, returning no
+    prose at all. "No prose" would be true and useless; the operator needs the
+    truncation and the knob."""
+
+    async def truncated(endpoint, messages, *, stream=False, on_token=None, **kwargs):
+        reply = _Response("")
+        reply.finish_reason = "length"
+        return reply
+
+    monkeypatch.setattr(loop_module, "call_llm", truncated)
+
+    with pytest.raises(DraftingError, match="truncated"):
+        await draft_prose(_state())
+
+
 async def test_the_loop_is_offered_the_drafter_roster(configured, monkeypatch):
     offered: list = []
 

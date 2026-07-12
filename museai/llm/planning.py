@@ -20,6 +20,17 @@ text becomes a beat's ``intent``. Every repair is logged at WARNING and publishe
 to the stream, because a plan the model did not literally write is not a thing to
 pass off silently.
 
+Failures are diagnosed before they are corrected. A reply cut off at the
+endpoint's token limit (``finish_reason == "length"``) is *truncation*, not a
+quoting mistake: it gets a truncation-specific correction asking for a shorter
+plan, is logged as ``truncated`` rather than ``parse_failed``, and is never fed
+to the quote repair — repairing half an array puts words in the model's mouth
+twice over. An empty reply likewise gets its own correction, and neither case
+appends the broken reply verbatim when doing so would teach the model nothing.
+
+Retries continue from the agent loop's working conversation, so tool results
+gathered on one attempt are not re-fetched on the next.
+
 Unlike the critic, a planner cannot degrade. There is no honest empty plan: zero
 chapters is a failed run, so exhausting every rung still raises.
 """
@@ -37,6 +48,7 @@ from museai.llm.client import call_llm
 from museai.llm.structured import (
     FakeToolCallTextError,
     StructuredOutputError,
+    TruncatedResponseError,
     parse_json_array,
 )
 
@@ -62,10 +74,35 @@ _FAKE_TOOL_CORRECTION_TEMPLATE = (
     "the array."
 )
 
+# Quote-escaping advice cannot fix a reply the endpoint cut off; asking for a
+# shorter answer can.
+_TRUNCATION_CORRECTION_TEMPLATE = (
+    "Your previous reply was cut off at the endpoint's output token limit "
+    "before the JSON array was complete.\n\n"
+    "Return the complete fenced JSON array, but make it shorter: fewer "
+    "elements if the plan allows it, and briefer field values — one or two "
+    "sentences per description, no prose outside the array. Do not repeat the "
+    "cut-off reply."
+)
+
+_EMPTY_CORRECTION_TEMPLATE = (
+    "Your previous reply was empty.\n\n"
+    "Return only the fenced JSON array described in the output format — at "
+    "least one element, and nothing else. Do not reply with an empty message, "
+    "reasoning only, or prose."
+)
+
 _INVALID_REPLY_MARKER = (
     "[Previous assistant reply omitted: it was invalid planner output and "
     "contained tool-call-shaped JSON as plain text rather than a JSON plan array.]"
 )
+
+_TRUNCATED_REPLY_MARKER = (
+    "[Previous assistant reply omitted: it was cut off at the endpoint's "
+    "output token limit before the JSON array was complete.]"
+)
+
+_EMPTY_REPLY_MARKER = "[Previous assistant reply omitted: it was empty.]"
 
 
 async def call_llm_for_json_array(
@@ -81,24 +118,30 @@ async def call_llm_for_json_array(
     max_tool_iterations: int = 1,
     on_tool_event: Any = None,
     tool_call_cap: int | None = None,
+    element_keys: Sequence[str] | None = None,
 ) -> list[dict]:
     """Call ``agent`` until it yields a usable JSON array of ``what``, or give up.
 
     ``what`` ("chapters", "beats") names the plan in errors and log lines; ``node``
-    names the FSM node for the structured log. Raises
-    :class:`StructuredOutputError` when every retry and the repair pass are spent.
+    names the FSM node for the structured log. ``element_keys`` is handed to
+    :func:`parse_json_array` so a fragment of a truncated reply cannot pass as
+    the plan. Raises :class:`StructuredOutputError` when every retry and the
+    repair pass are spent, or :class:`TruncatedResponseError` when the model
+    could not fit a plan inside the endpoint's output token limit.
 
     When ``tools`` and ``tool_impls`` are given, each attempt runs the bounded
     agent loop so the planner may gather context before answering; the loop
     always terminates in a plain reply, which is parsed exactly as before.
     ``on_tool_event`` is handed to that loop: one event per executed tool call.
+    Corrections continue from the loop's working conversation, so a retry keeps
+    the tool results the previous attempt already fetched.
     """
     if tools is not None and tool_impls is not None:
         # Imported here, not at module top: llm/ stays importable without fsm/,
         # and the loop itself only depends on this package's client.
         from museai.fsm.tools.loop import run_agent_loop
 
-        async def _ask(conv: list) -> Any:
+        async def _ask(conv: list, conv_out: list) -> Any:
             return await run_agent_loop(
                 endpoint,
                 conv,
@@ -108,28 +151,41 @@ async def call_llm_for_json_array(
                 on_event=on_tool_event,
                 agent=agent,
                 tool_call_cap=tool_call_cap,
+                conversation_out=conv_out,
             )
     else:
 
-        async def _ask(conv: list) -> Any:
-            return await call_llm(endpoint, conv, agent=agent, stream=True)
+        async def _ask(conv: list, conv_out: list) -> Any:
+            conv_out[:] = [dict(m) for m in conv]
+            return await call_llm(
+                endpoint, conv, agent=agent, stream=True, retry_on_empty=True
+            )
 
     conversation = list(messages)
     last_text = ""
     last_error = ""
+    last_truncated = False
 
     for attempt in range(retries + 1):
-        response = await _ask(conversation)
+        # The working conversation as the model saw it: the original messages
+        # plus any tool calls and results this attempt made. Corrections build
+        # on it so a retry does not re-run every tool.
+        working: list = []
+        response = await _ask(conversation, working)
         last_text = response.text
-        try:
-            return parse_json_array(last_text, what=what)
-        except StructuredOutputError as exc:
-            last_error = str(exc)
-            fake_tool_text = isinstance(exc, FakeToolCallTextError)
+        last_truncated = getattr(response, "finish_reason", None) == "length"
+
+        if last_truncated:
+            # Do not parse a truncated reply: a balanced inner fragment of a
+            # half-written array can pass for the plan (and once did).
+            last_error = (
+                f"the {what} reply was cut off at the endpoint's output token "
+                f"limit (finish_reason='length')"
+            )
             log_node_event(
                 node,
                 level=logging.WARNING,
-                event="fake_tool_call_text" if fake_tool_text else "parse_failed",
+                event="truncated",
                 what=what,
                 attempt=attempt + 1,
                 retries=retries,
@@ -137,18 +193,65 @@ async def call_llm_for_json_array(
             )
             if attempt == retries:
                 break
-            assistant_content = _INVALID_REPLY_MARKER if fake_tool_text else last_text
-            correction = (
-                _FAKE_TOOL_CORRECTION_TEMPLATE if fake_tool_text else _CORRECTION_TEMPLATE
-            ).format(error=last_error)
-            conversation = [
-                *conversation,
-                {"role": "assistant", "content": assistant_content},
-                {"role": "user", "content": correction},
-            ]
+            assistant_content = _TRUNCATED_REPLY_MARKER
+            correction = _TRUNCATION_CORRECTION_TEMPLATE
+        elif not last_text.strip():
+            last_error = f"model returned an empty response for {what}"
+            log_node_event(
+                node,
+                level=logging.WARNING,
+                event="empty_reply",
+                what=what,
+                attempt=attempt + 1,
+                retries=retries,
+                error=last_error[:200],
+            )
+            if attempt == retries:
+                break
+            assistant_content = _EMPTY_REPLY_MARKER
+            correction = _EMPTY_CORRECTION_TEMPLATE
+        else:
+            try:
+                return parse_json_array(last_text, what=what, element_keys=element_keys)
+            except StructuredOutputError as exc:
+                last_error = str(exc)
+                fake_tool_text = isinstance(exc, FakeToolCallTextError)
+                log_node_event(
+                    node,
+                    level=logging.WARNING,
+                    event="fake_tool_call_text" if fake_tool_text else "parse_failed",
+                    what=what,
+                    attempt=attempt + 1,
+                    retries=retries,
+                    error=last_error[:200],
+                )
+                if attempt == retries:
+                    break
+                assistant_content = _INVALID_REPLY_MARKER if fake_tool_text else last_text
+                correction = (
+                    _FAKE_TOOL_CORRECTION_TEMPLATE
+                    if fake_tool_text
+                    else _CORRECTION_TEMPLATE
+                ).format(error=last_error)
+
+        conversation = [
+            *(working or conversation),
+            {"role": "assistant", "content": assistant_content},
+            {"role": "user", "content": correction},
+        ]
+
+    if last_truncated:
+        # Repairing half a written array is nonsense; name the actual knob.
+        raise TruncatedResponseError(
+            f"every {what} reply was cut off at the endpoint's output token "
+            f"limit; raise endpoint.max_output_tokens (or leave it unset to "
+            f"omit the cap) or ask for a shorter plan"
+        )
 
     # Last rung: the model will not fix its own quoting, so we do — and say so.
-    planned = parse_json_array(last_text, what=what, repair=True)
+    planned = parse_json_array(
+        last_text, what=what, repair=True, element_keys=element_keys
+    )
     log_node_event(
         node,
         level=logging.WARNING,

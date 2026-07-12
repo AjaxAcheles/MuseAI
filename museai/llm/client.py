@@ -13,12 +13,14 @@ endpoint MuseAI targets speaks.
 Behaviour worth knowing:
 
 * **Retries** — three attempts, sleeping 5s then 15s. Only transient faults
-  retry: connection/read timeouts, dropped connections, and 5xx. A 4xx is a
-  request the endpoint will reject again, so it raises immediately.
+  retry: connection/read/write timeouts, dropped connections, 5xx, and the two
+  4xx that mean "try later" (408, 429). Any other 4xx is a request the endpoint
+  will reject again, so it raises immediately.
 * **Streaming** — token deltas are pushed to ``on_token`` (sync or async) as
-  they arrive, and the full assembled text is still returned. Once a stream has
-  emitted a token, a mid-stream fault does *not* retry: replaying the attempt
-  would emit those tokens twice.
+  they arrive, and the full assembled text is still returned. A mid-stream
+  fault retries even after tokens have been emitted: a ``chat_restart`` event
+  tells the live view to discard the partial, and the attempt's text is
+  rebuilt from scratch, so the caller never sees duplicates.
 * **Secrets** — the API key arrives already resolved from the config layer.
   This module never reads the environment and never logs the key.
 """
@@ -50,11 +52,15 @@ MAX_ATTEMPTS = 3
 DEFAULT_BACKOFF_SECONDS: tuple[float, ...] = (5.0, 15.0)
 
 # Faults that mean "the endpoint was unreachable or gave up", not "the request
-# was wrong". These are worth retrying; a 4xx never is.
+# was wrong". These are worth retrying; a 4xx (other than 408/429) never is.
 _TRANSIENT_EXCEPTIONS = (
     httpx.ConnectError,
     httpx.ConnectTimeout,
     httpx.ReadTimeout,
+    httpx.ReadError,
+    httpx.WriteError,
+    httpx.WriteTimeout,
+    httpx.PoolTimeout,
     httpx.RemoteProtocolError,
 )
 
@@ -90,15 +96,20 @@ class LLMCallError(Exception):
 
 
 class _TransientStatusError(Exception):
-    """Internal: a 5xx worth retrying. Never escapes this module."""
+    """Internal: a status worth retrying (5xx/408/429). Never escapes this module."""
 
     def __init__(self, status_code: int, body: str) -> None:
         super().__init__(f"HTTP {status_code}: {body}")
         self.status_code = status_code
 
 
+class _EmptyCompletionError(Exception):
+    """Internal: a completion with no text and no tool calls, when the caller
+    opted into ``retry_on_empty``. Never escapes this module."""
+
+
 # Everything the retry loop is willing to attempt again.
-_RETRYABLE = _TRANSIENT_EXCEPTIONS + (_TransientStatusError,)
+_RETRYABLE = _TRANSIENT_EXCEPTIONS + (_TransientStatusError, _EmptyCompletionError)
 
 
 def resolve_inference_url(base_url: str) -> str:
@@ -440,16 +451,22 @@ async def _parse_stream(
     )
 
 
+# The two 4xx statuses that mean "try again later" rather than "the request is
+# wrong": request timeout and rate limit. Everything else in the 4xx range is a
+# request the endpoint will reject identically on a retry.
+_TRANSIENT_STATUSES = (408, 429)
+
+
 def _raise_for_status(response: httpx.Response, body: str) -> None:
     """Turn a non-2xx status into the right kind of error.
 
-    5xx becomes a retryable internal signal; 4xx is a hard failure, since the
-    endpoint will reject the identical request again.
+    5xx, 408, and 429 become a retryable internal signal; any other 4xx is a
+    hard failure, since the endpoint will reject the identical request again.
     """
     status = response.status_code
     if status < 400:
         return
-    if status >= 500:
+    if status >= 500 or status in _TRANSIENT_STATUSES:
         raise _TransientStatusError(status, body[:500])
     raise LLMCallError(f"endpoint returned HTTP {status}: {body[:500]}")
 
@@ -603,6 +620,7 @@ async def call_llm(
     extra_headers: Mapping[str, str] | None = None,
     transport: httpx.AsyncBaseTransport | None = None,
     retry_backoff: Sequence[float] | None = None,
+    retry_on_empty: bool = False,
 ) -> LLMResponse:
     """Call the configured endpoint once, retrying transient faults.
 
@@ -611,13 +629,20 @@ async def call_llm(
     publishes a ``chat_start``/``chat_end`` pair (with ``chat_token`` deltas
     while streaming) so the View Chat page shows all model traffic.
 
+    ``retry_on_empty`` treats a completion with no text and no tool calls as a
+    transient fault. Off by default: a tool-calling reply legitimately has null
+    content, and only callers that always need an answer (the agent loop, the
+    planners' tool-free path) opt in.
+
     ``transport`` and ``retry_backoff`` exist so tests can inject a mock
     transport and collapse the backoff sleeps; production callers leave both
     unset and get real HTTP with the 5s/15s policy.
 
-    Raises ``LLMCallError`` on a 4xx, a malformed response, or once the retry
-    budget is exhausted.
+    Raises ``LLMCallError`` on a hard 4xx, a malformed response, or once the
+    retry budget is exhausted.
     """
+    if max_tokens is None:
+        max_tokens = endpoint.max_output_tokens
     url, headers, body = _build_request(
         endpoint,
         messages,
@@ -632,7 +657,15 @@ async def call_llm(
     )
 
     backoff = tuple(retry_backoff) if retry_backoff is not None else DEFAULT_BACKOFF_SECONDS
-    timeout = httpx.Timeout(float(endpoint.request_timeout))
+    # request_timeout governs connect/write/pool; the read timeout — the gap
+    # between streamed chunks — is separate, because a reasoning endpoint can
+    # legitimately pause between tokens far longer than a connect should take.
+    timeout = httpx.Timeout(
+        connect=float(endpoint.request_timeout),
+        write=float(endpoint.request_timeout),
+        pool=float(endpoint.request_timeout),
+        read=float(endpoint.stream_read_timeout),
+    )
     safe_url = _strip_secrets(url)
     attempt = 0
     last_error: Exception | None = None
@@ -651,6 +684,32 @@ async def call_llm(
             "chat_token",
             {"id": call_id, "agent": agent, "kind": kind, "text": text, "seq": seq},
         )
+
+    async def _note_transient(exc: Exception, attempt: int, emitted_tokens: bool) -> None:
+        """Log a transient fault and, when a retry follows, prepare for it."""
+        nonlocal last_error
+        last_error = exc
+        # type(exc).__name__ is load-bearing: str(httpx.ReadTimeout()) is "",
+        # which once produced an error message with no error in it.
+        description = f"{type(exc).__name__}: {exc}".rstrip(": ")
+        retrying = attempt < MAX_ATTEMPTS
+        _log_error(
+            safe_url, endpoint, stream, attempt,
+            f"transient: {description}", retrying=retrying,
+        )
+        if not retrying:
+            return
+        if emitted_tokens:
+            # Tokens already reached the live view; tell it to discard the
+            # partial before the retry replays them. The caller is safe
+            # regardless — each attempt assembles its text from scratch.
+            live = _LIVE_CALLS.get(call_id)
+            if live is not None:
+                live["text"] = ""
+                live["thinking"] = ""
+                live["seq"] = 0
+            await bus.publish("chat_restart", {"id": call_id, "agent": agent})
+        await asyncio.sleep(backoff[min(attempt - 1, len(backoff) - 1)])
 
     while attempt < MAX_ATTEMPTS:
         attempt += 1
@@ -671,20 +730,28 @@ async def call_llm(
             await _chat_end(call_id, agent, endpoint, ok=False, attempt=attempt, error=str(exc))
             raise
         except _RETRYABLE as exc:
-            last_error = exc
-            if emitted[0]:
-                # Tokens already reached the caller; replaying would double them.
-                message = f"stream failed after emitting tokens: {exc}"
-                _log_error(safe_url, endpoint, stream, attempt, message)
-                await _chat_end(
-                    call_id, agent, endpoint, ok=False, attempt=attempt, error=message
-                )
-                raise LLMCallError(message) from exc
-            _log_error(
-                safe_url, endpoint, stream, attempt, f"transient: {exc}", retrying=True
+            await _note_transient(exc, attempt, emitted[0])
+            continue
+
+        # A reply that is empty *because* it was cut off is not a transient
+        # fault — retrying truncates again, three times, and buries the cause.
+        # It is returned as-is so the caller diagnoses the truncation and names
+        # the knob. (A reasoning model can spend its whole budget thinking,
+        # which lands here with empty text and finish_reason "length".)
+        if (
+            retry_on_empty
+            and not text.strip()
+            and not tool_calls
+            and finish_reason != "length"
+        ):
+            await _note_transient(
+                _EmptyCompletionError(
+                    f"completion contained no text and no tool calls "
+                    f"(finish_reason={finish_reason!r})"
+                ),
+                attempt,
+                emitted[0],
             )
-            if attempt < MAX_ATTEMPTS:
-                await asyncio.sleep(backoff[min(attempt - 1, len(backoff) - 1)])
             continue
 
         tokens_in = count_message_tokens(
@@ -727,7 +794,10 @@ async def call_llm(
             thinking=thinking,
         )
 
-    summary = f"{MAX_ATTEMPTS} attempts failed, last error: {last_error}"
+    summary = (
+        f"{MAX_ATTEMPTS} attempts failed, last error: "
+        f"{type(last_error).__name__}: {last_error}".rstrip(": ")
+    )
     _log_error(safe_url, endpoint, stream, attempt, summary)
     await _chat_end(call_id, agent, endpoint, ok=False, attempt=attempt, error=summary)
     raise LLMCallError(summary) from last_error

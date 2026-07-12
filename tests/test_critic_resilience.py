@@ -191,6 +191,35 @@ async def test_the_retry_shows_the_model_its_reply_and_the_validation_error(conf
     assert "Do not return the example values" in correction[-1]["content"]
 
 
+async def test_a_prose_clean_verdict_is_read_as_clean_without_retries(
+    configure, scripted_loop, caplog
+):
+    """The critic said the draft is fine, just not in JSON. Burning re-prompts
+    and climbing toward degraded mode over that loosens the gate for nothing."""
+    configure(critic_parse_retries=2, critic_degrade_threshold=3)
+    calls = scripted_loop("No continuity issues found.")
+
+    with caplog.at_level(logging.WARNING, logger="museai.fsm"):
+        delta = await adversarial_critics(state_with(critic_parse_failure_streak=2))
+
+    assert len(calls) == 1, "a clean verdict must not be re-prompted"
+    assert delta["critic_parse_failure_streak"] == 0
+    assert "critic_failures" not in delta  # clean — audit's failures survive
+    # The contract break is still visible to the operator.
+    assert any("critic_clean_prose" in r.getMessage() for r in caplog.records)
+
+
+async def test_a_hedged_prose_verdict_still_burns_retries(configure, scripted_loop):
+    """"Clean, but…" is not clean. The narrow reading must not widen."""
+    configure(critic_parse_retries=1, critic_degrade_threshold=3)
+    calls = scripted_loop("Mostly clean, but the ending might contradict chapter 2")
+
+    delta = await adversarial_critics(state_with())
+
+    assert len(calls) == 2  # first attempt plus the one configured retry
+    assert delta["critic_parse_failure_streak"] == 1
+
+
 async def test_retries_are_bounded_by_the_config_key(configure, scripted_loop):
     configure(critic_parse_retries=2, critic_degrade_threshold=99)
     calls = scripted_loop(PRODUCTION_FAILURE)

@@ -432,3 +432,97 @@ class TestCallCap:
         )
 
         assert len(runs) == 4
+
+    async def test_malformed_calls_do_not_burn_the_budget(self, patched):
+        """An unknown tool or bad arguments ran nothing; charging for them can
+        blind an agent whose next calls would have been well-formed."""
+        fake = patched(
+            response(
+                tool_calls=[
+                    tool_call("nonexistent", "{}", "c1"),
+                    tool_call("web_search", "not json", "c2"),
+                ]
+            ),
+            response(tool_calls=[tool_call("web_search", '{"query": "real"}', "c3")]),
+            response(text="done"),
+        )
+        runs: list[str] = []
+
+        await run_agent_loop(
+            ENDPOINT,
+            MESSAGES,
+            TOOLS,
+            {"web_search": lambda query, max_results=5: runs.append(query)},
+            max_iterations=3,
+            tool_call_cap=1,
+        )
+
+        # The two error payloads left the budget intact for the real call.
+        assert runs == ["real"]
+        first_turn = fake.calls[1]["messages"]
+        assert "unknown_tool" in first_turn[2]["content"]
+        assert "bad_arguments" in first_turn[3]["content"]
+
+
+class TestConversationOut:
+    async def test_the_working_conversation_is_exported_without_the_final_reply(
+        self, patched
+    ):
+        patched(
+            response(tool_calls=[tool_call("web_search", '{"query": "a"}')]),
+            response(text="the answer"),
+        )
+        conversation: list = []
+
+        await run_agent_loop(
+            ENDPOINT,
+            MESSAGES,
+            TOOLS,
+            {"web_search": lambda **k: [{"title": "t"}]},
+            max_iterations=3,
+            conversation_out=conversation,
+        )
+
+        roles = [m["role"] for m in conversation]
+        assert roles == ["user", "assistant", "tool"]
+        assert conversation[1]["tool_calls"][0]["function"]["name"] == "web_search"
+        # The final prose reply is the caller's to append (or replace).
+        assert all("the answer" not in (m.get("content") or "") for m in conversation)
+
+    async def test_it_is_filled_on_the_forced_final_call_too(self, patched):
+        patched(
+            response(tool_calls=[tool_call("web_search", "{}")]),
+            response(tool_calls=[tool_call("web_search", "{}")]),
+            response(text="forced"),
+        )
+        conversation: list = []
+
+        await run_agent_loop(
+            ENDPOINT,
+            MESSAGES,
+            TOOLS,
+            {"web_search": lambda **k: []},
+            max_iterations=2,
+            conversation_out=conversation,
+        )
+
+        assert [m["role"] for m in conversation] == [
+            "user", "assistant", "tool", "assistant", "tool",
+        ]
+
+
+class TestRetryOnEmptyOptIn:
+    async def test_every_loop_call_opts_into_empty_retries(self, patched):
+        fake = patched(
+            response(tool_calls=[tool_call("web_search", "{}")]),
+            response(tool_calls=[tool_call("web_search", "{}")]),
+            response(text="forced"),
+        )
+
+        await run_agent_loop(
+            ENDPOINT, MESSAGES, TOOLS, {"web_search": lambda **k: []}, max_iterations=2
+        )
+
+        # Both the tool-enabled turns and the forced tool-free turn always
+        # need an answer, so all of them pass retry_on_empty.
+        assert [call.get("retry_on_empty") for call in fake.calls] == [True, True, True]

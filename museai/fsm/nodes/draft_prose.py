@@ -8,9 +8,11 @@ The stream emits a single ``beat_start`` event before the first token, then one
 ``token`` event per token. The log does not follow suit: ``llm_io.log`` records
 the call once, on the assembled text. Tokens are for the browser, not the disk.
 
-No ``max_tokens`` is sent, per the v1.02 wire-format finding: a reasoning-style
-endpoint bills hidden reasoning against that budget, and a beat truncated
-mid-sentence is worse than a long one.
+No ``max_tokens`` is sent unless ``endpoint.max_output_tokens`` is set, per the
+v1.02 wire-format finding: a reasoning-style endpoint bills hidden reasoning
+against that budget, and a beat truncated mid-sentence is worse than a long
+one. Either way a draft that comes back with ``finish_reason == "length"`` is
+refused rather than committed half-written.
 """
 
 from __future__ import annotations
@@ -92,6 +94,15 @@ async def draft_prose(state: OrchestratorState) -> dict:
     # The final turn's text is the draft. Tokens streamed to the browser may
     # include earlier tool-requesting turns; the committed prose never does.
     draft = response.text.strip()
+    # Truncation first: a reply cut off at the token limit can be empty (a
+    # reasoning model that spent the whole budget thinking) as easily as it can
+    # stop mid-sentence, and "no prose" would name neither the cause nor the fix.
+    if response.finish_reason == "length":
+        raise DraftingError(
+            f"the draft for beat {beat_id!r} was truncated at the endpoint's "
+            f"output token limit (finish_reason='length'); raise "
+            f"endpoint.max_output_tokens or leave it unset to omit the cap"
+        )
     if not draft:
         raise DraftingError(
             f"the endpoint returned no prose for beat {beat_id!r} "

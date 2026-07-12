@@ -30,6 +30,7 @@ from museai.llm.planning import call_llm_for_json_array
 from museai.llm.structured import (
     FakeToolCallTextError,
     StructuredOutputError,
+    TruncatedResponseError,
     parse_json_array,
     repair_json_text,
 )
@@ -114,8 +115,9 @@ RECENT_FAKE_TOOL_CHAIN = """```
 class _Response:
     """What the planning helper and the agent loop read off an ``LLMResponse``."""
 
-    def __init__(self, text: str) -> None:
+    def __init__(self, text: str, finish_reason: str | None = None) -> None:
         self.text = text
+        self.finish_reason = finish_reason
         self.tool_calls: list[dict] = []
 
 
@@ -158,12 +160,13 @@ def scripted(monkeypatch):
     correction turns.
     """
 
-    def _install(replies: list[str]) -> list:
+    def _install(replies: list) -> list:
         seen: list = []
 
         async def fake(endpoint, messages, **kwargs):
             seen.append(list(messages))
-            return _Response(replies[min(len(seen) - 1, len(replies) - 1)])
+            reply = replies[min(len(seen) - 1, len(replies) - 1)]
+            return reply if isinstance(reply, _Response) else _Response(reply)
 
         monkeypatch.setattr(planning_module, "call_llm", fake)
         return seen
@@ -377,6 +380,145 @@ class TestPlannerRetryLadder:
         scripted(["I would rather not."])
         with pytest.raises(StructuredOutputError, match="beats"):
             await _plan_beats(seeded, retries=1)
+
+
+class TestTruncatedAndEmptyReplies:
+    """finish_reason == "length" is truncation, not a quoting mistake.
+
+    The 2026-07-12 run: the endpoint's default token cap cut every plan
+    mid-JSON, and the quote-escaping correction was sent three times for a
+    problem no amount of escaping can fix.
+    """
+
+    # A reply cut off after an inner array — the shape that once parsed as
+    # "the plan" (see test_structured.py).
+    TRUNCATED = _Response(
+        '[{"intent": "x", "thread_updates": [{"id": "t1", "status": "open"}]',
+        finish_reason="length",
+    )
+
+    async def test_a_truncated_reply_gets_a_truncation_correction(
+        self, seeded, scripted, caplog
+    ):
+        seen = scripted([self.TRUNCATED, VALID_BEAT_PLAN])
+        with caplog.at_level(logging.WARNING, logger="museai"):
+            beats = await _plan_beats(seeded, retries=2)
+
+        assert len(beats) == 1
+        assert len(seen) == 2
+        # The truncated garbage is not replayed, and the advice is "shorter",
+        # never "escape your quotes".
+        assistant = seen[1][-2]
+        assert assistant["role"] == "assistant"
+        assert "cut off" in assistant["content"]
+        correction = seen[1][-1]["content"]
+        assert "cut off" in correction
+        assert "shorter" in correction
+        assert "escape every double quote" not in correction
+        # The operator sees the real cause in the log.
+        messages = [record.getMessage() for record in caplog.records]
+        assert any("event=truncated" in message for message in messages)
+        assert not any("event=parse_failed" in message for message in messages)
+
+    async def test_persistent_truncation_raises_and_names_the_knob(
+        self, seeded, scripted
+    ):
+        scripted([self.TRUNCATED])
+        with pytest.raises(TruncatedResponseError, match="max_output_tokens"):
+            await _plan_beats(seeded, retries=1)
+
+    async def test_an_empty_truncated_reply_is_truncation_not_emptiness(
+        self, seeded, scripted, caplog
+    ):
+        """A reasoning model that spent its whole budget thinking returns empty
+        text with finish_reason "length". That is truncation — the empty-reply
+        correction would ask it to try again at the same doomed cap."""
+        seen = scripted([_Response("", finish_reason="length"), VALID_BEAT_PLAN])
+        with caplog.at_level(logging.WARNING, logger="museai"):
+            beats = await _plan_beats(seeded, retries=2)
+
+        assert len(beats) == 1
+        assert "shorter" in seen[1][-1]["content"]
+        messages = [record.getMessage() for record in caplog.records]
+        assert any("event=truncated" in message for message in messages)
+        assert not any("event=empty_reply" in message for message in messages)
+
+    async def test_a_truncated_last_reply_is_never_quote_repaired(
+        self, seeded, scripted, published
+    ):
+        """Repairing half a written array puts words in the model's mouth."""
+        scripted([PRODUCTION_BEAT_PLAN, self.TRUNCATED])
+        with pytest.raises(TruncatedResponseError):
+            await _plan_beats(seeded, retries=1)
+        assert not [event for event, _ in published if event == "planner_repaired"]
+
+    async def test_an_empty_reply_gets_its_own_correction_not_an_empty_turn(
+        self, seeded, scripted, caplog
+    ):
+        seen = scripted([_Response(""), VALID_BEAT_PLAN])
+        with caplog.at_level(logging.WARNING, logger="museai"):
+            beats = await _plan_beats(seeded, retries=2)
+
+        assert len(beats) == 1
+        assistant = seen[1][-2]
+        assert assistant["role"] == "assistant"
+        assert assistant["content"], "an empty assistant turn teaches the model nothing"
+        assert "omitted" in assistant["content"]
+        correction = seen[1][-1]["content"]
+        assert "empty" in correction
+        assert any("event=empty_reply" in r.getMessage() for r in caplog.records)
+
+
+class TestRetriesKeepToolResults:
+    async def test_a_retry_after_tool_calls_does_not_rerun_the_tools(
+        self, seeded, monkeypatch
+    ):
+        from museai.fsm.tools import loop as loop_module
+
+        tool_runs: list[dict] = []
+
+        def lookup(**kwargs):
+            tool_runs.append(kwargs)
+            return {"result": "the gathered context"}
+
+        tool_call_reply = _Response("")
+        tool_call_reply.tool_calls = [
+            {
+                "id": "call_1",
+                "type": "function",
+                "function": {"name": "lookup", "arguments": "{}"},
+            }
+        ]
+        replies = iter([tool_call_reply, _Response("not json at all"),
+                        _Response(VALID_BEAT_PLAN)])
+        seen: list = []
+
+        async def fake(endpoint, messages, **kwargs):
+            seen.append(list(messages))
+            return next(replies)
+
+        monkeypatch.setattr(loop_module, "call_llm", fake)
+
+        beats = await call_llm_for_json_array(
+            seeded.endpoint,
+            [{"role": "user", "content": "plan"}],
+            what="beats",
+            agent="beat_planner",
+            node="plan_beat",
+            retries=2,
+            tools=[{"type": "function", "function": {"name": "lookup"}}],
+            tool_impls={"lookup": lookup},
+            max_tool_iterations=3,
+        )
+
+        assert len(beats) == 1
+        assert len(tool_runs) == 1, "the retry re-ran a tool whose result it already had"
+        # The retry's conversation carried the first attempt's tool result.
+        retry_messages = seen[-1]
+        assert any(m.get("role") == "tool" for m in retry_messages)
+        # And the correction turns landed after it.
+        assert retry_messages[-1]["role"] == "user"
+        assert "could not be parsed" in retry_messages[-1]["content"]
 
 
 # --------------------------------------------------------------------------- #

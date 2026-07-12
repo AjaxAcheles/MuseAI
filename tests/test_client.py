@@ -14,6 +14,7 @@ import pytest
 
 from museai.core.config import EndpointConfig
 from museai.core.logging_setup import get_llm_logger
+from museai.core.stream_bus import bus
 from museai.llm.client import (
     DEFAULT_BACKOFF_SECONDS,
     MAX_ATTEMPTS,
@@ -399,16 +400,16 @@ class TestRetry:
 
         def handler(request: httpx.Request) -> httpx.Response:
             calls.append(request)
-            return httpx.Response(429, content=b'{"error": "rate limited"}')
+            return httpx.Response(400, content=b'{"error": "bad request"}')
 
-        with pytest.raises(LLMCallError, match="HTTP 429"):
+        with pytest.raises(LLMCallError, match="HTTP 400"):
             await call_llm(
                 endpoint,
                 MESSAGES,
                 transport=httpx.MockTransport(handler),
                 retry_backoff=NO_BACKOFF,
             )
-        assert len(calls) == 1, "a 4xx must not be retried"
+        assert len(calls) == 1, "a hard 4xx must not be retried"
 
     async def test_5xx_is_retried_to_exhaustion(self, endpoint):
         calls = []
@@ -450,6 +451,10 @@ class TestRetry:
             httpx.ConnectError("refused"),
             httpx.ConnectTimeout("timed out"),
             httpx.ReadTimeout("slow"),
+            httpx.ReadError("reset"),
+            httpx.WriteError("broken pipe"),
+            httpx.WriteTimeout("stalled"),
+            httpx.PoolTimeout("pool exhausted"),
             httpx.RemoteProtocolError("dropped"),
         ],
     )
@@ -486,22 +491,34 @@ class TestRetry:
             )
         assert slept == [0.01, 0.02], "two sleeps for three attempts"
 
-    async def test_stream_fault_after_first_token_is_not_retried(self, endpoint):
-        """Replaying a partially emitted stream would duplicate tokens."""
+    async def test_stream_fault_after_tokens_retries_and_publishes_chat_restart(
+        self, endpoint
+    ):
+        """A mid-stream fault retries even after tokens were emitted.
+
+        The retry replays the attempt from scratch — the returned text is the
+        successful attempt's alone — and a ``chat_restart`` event tells the
+        live view to drop the partial it already rendered.
+        """
         calls = []
         seen: list[str] = []
+        queue = bus.subscribe()
 
         def handler(request: httpx.Request) -> httpx.Response:
             calls.append(request)
-            # A valid chunk, then the connection dies mid-stream.
-            async def body():
-                yield f"data: {json.dumps(content_chunk('partial'))}\n\n".encode()
-                raise httpx.RemoteProtocolError("connection dropped")
+            if len(calls) == 1:
+                # A valid chunk, then the connection dies mid-stream.
+                async def body():
+                    yield f"data: {json.dumps(content_chunk('partial'))}\n\n".encode()
+                    raise httpx.RemoteProtocolError("connection dropped")
 
-            return httpx.Response(200, content=body())
+                return httpx.Response(200, content=body())
+            return httpx.Response(
+                200, content=sse(content_chunk("recovered", finish_reason="stop"))
+            )
 
-        with pytest.raises(LLMCallError, match="after emitting tokens"):
-            await call_llm(
+        try:
+            result = await call_llm(
                 endpoint,
                 MESSAGES,
                 stream=True,
@@ -509,8 +526,230 @@ class TestRetry:
                 transport=httpx.MockTransport(handler),
                 retry_backoff=NO_BACKOFF,
             )
-        assert seen == ["partial"]
+        finally:
+            bus.unsubscribe(queue)
+
+        assert result.text == "recovered", "the partial must not leak into the result"
+        assert len(calls) == 2
+        # on_token saw both attempts; the chat_restart between them is the
+        # signal that the first attempt's tokens are void.
+        assert seen == ["partial", "recovered"]
+        events = []
+        while not queue.empty():
+            events.append(queue.get_nowait())
+        restarts = [e for e in events if e["type"] == "chat_restart"]
+        assert len(restarts) == 1
+        assert restarts[0]["data"]["agent"] == "system"
+
+    async def test_a_stream_fault_on_the_last_attempt_still_raises(self, endpoint):
+        def handler(request: httpx.Request) -> httpx.Response:
+            async def body():
+                yield f"data: {json.dumps(content_chunk('partial'))}\n\n".encode()
+                raise httpx.ReadTimeout("")
+
+            return httpx.Response(200, content=body())
+
+        # str(httpx.ReadTimeout()) is empty; the type name must survive into
+        # the error so the failure is diagnosable.
+        with pytest.raises(LLMCallError, match="ReadTimeout"):
+            await call_llm(
+                endpoint,
+                MESSAGES,
+                stream=True,
+                transport=httpx.MockTransport(handler),
+                retry_backoff=NO_BACKOFF,
+            )
+
+    @pytest.mark.parametrize("status", [429, 408])
+    async def test_retry_later_statuses_are_retried_then_recover(self, endpoint, status):
+        calls = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls.append(request)
+            if len(calls) < MAX_ATTEMPTS:
+                return httpx.Response(status, content=b"slow down")
+            return json_response(completion("recovered"))
+
+        result = await call_llm(
+            endpoint,
+            MESSAGES,
+            transport=httpx.MockTransport(handler),
+            retry_backoff=NO_BACKOFF,
+        )
+        assert result.text == "recovered"
+        assert len(calls) == MAX_ATTEMPTS
+
+
+class TestRetryOnEmpty:
+    EMPTY = {"choices": [{"message": {"content": None}, "finish_reason": None}]}
+
+    async def test_an_empty_completion_is_retried_when_opted_in(self, endpoint):
+        calls = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls.append(request)
+            if len(calls) == 1:
+                return json_response(self.EMPTY)
+            return json_response(completion("filled"))
+
+        result = await call_llm(
+            endpoint,
+            MESSAGES,
+            retry_on_empty=True,
+            transport=httpx.MockTransport(handler),
+            retry_backoff=NO_BACKOFF,
+        )
+        assert result.text == "filled"
+        assert len(calls) == 2
+
+    async def test_persistent_emptiness_exhausts_the_budget(self, endpoint):
+        transport = httpx.MockTransport(lambda r: json_response(self.EMPTY))
+        with pytest.raises(LLMCallError, match="no text and no tool calls"):
+            await call_llm(
+                endpoint,
+                MESSAGES,
+                retry_on_empty=True,
+                transport=transport,
+                retry_backoff=NO_BACKOFF,
+            )
+
+    async def test_default_still_accepts_null_content_in_one_call(self, endpoint):
+        """The documented contract: a tool-calling reply legitimately has null
+        content, so without the opt-in an empty completion is returned as-is."""
+        calls = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls.append(request)
+            return json_response(self.EMPTY)
+
+        result = await call_llm(
+            endpoint, MESSAGES, transport=httpx.MockTransport(handler)
+        )
+        assert result.text == ""
         assert len(calls) == 1
+
+    async def test_an_empty_truncated_reply_is_returned_not_retried(self, endpoint):
+        """A reasoning model can spend its whole token budget inside <think>,
+        landing here with empty text and finish_reason "length". Retrying that
+        truncates again three times and buries the cause; the caller must see
+        the truncation and name the knob."""
+        payload = {"choices": [{"message": {"content": None}, "finish_reason": "length"}]}
+        calls = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls.append(request)
+            return json_response(payload)
+
+        result = await call_llm(
+            endpoint,
+            MESSAGES,
+            retry_on_empty=True,
+            transport=httpx.MockTransport(handler),
+            retry_backoff=NO_BACKOFF,
+        )
+        assert result.text == ""
+        assert result.finish_reason == "length"
+        assert len(calls) == 1, "truncation is deterministic; retrying it is futile"
+
+    async def test_a_tool_calling_reply_is_not_empty(self, endpoint):
+        payload = {
+            "choices": [
+                {
+                    "message": {
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": "call_1",
+                                "type": "function",
+                                "function": {"name": "t", "arguments": "{}"},
+                            }
+                        ],
+                    },
+                    "finish_reason": "tool_calls",
+                }
+            ]
+        }
+        calls = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls.append(request)
+            return json_response(payload)
+
+        result = await call_llm(
+            endpoint,
+            MESSAGES,
+            retry_on_empty=True,
+            transport=httpx.MockTransport(handler),
+            retry_backoff=NO_BACKOFF,
+        )
+        assert len(result.tool_calls) == 1
+        assert len(calls) == 1, "a tool-calling reply must not be retried as empty"
+
+
+class TestTimeoutsAndOutputCap:
+    async def test_read_timeout_is_split_from_connect(self, endpoint, monkeypatch):
+        captured: dict = {}
+        real_client = httpx.AsyncClient
+
+        class Capture(real_client):
+            def __init__(self, *args, **kwargs):
+                captured["timeout"] = kwargs.get("timeout")
+                super().__init__(*args, **kwargs)
+
+        monkeypatch.setattr("museai.llm.client.httpx.AsyncClient", Capture)
+        transport = httpx.MockTransport(lambda r: json_response(completion()))
+        await call_llm(endpoint, MESSAGES, transport=transport)
+
+        timeout = captured["timeout"]
+        assert timeout.connect == 5.0  # the fixture's request_timeout
+        assert timeout.write == 5.0
+        assert timeout.read == 300.0  # stream_read_timeout default
+
+    async def test_max_output_tokens_reaches_the_wire(self):
+        endpoint = EndpointConfig(
+            base_url="https://example.invalid/v1",
+            api_key="k",
+            model_name="m",
+            tokenizer_family="char_heuristic",
+            max_output_tokens=64,
+        )
+        seen: list[dict] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(json.loads(request.content))
+            return json_response(completion())
+
+        await call_llm(endpoint, MESSAGES, transport=httpx.MockTransport(handler))
+        assert seen[0]["max_tokens"] == 64
+
+    async def test_unset_max_output_tokens_keeps_the_field_off_the_wire(self, endpoint):
+        seen: list[dict] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(json.loads(request.content))
+            return json_response(completion())
+
+        await call_llm(endpoint, MESSAGES, transport=httpx.MockTransport(handler))
+        assert "max_tokens" not in seen[0]
+
+    async def test_explicit_max_tokens_overrides_the_endpoint_cap(self):
+        endpoint = EndpointConfig(
+            base_url="https://example.invalid/v1",
+            api_key="k",
+            model_name="m",
+            tokenizer_family="char_heuristic",
+            max_output_tokens=64,
+        )
+        seen: list[dict] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(json.loads(request.content))
+            return json_response(completion())
+
+        await call_llm(
+            endpoint, MESSAGES, max_tokens=8, transport=httpx.MockTransport(handler)
+        )
+        assert seen[0]["max_tokens"] == 8
 
 
 class TestLogging:
@@ -585,8 +824,9 @@ class TestLogging:
 
         assert len(requests) == MAX_ATTEMPTS
         assert [p["attempt"] for p in requests] == [1, 2, 3]
-        # One error per failed attempt, plus the final give-up record.
-        assert [p["retrying"] for p in errors] == [True, True, True, False]
+        # One error per failed attempt, plus the final give-up record. The last
+        # attempt's error is honest about not retrying.
+        assert [p["retrying"] for p in errors] == [True, True, False, False]
         assert not [p for p in payloads if p["event"] == "response"]
 
         for record in records:

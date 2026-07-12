@@ -699,6 +699,14 @@
         liveStream.scrollTop = liveStream.scrollHeight;
       },
 
+      // A mid-stream fault is being retried: the retry replays the tokens
+      // streamed so far, so drop the partial rather than duplicating it.
+      chat_restart(data) {
+        if (data.agent !== "drafter") return;
+        streamBuffer = "";
+        if (liveStream) liveStream.textContent = "";
+      },
+
       revision(data) {
         streamBuffer = data.text || "";
         if (liveStream) liveStream.textContent = streamBuffer;

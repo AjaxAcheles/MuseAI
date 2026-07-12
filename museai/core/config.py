@@ -65,7 +65,15 @@ class EndpointConfig(BaseModel):
     model_name: str
     tokenizer_family: Literal["tiktoken", "char_heuristic"]
     request_timeout: int = 60
+    # Maximum gap between streamed chunks, separate from request_timeout (which
+    # governs connect/write/pool). A reasoning endpoint legitimately pauses far
+    # longer between tokens than it takes to open a connection.
+    stream_read_timeout: int = 300
     temperature: float = 0.7
+    # Sent as max_tokens when set. None omits the field entirely, preserving the
+    # v1.02 wire-format finding: some endpoints bill hidden reasoning against
+    # this budget. Truncation is detected via finish_reason either way.
+    max_output_tokens: int | None = None
 
     @field_validator("api_key")
     @classmethod
@@ -88,7 +96,9 @@ class AgentEndpointOverride(BaseModel):
     model_name: str | None = None
     tokenizer_family: Literal["tiktoken", "char_heuristic"] | None = None
     request_timeout: int | None = None
+    stream_read_timeout: int | None = None
     temperature: float | None = None
+    max_output_tokens: int | None = None
 
     @field_validator("api_key")
     @classmethod

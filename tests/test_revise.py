@@ -257,6 +257,21 @@ class TestFullMode:
         with pytest.raises(DraftingError):
             await revise_prose(state_with([failure()]))
 
+    async def test_a_truncated_rewrite_is_refused_rather_than_spliced(
+        self, monkeypatch
+    ):
+        """A rewrite cut off at the token limit must not replace the beat."""
+
+        async def truncated(endpoint, messages, **kwargs):
+            reply = _Response("A rewrite that stops mid-sen")
+            reply.finish_reason = "length"
+            return reply
+
+        monkeypatch.setattr(loop_module, "call_llm", truncated)
+
+        with pytest.raises(DraftingError, match="max_output_tokens"):
+            await revise_prose(state_with([failure("nowhere to be found in the draft")]))
+
 
 class TestBudget:
     async def test_an_over_budget_prompt_collapses_to_hard_constraints(

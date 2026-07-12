@@ -334,6 +334,24 @@
       keepPinned(wasPinned);
     }
 
+    /**
+     * A mid-stream fault is being retried. The retry replays the call from
+     * scratch (the server also reset its token sequence), so the partial
+     * rendered so far must be discarded, not appended to.
+     */
+    function onChatRestart(data) {
+      const entry = calls.get(data.id);
+      if (!entry || entry.done) return;
+      entry.responseEl.textContent = "";
+      entry.thinkingBody.textContent = "";
+      entry.thinkingDetails.hidden = true;
+      entry.seenSeq = 0;
+      // Not "streaming": the next arriving token flips it back, so the reader
+      // sees the retry happen instead of a silent rewind.
+      entry.stateEl.dataset.state = "retrying";
+      entry.stateEl.textContent = "retrying";
+    }
+
     /* ---------------------------------------------------- history + stream */
 
     function renderHistory(records) {
@@ -394,6 +412,7 @@
       }
       if (kind === "start") onChatStart(data);
       else if (kind === "token") onChatToken(data);
+      else if (kind === "restart") onChatRestart(data);
       else onChatEnd(data);
     }
 
@@ -401,6 +420,7 @@
       const source = new EventSource("/stream");
       source.addEventListener("chat_start", (event) => intake("start", JSON.parse(event.data)));
       source.addEventListener("chat_token", (event) => intake("token", JSON.parse(event.data)));
+      source.addEventListener("chat_restart", (event) => intake("restart", JSON.parse(event.data)));
       source.addEventListener("chat_end", (event) => intake("end", JSON.parse(event.data)));
       source.onopen = () => {
         connEl.dataset.state = "live";
@@ -425,6 +445,7 @@
         backlog.forEach(([kind, data]) => {
           if (kind === "start") onChatStart(data);
           else if (kind === "token") onChatToken(data);
+          else if (kind === "restart") onChatRestart(data);
           else onChatEnd(data);
         });
         backlog.length = 0;

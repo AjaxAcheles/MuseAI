@@ -179,6 +179,9 @@ async def plan_chapter(state: OrchestratorState) -> dict:
                 max_tool_iterations=config.generation.max_agent_iterations,
                 on_tool_event=on_tool_call,
                 tool_call_cap=config.generation.tool_call_cap,
+                # A real chapter always has a description; a truncated reply's
+                # inner array (obligations) never does.
+                element_keys=("description",),
             )
 
             chapters = []

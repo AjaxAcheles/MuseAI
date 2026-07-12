@@ -210,6 +210,15 @@ async def _rewrite(config, messages: list[dict], what: str, beat_id: str) -> str
         tool_call_cap=config.generation.tool_call_cap,
     )
     revised = response.text.strip()
+    # Truncation first: it explains an empty reply as readily as a half-written
+    # one, and unlike "no prose" it names the knob. Splicing a truncated rewrite
+    # into the draft is worse than failing.
+    if response.finish_reason == "length":
+        raise DraftingError(
+            f"the revision of {what} was truncated at the endpoint's output "
+            f"token limit (finish_reason='length'); raise "
+            f"endpoint.max_output_tokens or leave it unset to omit the cap"
+        )
     if not revised:
         raise DraftingError(
             f"the endpoint returned no prose revising {what} "

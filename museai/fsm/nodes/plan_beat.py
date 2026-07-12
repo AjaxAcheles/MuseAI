@@ -474,6 +474,9 @@ async def plan_beat(state: OrchestratorState) -> dict:
                 max_tool_iterations=config.generation.max_agent_iterations,
                 on_tool_event=on_tool_call,
                 tool_call_cap=config.generation.tool_call_cap,
+                # A real beat always has an intent; a truncated reply's inner
+                # array (thread_updates, obligations) never does.
+                element_keys=("intent",),
             )
 
             # If the plan comes back with the emotional register pinned at
@@ -515,6 +518,7 @@ async def plan_beat(state: OrchestratorState) -> dict:
                     max_tool_iterations=config.generation.max_agent_iterations,
                     on_tool_event=on_tool_call,
                     tool_call_cap=config.generation.tool_call_cap,
+                    element_keys=("intent",),
                 )
 
             beats = []
