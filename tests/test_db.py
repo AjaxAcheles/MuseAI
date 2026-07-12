@@ -42,11 +42,46 @@ def test_init_db_is_idempotent(tmp_path):
     assert "Scenes" not in tables
 
 
+def test_a_legacy_database_gains_the_setting_column(tmp_path):
+    """init_db migrates a Projects table created before `setting` existed."""
+    path = tmp_path / "museai.db"
+    legacy = sqlite3.connect(str(path))
+    with legacy:
+        legacy.execute(
+            """
+            CREATE TABLE Projects (
+                id TEXT PRIMARY KEY,
+                genre TEXT,
+                premise TEXT,
+                word_count_target INTEGER
+            )
+            """
+        )
+        legacy.execute(
+            "INSERT INTO Projects (id, genre, premise, word_count_target) "
+            "VALUES ('old', 'g', 'pr', 1000)"
+        )
+    legacy.close()
+
+    db.init_db(path)  # must add the column, not fail or drop data
+
+    c = db.connect_db(path)
+    row = db.get_project(c, "old")
+    assert row["premise"] == "pr"
+    assert row["setting"] is None
+    with c:
+        db.upsert_project(c, id="old", genre="g", premise="pr",
+                          setting="a dying seaside town", word_count_target=1000)
+    assert db.get_project(c, "old")["setting"] == "a dying seaside town"
+    c.close()
+
+
 def test_upsert_round_trip_and_overwrite(conn):
     _seed_project(conn)
     row = db.get_project(conn, "p1")
     assert row["genre"] == "g"
     assert row["word_count_target"] == 1000
+    assert row["setting"] is None  # never set; reads back as absent
 
     # Re-upsert same id updates in place (idempotent, no duplicate).
     with conn:

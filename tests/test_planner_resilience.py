@@ -24,7 +24,7 @@ from museai.core.stream_bus import bus
 from museai.fsm.nodes.deps import set_node_config
 from museai.fsm.nodes.plan_beat import beat_id_for, plan_beat
 from museai.fsm.nodes.plan_chapter import chapter_id_for, plan_chapter
-from museai.fsm.state import FSM_Pointer, make_initial_state
+from museai.fsm.state import FSM_Pointer, OrchestratorState, make_initial_state
 from museai.llm import planning as planning_module
 from museai.llm.planning import call_llm_for_json_array
 from museai.llm.structured import (
@@ -88,6 +88,20 @@ VALID_CHAPTER_PLAN = """```json
 [{"ordering": 1, "description": "Mara catalogs the letters.", "obligations": ["She dates one."]}]
 ```"""
 
+TOOL_CALL_CHAPTER_REPLY = """```
+{
+  "name": "get_full_outline",
+  "parameters": {
+    "key": "arc"
+  }
+}
+```"""
+
+TOOL_CALL_BEAT_REPLY = """```
+{"name": "get_chapter_context", "parameters": {"chapter_id": "<chapter>"}}
+{"name": "get_character_emotion_history", "parameters": {"character_id": "char-mara"}}
+```"""
+
 
 class _Response:
     """What the planning helper and the agent loop read off an ``LLMResponse``."""
@@ -121,7 +135,7 @@ def seeded(config_factory):
     return config
 
 
-def _state(chapter_id: str = "") -> dict:
+def _state(chapter_id: str = "") -> OrchestratorState:
     return make_initial_state(
         PROJECT_ID, FSM_Pointer(arc_id=ARC_ID, chapter_id=chapter_id, beat_index=0)
     )
@@ -225,6 +239,29 @@ class TestRepairJsonText:
     def test_repair_does_not_rescue_genuinely_broken_json(self):
         with pytest.raises(StructuredOutputError):
             parse_json_array("the model refused to answer", what="beats", repair=True)
+
+
+class TestToolCallShapedPlannerReplies:
+    """Small models sometimes answer with tool-call JSON instead of a plan array."""
+
+    def test_a_tool_call_object_is_not_a_chapter_plan(self):
+        with pytest.raises(StructuredOutputError, match="looks like a tool call"):
+            parse_json_array(TOOL_CALL_CHAPTER_REPLY, what="chapters")
+
+    def test_multiple_tool_call_objects_are_not_a_beat_plan(self):
+        with pytest.raises(StructuredOutputError, match="looks like a tool call"):
+            parse_json_array(TOOL_CALL_BEAT_REPLY, what="beats", repair=True)
+
+    def test_planner_extraction_prefers_an_array_over_an_earlier_object(self):
+        raw = """The first thing is not the answer:
+{"note": "this object should be ignored"}
+
+```json
+[{"ordering": 1, "intent": "The real beat plan."}]
+```"""
+
+        beats = parse_json_array(raw, what="beats")
+        assert beats == [{"ordering": 1, "intent": "The real beat plan."}]
 
 
 # --------------------------------------------------------------------------- #

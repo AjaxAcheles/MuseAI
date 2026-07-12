@@ -36,7 +36,9 @@ from museai.memory.db import (
     get_character_emotions,
     get_characters,
     get_chapters_for_arc,
+    get_committed_beats,
     get_open_threads,
+    get_project,
     get_recent_committed_beats,
 )
 
@@ -54,6 +56,7 @@ def drafter_messages(package: dict) -> list[dict]:
         "drafter",
         beat=package["beat"],
         pad_constraint=package["pad_constraint"],
+        project=package.get("project") or {},
         chapter=package["chapter"],
         threads=package["threads"],
         characters=package["characters"],
@@ -224,6 +227,7 @@ async def assemble_context(state: OrchestratorState) -> dict:
 
     conn = connect_db(config.db_path)
     try:
+        project = get_project(conn, project_id)
         chapter = _resolve_chapter(conn, pointer)
         beat = _resolve_beat(conn, chapter["id"], pointer.beat_index)
         spec = json.loads(beat["beat_spec"]) if beat["beat_spec"] else {}
@@ -259,6 +263,14 @@ async def assemble_context(state: OrchestratorState) -> dict:
                 "thread_updates": _thread_updates(spec.get("thread_updates")),
             },
             "pad_constraint": beat["pad_constraint"],
+            # The story world: premise, genre, and setting are part of the
+            # protected core — a beat written blind to them treats the world as
+            # interchangeable background. Small and never pruned.
+            "project": {
+                "genre": (project["genre"] if project else "") or "",
+                "premise": (project["premise"] if project else "") or "",
+                "setting": (project["setting"] if project else "") or "",
+            },
             "chapter": {
                 "id": chapter["id"],
                 "description": chapter["description"],
@@ -276,6 +288,13 @@ async def assemble_context(state: OrchestratorState) -> dict:
                 for row in get_recent_committed_beats(
                     conn, project_id, config.generation.recent_prose_beats
                 )
+            ],
+            # The whole committed manuscript, for the audit's repetition guard.
+            # Never rendered into a prompt and never pruned: it costs no tokens,
+            # and it lets the guard catch a beat that copies a distant chapter,
+            # not just one inside the drafter's recent-prose window.
+            "committed_prose": [
+                row["prose"] for row in get_committed_beats(conn, project_id)
             ],
         }
     finally:

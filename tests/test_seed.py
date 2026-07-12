@@ -31,6 +31,8 @@ def test_example_seed_populates_every_table(config_factory):
     project = db.get_project(conn, pid)
     assert project is not None
     assert 1000 <= project["word_count_target"] <= 2000
+    # The setting survives the round trip; a seed without one stores NULL.
+    assert project["setting"] == seed["project"]["setting"]
 
     arcs = db.get_arcs(conn, pid)
     assert [a["status"] for a in arcs] == ["active"]

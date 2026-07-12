@@ -13,6 +13,7 @@ from museai.fsm.nodes.audit import (
     EMOTION_ERROR_CODE,
     ERROR_CODE,
     OVERLAP_ERROR_CODE,
+    TIC_ERROR_CODE,
     audit,
     emotion_word_density,
     is_passive,
@@ -186,15 +187,20 @@ PARA_B = (
 REFRAIN = "The lantern must never go dark."
 
 
-def state_with_package(draft: str, *, recent_prose=None, intended_refrain=None):
+def state_with_package(
+    draft: str, *, recent_prose=None, committed_prose=None, intended_refrain=None
+):
+    package = {
+        "recent_prose": list(recent_prose or []),
+        "beat": {"intended_refrain": list(intended_refrain or [])},
+    }
+    if committed_prose is not None:
+        package["committed_prose"] = list(committed_prose)
     return make_initial_state(
         "test-project",
         FSM_Pointer(arc_id="arc-1", chapter_id="arc-1-c01", beat_index=0),
         current_draft_text=draft,
-        active_context_package={
-            "recent_prose": list(recent_prose or []),
-            "beat": {"intended_refrain": list(intended_refrain or [])},
-        },
+        active_context_package=package,
     )
 
 
@@ -276,6 +282,21 @@ class TestRepetitionAuditNode:
         delta = await audit(state_with(f"{PARA_A}\n\n{PARA_B}"))
         assert [f for f in delta["critic_failures"] if f.error_code == OVERLAP_ERROR_CODE] == []
 
+    async def test_a_copy_of_a_distant_chapter_is_caught(self):
+        """The corpus is the whole committed manuscript, not the drafter's
+        recent-prose window: a beat that copies a passage long since pruned
+        from that window is still faulted."""
+        draft = f"{PARA_A}\n\nFresh continuation. She rose. She went to the door."
+        state = state_with_package(
+            draft,
+            recent_prose=[PARA_B],  # the copy source is NOT in the window
+            committed_prose=[PARA_A, PARA_B],
+        )
+        delta = await audit(state)
+        overlaps = [f for f in delta["critic_failures"] if f.error_code == OVERLAP_ERROR_CODE]
+        assert len(overlaps) == 1
+        assert overlaps[0].offending_text == PARA_A[:240]
+
 
 # --------------------------------------------------------------- emotion-tell guard
 
@@ -330,3 +351,60 @@ class TestEmotionAuditNode:
         set_node_config(config_factory(emotion_word_threshold=0.3))
         delta = await audit(state_with(EMOTION_SHOWN))
         assert [f for f in delta["critic_failures"] if f.error_code == EMOTION_ERROR_CODE] == []
+
+
+# --------------------------------------------------------------- style-tic guard
+
+# Four sentences, three leaning on stock gestures or abstract shorthand from
+# the default vocabulary: "deep breath", "trembling", "the weight of".
+TIC_HEAVY = (
+    "She took a deep breath and steadied herself. "
+    "Her hands were trembling as she reached for the latch. "
+    "He crossed to the desk and picked up the wrench. "
+    "The weight of it all pressed down on her shoulders."
+)
+# The same dramatic work carried by specific actions and images instead.
+TIC_FREE = (
+    "She counted the latch screws twice before touching them. "
+    "Her thumbnail found the old groove in the brass and stopped there. "
+    "He crossed to the desk and picked up the wrench. "
+    "She reread the last line until the words stopped meaning anything."
+)
+
+
+class TestTicDensity:
+    def test_multi_word_phrases_are_matched_whole(self):
+        pattern = _emotion_pattern(["deep breath", "the weight of"])
+        density, offenders = emotion_word_density(TIC_HEAVY, pattern)
+        assert density == pytest.approx(2 / 4)
+        assert len(offenders) == 2
+
+    def test_a_phrase_does_not_fire_inside_a_longer_word(self):
+        # "deep breath" must not fire on "deep breaths…" mid-word expansions;
+        # boundaries hold at both ends of the phrase.
+        pattern = _emotion_pattern(["breath"])
+        density, offenders = emotion_word_density(
+            "She breathed once. Her breathing slowed.", pattern
+        )
+        assert offenders == []
+
+
+class TestTicAuditNode:
+    async def test_a_tic_heavy_draft_breaches(self, config_factory):
+        set_node_config(config_factory(tic_phrase_threshold=0.3))
+        delta = await audit(state_with(TIC_HEAVY))
+        tics = [f for f in delta["critic_failures"] if f.error_code == TIC_ERROR_CODE]
+        assert len(tics) == 1
+        assert tics[0].critic_source == CRITIC_SOURCE
+        assert "stock gesture" in tics[0].suggested_fix
+
+    async def test_specific_prose_does_not_breach(self, config_factory):
+        set_node_config(config_factory(tic_phrase_threshold=0.3))
+        delta = await audit(state_with(TIC_FREE))
+        assert [f for f in delta["critic_failures"] if f.error_code == TIC_ERROR_CODE] == []
+
+    async def test_the_threshold_is_read_from_config(self, config_factory):
+        # Under a permissive gate the same tic-heavy prose passes.
+        set_node_config(config_factory(tic_phrase_threshold=0.9))
+        delta = await audit(state_with(TIC_HEAVY))
+        assert [f for f in delta["critic_failures"] if f.error_code == TIC_ERROR_CODE] == []

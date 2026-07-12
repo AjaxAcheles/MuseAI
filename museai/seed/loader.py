@@ -7,7 +7,7 @@ seed is safe.
 Expected seed JSON shape::
 
     {"project": {"id": "p1", "genre": "...", "premise": "...",
-                 "word_count_target": 40000},
+                 "setting": "...", "word_count_target": 40000},
      "arcs": [{"description": "..."}],
      "threads": [{"description": "...", "priority_score": 0.8, "status": "open"}],
      "characters": [{"name": "...", "description": "...",
@@ -81,6 +81,7 @@ def load_seed(seed: dict, config: AppConfig) -> dict[str, int]:
                 id=project_id,
                 genre=project.get("genre"),
                 premise=project.get("premise"),
+                setting=project.get("setting"),
                 word_count_target=project.get("word_count_target"),
             )
             counts["projects"] += 1

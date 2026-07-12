@@ -1432,3 +1432,32 @@ web is an explicit research mode.
 - The style-echo loop and event-less beat specs remain the documented
   follow-ups in `docs/agent-tools.md`; `find_repetition` supplies the check,
   not the cure.
+
+## Post-v1.17 maintenance — planner parser hardening
+
+Recent logs showed repeated run-killing planner failures where a small local
+model answered with tool-call-shaped JSON text instead of the required chapter or
+beat plan array:
+
+- `PlanningError: chapter 1 has no description` after a fenced
+  `{"name": "get_full_outline", "parameters": ...}` reply.
+- `PlanningError: beat 1 has no intent` after unwrapped tool-call objects such as
+  `get_chapter_context` and `get_character_emotion_history`.
+
+**Fixes / changes**
+
+- `museai/llm/structured.py`: planner parsing now rejects objects that look like
+  tool calls (`name` plus object-valued `parameters`) instead of wrapping them as
+  one-element plans and letting planner nodes fail later with missing-field
+  errors.
+- `museai/llm/structured.py`: planner salvage extraction now prefers a balanced
+  `[...]` span before falling back to the first balanced object span, so an
+  explanatory object before a real array no longer masks the actual plan.
+- `tests/test_planner_resilience.py`: added production-shaped regressions for a
+  fenced chapter-planner tool call, multiple unwrapped beat-planner tool calls,
+  and array-preferred salvage.
+
+**Done-check**
+
+- `uv run pytest -q tests/test_planner_resilience.py` → `27 passed`.
+- `uv run pytest -q tests/test_planner_resilience.py tests/test_planners.py tests/test_prompts.py tests/test_critic_resilience.py` → `161 passed`.

@@ -2,19 +2,10 @@ project_id: the-last-postcard
 endpoint:
   base_url: http://127.0.0.1:11434/v1
   api_key: ${MUSEAI_API_KEY}
-  model_name: qwen2.5:3b
+  model_name: cryptidbleh/gemma4-claude-opus-4.6:latest
   tokenizer_family: char_heuristic
   request_timeout: 60
   temperature: 0.88
-# Per-agent inference overrides (optional). Each agent role may override any
-# endpoint field; whatever is unset inherits from `endpoint` above. Roles:
-# chapter_planner, beat_planner, drafter, reviser, critic. Example:
-# agents:
-#   drafter:
-#     temperature: 0.9
-#   critic:
-#     model_name: a-stronger-model
-#     temperature: 0.2
 generation:
   word_count_target: null
   revision_retry_cap: 4
@@ -48,11 +39,31 @@ generation:
   - fear
   - elation
   - euphoria
+  tic_phrase_threshold: 0.15
+  tic_phrases:
+  - trembling
+  - trembled
+  - deep breath
+  - shaky breath
+  - tears welled
+  - welled with tears
+  - eyes filled with tears
+  - traced the handwriting
+  - traced the letters
+  - traced the words
+  - heavy silence
+  - silence hung
+  - the weight of
+  - shared history
+  - legacy
+  - closure
+  - bittersweet
   planner_intensity_retries: 1
   intensity_hot_threshold: 0.6
   intensity_flat_fraction: 0.8
   research_mode: false
   tool_call_cap: 3
+agents: {}
 log_level: INFO
 host: 127.0.0.1
 port: 8000

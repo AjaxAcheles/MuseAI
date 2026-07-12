@@ -211,7 +211,7 @@ class TestGetSeedContract:
         contract = get_seed_contract()
         assert contract["project"] == {
             "id": PROJECT_ID, "genre": "mystery", "premise": "p",
-            "word_count_target": None,
+            "setting": "", "word_count_target": None,
         }
         assert contract["characters"] == [
             {"id": "char-mara", "name": "Mara Voss",

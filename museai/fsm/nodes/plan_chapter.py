@@ -147,6 +147,7 @@ async def plan_chapter(state: OrchestratorState) -> dict:
                 project={
                     "genre": project["genre"] or "",
                     "premise": project["premise"] or "",
+                    "setting": project["setting"] or "",
                 },
                 arc={"description": arc["description"]},
                 threads=_thread_context(threads),

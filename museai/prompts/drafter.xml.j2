@@ -20,6 +20,15 @@ Rules:
   never stated outright, and never named as an emotion score. Manner colours
   the beat; it is not what the beat is about, and dwelling on it must never
   displace the change the beat exists to deliver.
+- Ground the beat in the story world in <story_world>. The setting is a
+  load-bearing element, not interchangeable background: let the particular
+  place shape what characters can do, notice, want, and fear in this beat.
+- Give every character who speaks or acts a specific presence, however minor:
+  a particular want, habit, or way of talking. No interchangeable townsfolk,
+  clerks, or neighbours.
+- A letter, note, or other document quoted in the prose must sound like its
+  particular writer and their era — concrete, private specifics — never like
+  the narrator, and never like a greeting card.
 - Choose the beat's length yourself. Read the recent committed prose for the
   story's current rhythm — quick connective beats stay short, pivotal beats get
   room to breathe. Write until the beat's exit state is reached, then stop.
@@ -78,6 +87,14 @@ You have read-only story tools. All are optional; most beats need none.
   </this_beat_must_deliver>
 
   <manner>{{ pad_constraint }}</manner>
+
+  <story_world>
+    <genre>{{ project.get('genre') or '' }}</genre>
+    <premise>{{ project.get('premise') or '' }}</premise>
+{% if project.get('setting') %}
+    <setting>{{ project.setting }}</setting>
+{% endif %}
+  </story_world>
 
   <chapter_obligations>
 {% for obligation in chapter.obligations %}

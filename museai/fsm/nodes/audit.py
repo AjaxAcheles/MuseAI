@@ -32,6 +32,7 @@ CRITIC_SOURCE = "programmatic_audit"
 ERROR_CODE = "PASSIVE_VOICE_DENSITY"
 OVERLAP_ERROR_CODE = "PARAGRAPH_OVERLAP"
 EMOTION_ERROR_CODE = "EMOTION_TELL"
+TIC_ERROR_CODE = "STYLE_TIC"
 
 # The offending sentence quoted back to the reviser. Enough to locate it.
 _QUOTE_CHARS = 240
@@ -230,10 +231,10 @@ async def audit(state: OrchestratorState) -> dict:
     the reducer, which is what a fresh audit of a new draft should do: the
     previous cycle's findings describe prose that no longer exists.
 
-    Three model-free checks run here: passive-voice density, verbatim paragraph
-    overlap against committed prose, and named-emotion density. All three append
-    ``FailureObject``s to the same list, which flows into the existing
-    draft→audit→revise loop.
+    Four model-free checks run here: passive-voice density, verbatim paragraph
+    overlap against committed prose, named-emotion density, and stock-phrase
+    (style-tic) density. All four append ``FailureObject``s to the same list,
+    which flows into the existing draft→audit→revise loop.
     """
     config = get_node_config()
     generation = config.generation
@@ -261,7 +262,11 @@ async def audit(state: OrchestratorState) -> dict:
 
     # --- repetition guard ---------------------------------------------------
     package = state.get("active_context_package") or {}
-    recent_prose = package.get("recent_prose") or []
+    # Compare against the whole committed manuscript when the package carries
+    # it: the recent-prose window is token-budgeted for the drafter and shrinks
+    # exactly when the manuscript grows, which is when distant copies appear.
+    # ``committed_prose`` is never rendered into a prompt, so it costs nothing.
+    corpus = package.get("committed_prose") or package.get("recent_prose") or []
     # Effective allowlist: author-declared config phrases + this beat's declared
     # refrain. The drafter can never write to either, so it cannot exempt its
     # own copies.
@@ -271,7 +276,7 @@ async def audit(state: OrchestratorState) -> dict:
     )
     overlaps = paragraph_overlaps(
         draft,
-        recent_prose,
+        corpus,
         threshold=generation.repetition_threshold,
         min_sentences=generation.repetition_min_run,
         allowlist=allowlist,
@@ -310,6 +315,31 @@ async def audit(state: OrchestratorState) -> dict:
             )
         )
 
+    # --- style-tic guard -----------------------------------------------------
+    # The same sentence-density machinery as the emotion gate, over a separate
+    # vocabulary: stock gestures ("trembling", "deep breath") and abstract
+    # emotional shorthand ("the weight of", "closure") that generated drafts
+    # reach for instead of a specific action or image.
+    tic_pattern = _emotion_pattern(generation.tic_phrases)
+    tic_density, tic_sentences = emotion_word_density(draft, tic_pattern)
+    tic_breached = tic_density > generation.tic_phrase_threshold
+    if tic_breached:
+        failures.append(
+            FailureObject(
+                error_code=TIC_ERROR_CODE,
+                offending_text=tic_sentences[0][:_QUOTE_CHARS],
+                suggested_fix=(
+                    f"{tic_density:.0%} of sentences lean on a stock gesture or "
+                    f"abstract emotional shorthand, over the "
+                    f"{generation.tic_phrase_threshold:.0%} limit. Replace them "
+                    f"with actions and images specific to this character, this "
+                    f"place, and this moment — do not swap one stock phrase for "
+                    f"another."
+                ),
+                critic_source=CRITIC_SOURCE,
+            )
+        )
+
     log_node_event(
         "audit",
         event="audited",
@@ -320,6 +350,8 @@ async def audit(state: OrchestratorState) -> dict:
         paragraph_overlaps=len(overlaps),
         emotion_density=f"{emotion_density:.3f}",
         emotion_sentences=len(emotion_sentences),
+        tic_density=f"{tic_density:.3f}",
+        tic_sentences=len(tic_sentences),
         failures=len(failures),
     )
     await bus.publish(
@@ -330,6 +362,7 @@ async def audit(state: OrchestratorState) -> dict:
             "threshold": threshold,
             "paragraph_overlaps": len(overlaps),
             "emotion_density": round(emotion_density, 3),
+            "tic_density": round(tic_density, 3),
             "failures": [f.model_dump() for f in failures],
         },
     )

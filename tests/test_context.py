@@ -68,7 +68,10 @@ def _seed(config, *, passages=PASSAGES, threads=THREADS) -> None:
     init_db(config.db_path)
     conn = connect_db(config.db_path)
     with conn:
-        upsert_project(conn, id=PROJECT_ID, genre="mystery", premise="Letters arrive.")
+        upsert_project(
+            conn, id=PROJECT_ID, genre="mystery", premise="Letters arrive.",
+            setting="A shrinking harbour town.",
+        )
         upsert_arc(
             conn, id=ARC_ID, project_id=PROJECT_ID, ordering=1,
             description="Mara traces the postmarks.", status="active",
@@ -131,6 +134,13 @@ def _assert_protected(package) -> None:
     assert package["beat"]["exit_state"] == BEAT_SPEC["exit_state"]
     assert package["pad_constraint"] == PAD_CONSTRAINT
     assert package["chapter"]["obligations"] == OBLIGATIONS
+    # The story world is protected too: a beat drafted blind to the premise
+    # and setting treats the world as interchangeable background.
+    assert package["project"] == {
+        "genre": "mystery",
+        "premise": "Letters arrive.",
+        "setting": "A shrinking harbour town.",
+    }
 
 
 async def test_assembles_every_section_when_the_budget_is_ample(config_factory):
@@ -159,15 +169,18 @@ async def test_assembles_every_section_when_the_budget_is_ample(config_factory):
     }
     # Oldest -> newest, nothing dropped.
     assert package["recent_prose"] == PASSAGES
+    # The audit's repetition corpus is the whole committed manuscript, carried
+    # outside the prompt: it is never rendered and never pruned.
+    assert package["committed_prose"] == PASSAGES
     assert package["budget"]["dropped_prose_passages"] == 0
     assert package["budget"]["dropped_threads"] == 0
     assert package["budget"]["over_budget"] is False
 
 
 async def test_over_budget_drops_the_oldest_prose_first(config_factory):
-    # A budget that fits the protected core (~900 tokens with the drafter's
-    # tool block) plus roughly one ~390-token passage.
-    config = config_factory(project_id=PROJECT_ID, context_token_budget=1350)
+    # A budget that fits the protected core (~1200 tokens with the drafter's
+    # tool block and story world) plus roughly one ~390-token passage.
+    config = config_factory(project_id=PROJECT_ID, context_token_budget=1750)
     _seed(config)
     set_node_config(config)
 
@@ -179,13 +192,13 @@ async def test_over_budget_drops_the_oldest_prose_first(config_factory):
     surviving = package["recent_prose"]
     assert surviving == PASSAGES[len(PASSAGES) - len(surviving):]
     assert "OLDEST." not in "".join(surviving)
-    assert _tokens(package, config) <= 1200
+    assert _tokens(package, config) <= 1750
 
 
 async def test_prose_is_exhausted_before_any_thread_is_dropped(config_factory):
     # Tight enough that every passage must go, roomy enough that the (small)
     # threads all fit once the prose is gone.
-    config = config_factory(project_id=PROJECT_ID, context_token_budget=1200)
+    config = config_factory(project_id=PROJECT_ID, context_token_budget=1400)
     _seed(config)
     set_node_config(config)
 
@@ -229,6 +242,8 @@ async def test_protected_core_survives_an_impossible_budget(
     # Everything droppable is gone, and the beat's instructions are still intact.
     assert package["recent_prose"] == []
     assert package["threads"] == []
+    # The audit corpus is not prompt context; pruning never touches it.
+    assert package["committed_prose"] == PASSAGES
     _assert_protected(package)
     assert package["budget"]["over_budget"] is True
     assert "exceeds budget" in caplog.text

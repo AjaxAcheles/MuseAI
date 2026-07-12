@@ -43,6 +43,9 @@ else.
   <project>
     <genre>{{ project.genre }}</genre>
     <premise>{{ project.premise }}</premise>
+{% if project.get('setting') %}
+    <setting>{{ project.setting }}</setting>
+{% endif %}
   </project>
 
   <arc>

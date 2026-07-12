@@ -87,19 +87,8 @@ def _strip_fences(text: str) -> str:
     return body
 
 
-def _first_balanced_span(text: str) -> str | None:
-    """Return the first balanced ``[...]`` or ``{...}`` span, if any.
-
-    Scans with string- and escape-awareness so a bracket inside a JSON string
-    (``"suggested_fix": "drop the ]"``) does not close the span early.
-    """
-    start = next(
-        (i for i, char in enumerate(text) if char in _PAIRS),
-        None,
-    )
-    if start is None:
-        return None
-
+def _balanced_span_from(text: str, start: int) -> str | None:
+    """Return the balanced JSON span beginning at ``start``, if it closes."""
     opener = text[start]
     closer = _PAIRS[opener]
     depth = 0
@@ -127,6 +116,32 @@ def _first_balanced_span(text: str) -> str | None:
             if depth == 0:
                 return text[start : index + 1]
 
+    return None
+
+
+def _first_balanced_span(text: str) -> str | None:
+    """Return the first balanced ``[...]`` or ``{...}`` span, if any.
+
+    Scans with string- and escape-awareness so a bracket inside a JSON string
+    (``"suggested_fix": "drop the ]"``) does not close the span early.
+    """
+    start = next(
+        (i for i, char in enumerate(text) if char in _PAIRS),
+        None,
+    )
+    if start is None:
+        return None
+    return _balanced_span_from(text, start)
+
+
+def _first_balanced_span_with_opener(text: str, opener: str) -> str | None:
+    """Return the first balanced span that starts with ``opener``, if any."""
+    for index, char in enumerate(text):
+        if char != opener:
+            continue
+        span = _balanced_span_from(text, index)
+        if span is not None:
+            return span
     return None
 
 
@@ -231,6 +246,11 @@ def _as_object_array(data: Any, what: str) -> list[dict]:
                 f"{what} element {index} is not a JSON object, "
                 f"got {type(element).__name__}"
             )
+        if "name" in element and isinstance(element.get("parameters"), dict):
+            raise StructuredOutputError(
+                f"{what} element {index} looks like a tool call, not a planner "
+                f"object: {element.get('name')!r}"
+            )
     return list(data)
 
 
@@ -297,7 +317,10 @@ def parse_json_array(raw_text: str, *, what: str, repair: bool = False) -> list[
         pass
 
     # Pass 2: lenient extraction.
-    candidate = _first_balanced_span(_strip_fences(raw_text))
+    stripped = _strip_fences(raw_text)
+    candidate = _first_balanced_span_with_opener(stripped, "[") or _first_balanced_span(
+        stripped
+    )
     if candidate is not None:
         try:
             return _as_object_array(json.loads(candidate), what)
@@ -306,7 +329,10 @@ def parse_json_array(raw_text: str, *, what: str, repair: bool = False) -> list[
 
     # Pass 3: repair the model's quoting, then extract again.
     if repair:
-        candidate = _first_balanced_span(repair_json_text(_strip_fences(raw_text)))
+        repaired = repair_json_text(stripped)
+        candidate = _first_balanced_span_with_opener(repaired, "[") or _first_balanced_span(
+            repaired
+        )
         if candidate is not None:
             try:
                 return _as_object_array(json.loads(candidate), what)

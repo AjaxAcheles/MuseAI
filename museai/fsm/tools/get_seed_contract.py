@@ -17,8 +17,8 @@ GET_SEED_CONTRACT_TOOL_SPEC: dict[str, Any] = {
     "function": {
         "name": "get_seed_contract",
         "description": (
-            "The project's seeded contract: genre, premise, word-count target, "
-            "every character with their description, and every narrative "
+            "The project's seeded contract: genre, premise, setting, word-count "
+            "target, every character with their description, and every narrative "
             "thread. These are the commitments plans and prose must honour. "
             "Use it to ground a plan in what the author actually asked for."
         ),
@@ -41,6 +41,7 @@ def get_seed_contract() -> dict:
             "id": project["id"],
             "genre": project["genre"] or "",
             "premise": project["premise"] or "",
+            "setting": project["setting"] or "",
             "word_count_target": project["word_count_target"],
         },
         "characters": [

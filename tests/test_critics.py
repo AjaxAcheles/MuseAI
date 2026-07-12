@@ -29,6 +29,11 @@ PACKAGE = {
         "thread_updates": [{"id": "t1", "status": "progressing"}],
     },
     "pad_constraint": "Energy with nowhere to go.",
+    "project": {
+        "genre": "mystery",
+        "premise": "Letters in Mara's own hand keep arriving.",
+        "setting": "A shrinking harbour town with one post office.",
+    },
     "chapter": {
         "id": "arc-1-c01",
         "description": "Mara catalogs the letters.",
@@ -150,6 +155,20 @@ class TestPrompt:
         assert "Mara finds the letter." in body
         assert "Mara is holding her own handwriting." in body
         assert '<update thread="t1" new_status="progressing"/>' in body
+
+    def test_the_story_world_reaches_the_prompt(self):
+        """The critic can only defend a premise and setting it has been shown."""
+        body = critic_messages(DRAFT, PACKAGE)[1]["content"]
+        assert "<story_world>" in body
+        assert "Letters in Mara's own hand keep arriving." in body
+        assert "A shrinking harbour town with one post office." in body
+
+    def test_a_package_without_a_project_still_renders(self):
+        """Old context packages predate the story-world block; the prompt must
+        render without it rather than crash mid-run."""
+        package = {k: v for k, v in PACKAGE.items() if k != "project"}
+        body = critic_messages(DRAFT, package)[1]["content"]
+        assert "<beat_goal>" in body
 
 
 class TestCleanPass:

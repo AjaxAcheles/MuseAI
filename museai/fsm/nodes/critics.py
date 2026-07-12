@@ -58,6 +58,7 @@ def critic_messages(draft_text: str, package: dict) -> list[dict]:
         CRITIC_NAME,
         draft_text=draft_text,
         beat=package["beat"],
+        project=package.get("project") or {},
         chapter=package["chapter"],
         threads=package["threads"],
         characters=package["characters"],

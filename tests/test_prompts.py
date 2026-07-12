@@ -39,7 +39,11 @@ FORBIDDEN_PHRASES = [
 ]
 
 
-PROJECT = {"genre": "literary thriller", "premise": "A forged ledger surfaces."}
+PROJECT = {
+    "genre": "literary thriller",
+    "premise": "A forged ledger surfaces.",
+    "setting": "A guild archive in a city living off its last trade route.",
+}
 ARC = {"description": "Mira uncovers the forgery and loses her patron."}
 CHAPTER = {
     "description": "Mira searches the archive.",
@@ -125,6 +129,7 @@ def context_for(template: str) -> dict:
         return {
             **common,
             "beat": BEAT,
+            "project": PROJECT,
             "chapter": CHAPTER,
             "recent_prose": RECENT_PROSE,
             "pad_constraint": "Guarded, alert, and quietly in control.",
@@ -133,6 +138,7 @@ def context_for(template: str) -> dict:
         return {
             **common,
             "beat": BEAT,
+            "project": PROJECT,
             "chapter": CHAPTER,
             "recent_prose": RECENT_PROSE,
             "draft_text": DRAFT_TEXT,
@@ -298,6 +304,35 @@ class TestRendering:
         context = {**context_for("drafter"), "beat": beat}
         user = render_messages("drafter", **context)[1]["content"]
         assert '<update thread="t2" new_status="resolved"/>' in user
+
+    def test_drafter_sees_the_story_world(self):
+        """Premise and setting reach the drafter; the mandate still leads."""
+        user = render_messages("drafter", **context_for("drafter"))[1]["content"]
+        assert "<story_world>" in user
+        assert PROJECT["premise"] in user
+        assert PROJECT["setting"] in user
+        assert user.index("<this_beat_must_deliver>") < user.index("<story_world>")
+
+    def test_critic_sees_the_story_world_and_guards_canon(self):
+        """The critic can only defend the premise, names, and central objects
+        it has been told to check."""
+        messages = render_messages("continuity_critic", **context_for("continuity_critic"))
+        system, user = messages[0]["content"], messages[1]["content"]
+        assert "<story_world>" in user
+        assert PROJECT["premise"] in user
+        assert PROJECT["setting"] in user
+        assert "CONTRADICTS_PREMISE" in user
+        assert "wrong or misspelled name" in system
+        assert "central object" in system
+
+    def test_a_setting_free_project_renders_no_setting_element(self):
+        """Projects seeded before `setting` existed must render cleanly."""
+        project = {"genre": PROJECT["genre"], "premise": PROJECT["premise"]}
+        for template in ("drafter", "continuity_critic", "chapter_planner"):
+            context = {**context_for(template), "project": project}
+            user = render_messages(template, **context)[1]["content"]
+            assert "<setting>" not in user, template
+            assert PROJECT["premise"] in user, template
 
 
 class TestRenderMessagesParser:

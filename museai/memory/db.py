@@ -34,6 +34,7 @@ CREATE TABLE IF NOT EXISTS Projects (
     id TEXT PRIMARY KEY,
     genre TEXT,
     premise TEXT,
+    setting TEXT,
     word_count_target INTEGER
 );
 
@@ -107,12 +108,25 @@ CREATE INDEX IF NOT EXISTS idx_commitintent_status ON CommitIntent(status);
 """
 
 
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Additive column migrations for databases created by an older schema.
+
+    ``CREATE TABLE IF NOT EXISTS`` never alters an existing table, so a column
+    added to ``_SCHEMA`` after a database was created must also be added here.
+    Idempotent: a column is only added when it is missing.
+    """
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(Projects)")}
+    if "setting" not in columns:
+        conn.execute("ALTER TABLE Projects ADD COLUMN setting TEXT")
+
+
 def init_db(db_path: str | Path) -> None:
     """Create the schema if it does not exist. Idempotent."""
     conn = connect_db(db_path)
     try:
         with conn:
             conn.executescript(_SCHEMA)
+            _migrate(conn)
     finally:
         conn.close()
 
@@ -127,18 +141,20 @@ def upsert_project(
     id: str,
     genre: str | None = None,
     premise: str | None = None,
+    setting: str | None = None,
     word_count_target: int | None = None,
 ) -> None:
     conn.execute(
         """
-        INSERT INTO Projects (id, genre, premise, word_count_target)
-        VALUES (?, ?, ?, ?)
+        INSERT INTO Projects (id, genre, premise, setting, word_count_target)
+        VALUES (?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             genre = excluded.genre,
             premise = excluded.premise,
+            setting = excluded.setting,
             word_count_target = excluded.word_count_target
         """,
-        (id, genre, premise, word_count_target),
+        (id, genre, premise, setting, word_count_target),
     )
 
 

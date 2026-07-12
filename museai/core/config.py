@@ -150,6 +150,21 @@ class GenerationConfig(BaseModel):
         "anguish", "misery", "grief", "guilt", "shame", "spite", "hatred",
         "anxiety", "fear", "elation", "euphoria",
     ]
+    # --- Style-tic guard (audit) --------------------------------------------
+    # Proportion of a beat's sentences that may lean on a stock gesture or an
+    # abstract emotional shorthand before the audit faults the draft. Separate
+    # from the emotion gate so the two can be tuned independently.
+    tic_phrase_threshold: float = 0.15
+    # The stock-phrase vocabulary the guard counts. Multi-word phrases are
+    # matched whole. Data, not logic: overridable in config, defaulted to the
+    # tics observed in generated drafts so a fresh config need not restate them.
+    tic_phrases: list[str] = [
+        "trembling", "trembled", "deep breath", "shaky breath",
+        "tears welled", "welled with tears", "eyes filled with tears",
+        "traced the handwriting", "traced the letters", "traced the words",
+        "heavy silence", "silence hung", "the weight of",
+        "shared history", "legacy", "closure", "bittersweet",
+    ]
     # --- Intensity arc (beat planner) --------------------------------------
     # How many times the beat planner is re-prompted for a varied emotional arc
     # when its plan comes back nearly all high-arousal. Bounded, then accepted.
@@ -183,6 +198,7 @@ class GenerationConfig(BaseModel):
         "passive_voice_threshold",
         "repetition_threshold",
         "emotion_word_threshold",
+        "tic_phrase_threshold",
         "intensity_hot_threshold",
         "intensity_flat_fraction",
     )
