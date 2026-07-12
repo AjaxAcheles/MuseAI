@@ -688,3 +688,34 @@ class TestResolveFocalCharacter:
     def test_empty_and_whitespace_resolve_to_nobody(self):
         assert self.resolve("") == ""
         assert self.resolve("   ") == ""
+
+
+# --------------------------------------------------------------------------- #
+# tool rosters                                                                #
+# --------------------------------------------------------------------------- #
+
+async def test_each_planner_is_offered_its_own_tool_roster(seeded, monkeypatch):
+    offered: dict[str, list] = {}
+
+    async def fake_chapter(endpoint, messages, **kwargs):
+        offered["chapter_planner"] = kwargs.get("tools")
+        return _response(CHAPTERS_JSON)
+
+    async def fake_beat(endpoint, messages, **kwargs):
+        offered["beat_planner"] = kwargs.get("tools")
+        return _response(BEATS_JSON)
+
+    patch_planner_llm(monkeypatch, chapter=fake_chapter, beat=fake_beat)
+
+    await plan_chapter(_state())
+    chapter_id = chapter_id_for(ARC_ID, 1)
+    await plan_beat(_state(chapter_id))
+
+    assert [t["function"]["name"] for t in offered["chapter_planner"]] == [
+        "get_seed_contract", "get_full_outline", "get_thread_history",
+        "get_thread_status", "get_canonical_state", "check_plan_node",
+    ]
+    assert [t["function"]["name"] for t in offered["beat_planner"]] == [
+        "get_seed_contract", "get_current_pointer_context", "get_chapter_context",
+        "get_character_emotion_history", "get_canonical_state", "check_plan_node",
+    ]

@@ -58,6 +58,7 @@ def drafter_messages(package: dict) -> list[dict]:
         threads=package["threads"],
         characters=package["characters"],
         recent_prose=package["recent_prose"],
+        research_mode=get_node_config().generation.research_mode,
     )
 
 

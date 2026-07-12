@@ -31,7 +31,7 @@ from museai.core.stream_bus import bus
 from museai.fsm.nodes.deps import DraftingError, get_node_config
 from museai.fsm.state import FailureObject, OrchestratorState
 from museai.fsm.tools.loop import run_agent_loop
-from museai.fsm.tools.web_search import TOOL_IMPLS, WEB_SEARCH_TOOL_SPEC
+from museai.fsm.tools.registry import tool_impls_for, tool_specs_for
 from museai.llm.prompts import render_messages
 from museai.llm.tokenizer import count_message_tokens
 
@@ -163,6 +163,7 @@ def _reviser_messages(
         threads=[] if collapsed else package["threads"],
         characters=[] if collapsed else package["characters"],
         recent_prose=[] if collapsed else package["recent_prose"],
+        research_mode=get_node_config().generation.research_mode,
     )
 
 
@@ -185,15 +186,28 @@ def _budgeted_messages(config, **kwargs) -> tuple[list[dict], bool]:
     return collapsed, True
 
 
-async def _rewrite(config, messages: list[dict], what: str) -> str:
+async def _rewrite(config, messages: list[dict], what: str, beat_id: str) -> str:
     """One reviser call. Empty prose is a hard failure, never a silent no-op."""
+
+    async def on_tool_call(event: dict) -> None:
+        log_node_event(
+            "revise",
+            event="tool_call",
+            beat_id=beat_id,
+            tool=event["tool"],
+            args=event["arguments"],
+        )
+        await bus.publish("reviser_tool", {"beat_id": beat_id, **event})
+
     response = await run_agent_loop(
         config.endpoint,
         messages,
-        [WEB_SEARCH_TOOL_SPEC],
-        TOOL_IMPLS,
+        tool_specs_for("reviser"),
+        tool_impls_for("reviser"),
         config.generation.max_agent_iterations,
+        on_event=on_tool_call,
         agent="reviser",
+        tool_call_cap=config.generation.tool_call_cap,
     )
     revised = response.text.strip()
     if not revised:
@@ -247,7 +261,7 @@ async def revise_prose(state: OrchestratorState) -> dict:
                 span_text=draft[start:end],
                 package=package,
             )
-            replacement = await _rewrite(config, messages, f"span {start}:{end}")
+            replacement = await _rewrite(config, messages, f"span {start}:{end}", beat_id)
             rejection = replacement_rejection(draft, (start, end), replacement)
             if rejection is not None:
                 # Splicing this would duplicate prose. The full rewrite below
@@ -272,7 +286,7 @@ async def revise_prose(state: OrchestratorState) -> dict:
             span_text="",
             package=package,
         )
-        revised = await _rewrite(config, messages, f"beat {beat_id!r}")
+        revised = await _rewrite(config, messages, f"beat {beat_id!r}", beat_id)
 
     retry_count = state["retry_count"] + 1
     mode = "span" if span_mode else "full"

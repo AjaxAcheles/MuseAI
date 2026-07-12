@@ -33,7 +33,7 @@ from museai.core.stream_bus import bus
 from museai.fsm.nodes.deps import get_node_config
 from museai.fsm.state import OrchestratorState
 from museai.fsm.tools.loop import run_agent_loop
-from museai.fsm.tools.web_search import TOOL_IMPLS, WEB_SEARCH_TOOL_SPEC
+from museai.fsm.tools.registry import tool_impls_for, tool_specs_for
 from museai.llm.prompts import render_messages
 from museai.llm.structured import StructuredOutputError, parse_failure_objects
 
@@ -61,6 +61,7 @@ def critic_messages(draft_text: str, package: dict) -> list[dict]:
         threads=package["threads"],
         characters=package["characters"],
         recent_prose=package["recent_prose"],
+        research_mode=get_node_config().generation.research_mode,
     )
 
 
@@ -149,11 +150,12 @@ async def adversarial_critics(state: OrchestratorState) -> dict:
         response = await run_agent_loop(
             config.endpoint,
             messages,
-            [WEB_SEARCH_TOOL_SPEC],
-            TOOL_IMPLS,
+            tool_specs_for("critic"),
+            tool_impls_for("critic"),
             generation.max_agent_iterations,
             on_event=on_tool_call,
             agent="critic",
+            tool_call_cap=generation.tool_call_cap,
         )
         last_text = response.text
         await bus.publish(

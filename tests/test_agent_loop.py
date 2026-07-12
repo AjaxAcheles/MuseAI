@@ -350,3 +350,85 @@ class TestEvents:
         )
 
         assert len(events[0]["result_preview"]) == 200
+
+
+class TestStructuredErrors:
+    async def test_a_fault_is_a_json_object_with_tool_type_and_message(self, patched):
+        fake = patched(
+            response(tool_calls=[tool_call("web_search", '{"query": "x"}')]),
+            response(text="recovered"),
+        )
+
+        def boom(query, max_results=5):
+            raise RuntimeError("upstream is down")
+
+        await run_agent_loop(ENDPOINT, MESSAGES, TOOLS, {"web_search": boom}, max_iterations=3)
+
+        import json as json_module
+
+        payload = json_module.loads(fake.calls[1]["messages"][2]["content"])
+        assert payload["error"]["tool"] == "web_search"
+        assert payload["error"]["type"] == "tool_failure"
+        assert "upstream is down" in payload["error"]["message"]
+
+
+class TestCallCap:
+    async def test_a_tool_at_its_cap_errors_instead_of_running(self, patched):
+        fake = patched(
+            response(
+                tool_calls=[
+                    tool_call("web_search", '{"query": "a"}', "c1"),
+                    tool_call("web_search", '{"query": "b"}', "c2"),
+                ]
+            ),
+            response(text="done"),
+        )
+        runs: list[str] = []
+
+        await run_agent_loop(
+            ENDPOINT,
+            MESSAGES,
+            TOOLS,
+            {"web_search": lambda query, max_results=5: runs.append(query)},
+            max_iterations=3,
+            tool_call_cap=1,
+        )
+
+        assert runs == ["a"]
+        second_result = fake.calls[1]["messages"][3]["content"]
+        assert "call_cap_exceeded" in second_result
+
+    async def test_the_cap_counts_across_turns(self, patched):
+        fake = patched(
+            *[response(tool_calls=[tool_call("web_search", "{}")]) for _ in range(3)],
+            response(text="done"),
+        )
+        runs: list[int] = []
+
+        await run_agent_loop(
+            ENDPOINT,
+            MESSAGES,
+            TOOLS,
+            {"web_search": lambda **k: runs.append(1)},
+            max_iterations=3,
+            tool_call_cap=2,
+        )
+
+        assert len(runs) == 2
+
+    async def test_no_cap_means_unlimited(self, patched):
+        patched(
+            *[response(tool_calls=[tool_call("web_search", "{}")]) for _ in range(4)],
+            response(text="done"),
+        )
+        runs: list[int] = []
+
+        await run_agent_loop(
+            ENDPOINT,
+            MESSAGES,
+            TOOLS,
+            {"web_search": lambda **k: runs.append(1)},
+            max_iterations=4,
+        )
+
+        assert len(runs) == 4

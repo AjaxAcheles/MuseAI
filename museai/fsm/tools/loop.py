@@ -13,9 +13,14 @@ Two properties matter more than anything else here:
   the endpoint no way to answer except in prose. The loop always terminates with
   a plain answer.
 * **A tool never crashes the loop.** An unknown tool name, a malformed argument
-  blob, or an exception inside a tool becomes an error *string* handed back to
-  the model as that call's result. Models recover from being told a tool failed;
+  blob, or an exception inside a tool becomes a structured error *object*
+  (``{"error": {"tool", "type", "message"}}``, serialised as that call's result)
+  handed back to the model. Models recover from being told exactly what failed;
   they cannot recover from a traceback. Only ``call_llm`` itself may raise.
+
+The loop also enforces a per-tool call cap (``tool_call_cap``): a model that
+keeps re-running the same search gets a ``call_cap_exceeded`` error instead of
+another result, so the bounded iterations are spent answering, not looping.
 """
 
 from __future__ import annotations
@@ -37,6 +42,14 @@ EventCallback = Callable[[dict[str, Any]], Any | Awaitable[Any]]
 
 class AgentLoopError(ValueError):
     """The loop was configured impossibly — a non-positive iteration budget."""
+
+
+def _error_payload(tool: str, error_type: str, message: str) -> str:
+    """A tool failure as a structured object the model can read fields off."""
+    return json.dumps(
+        {"error": {"tool": tool, "type": error_type, "message": message}},
+        ensure_ascii=False,
+    )
 
 
 async def _emit_event(on_event: EventCallback | None, event: dict[str, Any]) -> None:
@@ -94,7 +107,9 @@ async def _invoke_tool(
     impl = tool_impls.get(name)
     if impl is None:
         known = ", ".join(sorted(tool_impls)) or "none"
-        return f"error: unknown tool {name!r}; available tools: {known}"
+        return _error_payload(
+            name, "unknown_tool", f"unknown tool {name!r}; available tools: {known}"
+        )
 
     try:
         if inspect.iscoroutinefunction(impl):
@@ -106,7 +121,9 @@ async def _invoke_tool(
             if inspect.isawaitable(result):
                 result = await result
     except Exception as exc:  # noqa: BLE001 - a tool fault is data, not a crash
-        return f"error: tool {name!r} failed: {type(exc).__name__}: {exc}"
+        return _error_payload(
+            name, "tool_failure", f"{type(exc).__name__}: {exc}"
+        )
     return _stringify(result)
 
 
@@ -114,8 +131,14 @@ async def _run_tool_calls(
     tool_calls: Sequence[Mapping[str, Any]],
     tool_impls: Mapping[str, Callable[..., Any]],
     on_event: EventCallback | None,
+    call_counts: dict[str, int],
+    call_cap: int | None,
 ) -> list[dict[str, Any]]:
-    """Execute every tool call in one model turn, in order, into tool messages."""
+    """Execute every tool call in one model turn, in order, into tool messages.
+
+    ``call_counts`` persists across the whole loop; a tool at ``call_cap`` gets
+    a ``call_cap_exceeded`` error instead of another execution.
+    """
     messages: list[dict[str, Any]] = []
     logger = get_fsm_logger()
 
@@ -124,8 +147,16 @@ async def _run_tool_calls(
         name = function.get("name") or ""
         kwargs, error = _parse_arguments(function.get("arguments"))
         if error is not None:
-            content = f"error: tool {name!r} {error}"
+            content = _error_payload(name, "bad_arguments", error)
+        elif call_cap is not None and call_counts.get(name, 0) >= call_cap:
+            content = _error_payload(
+                name,
+                "call_cap_exceeded",
+                f"tool {name!r} was already called {call_cap} times in this "
+                f"task; work with the results you have and answer now",
+            )
         else:
+            call_counts[name] = call_counts.get(name, 0) + 1
             content = await _invoke_tool(name, kwargs, tool_impls)
 
         logger.info(
@@ -162,6 +193,7 @@ async def run_agent_loop(
     on_event: EventCallback | None = None,
     agent: str = "system",
     on_token: Callable[[str], Awaitable[None]] | None = None,
+    tool_call_cap: int | None = None,
 ) -> LLMResponse:
     """Drive the model through tool calls until it answers in prose.
 
@@ -177,12 +209,16 @@ async def run_agent_loop(
     (the drafter's live view). Turns that only request tools emit little or no
     text, so in practice the stream is the final answer.
 
+    ``tool_call_cap`` bounds how many times any *one* tool may run across the
+    whole loop; ``None`` leaves them uncapped.
+
     ``messages`` is not mutated; the loop works on its own copy.
     """
     if max_iterations < 1:
         raise AgentLoopError(f"max_iterations must be >= 1, got {max_iterations}")
 
     working: list[dict[str, Any]] = [dict(m) for m in messages]
+    call_counts: dict[str, int] = {}
 
     for _ in range(max_iterations):
         response = await call_llm(
@@ -198,7 +234,11 @@ async def run_agent_loop(
                 "tool_calls": [dict(call) for call in response.tool_calls],
             }
         )
-        working.extend(await _run_tool_calls(response.tool_calls, tool_impls, on_event))
+        working.extend(
+            await _run_tool_calls(
+                response.tool_calls, tool_impls, on_event, call_counts, tool_call_cap
+            )
+        )
 
     # The budget is spent and the model is still reaching for tools. Withholding
     # the schemas leaves it nothing to answer with but prose.

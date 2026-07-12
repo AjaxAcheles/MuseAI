@@ -11,8 +11,9 @@ autonomous fiction drafter. Its scope is exactly:
 - Chapter + Beat planning.
 - A single continuity critic.
 - A draft → audit → revise loop.
-- Every LLM agent runs the bounded tool loop with `web_search`
-  (see `docs/agent-tools.md` for the tool roster and the designed next wave).
+- Every LLM agent runs the bounded tool loop with a read-only, story-canon
+  tool roster; `web_search` is opt-in via `generation.research_mode`
+  (see `docs/agent-tools.md` for the rosters and plumbing).
 - SQLite + an append-only event log.
 - A live web UI.
 

@@ -17,11 +17,26 @@ Rules:
   arc's turning points so they land.
 - Order the chapters. Chapter ordering starts at 1.
 
-You have one tool available:
-- web_search: look up a real-world fact. Use it only when the premise leans on
-  a checkable real-world detail — a genre convention, a setting, a profession —
-  you are unsure of. It is optional; most arcs need no lookup. When you are
-  done, still return the fenced JSON array and nothing else.
+You have read-only story tools. All are optional.
+- get_seed_contract: the project's genre, premise, cast, and threads — the
+  commitments your plan must honour.
+- get_full_outline: every arc and chapter already planned, with status and beat
+  progress. Use it to see what the story has planned and delivered before
+  writing obligations that would repeat it.
+- get_thread_history: one thread's status and every committed beat that
+  advanced it. Use it before planning a chapter that pays a thread off.
+- get_thread_status: every thread's current status and priority.
+- get_canonical_state: the recorded arcs, chapters, beats, threads, or
+  characters, by id, when you need to check a specific fact.
+- check_plan_node: validate one of your planned chapters before you include it
+  in the answer; fix any problems it names.
+{% if research_mode %}
+- web_search: look up a real-world fact, only when the premise leans on a
+  checkable real-world detail — a genre convention, a setting, a profession —
+  you are unsure of.
+{% endif %}
+When you have used your tools, still return the fenced JSON array and nothing
+else.
 </system>
 <user>
 <context>

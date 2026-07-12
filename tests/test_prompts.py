@@ -80,7 +80,7 @@ FAILURE = {
 
 def context_for(template: str) -> dict:
     """The full context each template requires (StrictUndefined: no gaps allowed)."""
-    common = {"threads": THREADS, "characters": CHARACTERS}
+    common = {"threads": THREADS, "characters": CHARACTERS, "research_mode": False}
     if template == "chapter_planner":
         return {**common, "project": PROJECT, "arc": ARC}
     if template == "beat_planner":
@@ -217,7 +217,8 @@ class TestRendering:
 
     def test_empty_collections_render_a_none_marker(self):
         rendered = render(
-            "chapter_planner", project=PROJECT, arc=ARC, threads=[], characters=[]
+            "chapter_planner", project=PROJECT, arc=ARC, threads=[], characters=[],
+            research_mode=False,
         )
         assert "<none/>" in rendered
 
@@ -228,15 +229,24 @@ class TestRendering:
         # Pacing is the drafter's call now; no numeric length target survives.
         assert "word_target" not in user
 
-    def test_drafter_and_planners_offer_the_web_search_tool(self):
-        for template in ("drafter", "reviser", "beat_planner", "chapter_planner"):
-            messages = render_messages(template, **context_for(template))
-            assert "web_search" in messages[0]["content"], template
+    @pytest.mark.parametrize("template", TEMPLATES)
+    def test_every_agent_gets_story_tools_by_default(self, template):
+        messages = render_messages(template, **context_for(template))
+        assert "read-only story tools" in messages[0]["content"], template
 
-    def test_critic_offers_the_web_search_tool_and_scopes_the_check(self):
+    @pytest.mark.parametrize("template", TEMPLATES)
+    def test_web_search_is_offered_only_in_research_mode(self, template):
+        off = render_messages(template, **context_for(template))
+        assert "web_search" not in off[0]["content"], template
+
+        on = render_messages(
+            template, **{**context_for(template), "research_mode": True}
+        )
+        assert "web_search" in on[0]["content"], template
+
+    def test_critic_scopes_the_check(self):
         messages = render_messages("continuity_critic", **context_for("continuity_critic"))
         system = messages[0]["content"]
-        assert "web_search" in system
         assert "scoped to the material" in system
         assert "continuity_critic" in messages[1]["content"]
 

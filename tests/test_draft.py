@@ -171,3 +171,22 @@ async def test_an_empty_stream_is_a_hard_failure(configured, monkeypatch):
 
     with pytest.raises(DraftingError, match="no prose"):
         await draft_prose(_state())
+
+
+async def test_the_loop_is_offered_the_drafter_roster(configured, monkeypatch):
+    offered: list = []
+
+    async def fake(endpoint, messages, *, stream=False, on_token=None, **kwargs):
+        offered.append(kwargs.get("tools"))
+        for token in TOKENS:
+            await on_token(token)
+        return _Response(PROSE)
+
+    monkeypatch.setattr(loop_module, "call_llm", fake)
+
+    await draft_prose(_state())
+
+    assert [t["function"]["name"] for t in offered[0]] == [
+        "get_current_pointer_context", "get_recent_commits", "search_manuscript",
+        "get_character_sheet", "find_repetition",
+    ]

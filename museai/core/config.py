@@ -125,6 +125,16 @@ class GenerationConfig(BaseModel):
     intensity_hot_threshold: float
     # Fraction of a chapter's beats that may be hot before the plan is re-prompted.
     intensity_flat_fraction: float
+    # --- Agent tools --------------------------------------------------------
+    # Offers `web_search` to every agent when true. Off by default: agents
+    # ground themselves in the story's own canon (seed, outline, threads,
+    # committed manuscript); the public web is an explicit research mode, not a
+    # default reflex.
+    research_mode: bool = False
+    # How many times any one tool may be called within a single agent loop.
+    # Stops a model from spending its bounded iterations re-running the same
+    # search instead of answering.
+    tool_call_cap: int = 3
 
     @field_validator("word_count_target", mode="before")
     @classmethod
@@ -162,7 +172,7 @@ class GenerationConfig(BaseModel):
             raise ValueError(f"{info.field_name} must be >= 0, got {value}")
         return value
 
-    @field_validator("critic_degrade_threshold", "repetition_min_run")
+    @field_validator("critic_degrade_threshold", "repetition_min_run", "tool_call_cap")
     @classmethod
     def _positive(cls, value: int, info: ValidationInfo) -> int:
         """A threshold of 0 would degrade before the first failure ever happened."""

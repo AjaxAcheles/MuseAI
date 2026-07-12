@@ -56,6 +56,8 @@ _GENERATION_DEFAULTS = dict(
     planner_intensity_retries=1,
     intensity_hot_threshold=0.6,
     intensity_flat_fraction=0.8,
+    research_mode=False,
+    tool_call_cap=3,
 )
 
 

@@ -1,8 +1,9 @@
-"""The continuity critic's one tool: a bounded web search.
+"""A bounded web search — the one tool that reaches outside the project.
 
-v1 has exactly one tool. There is no headless browser, no page fetcher, no
-search API key — ``ddgs`` scrapes public result pages and needs no credential,
-which is why it is the whole of the tool surface.
+There is no headless browser, no page fetcher, no search API key — ``ddgs``
+scrapes public result pages and needs no credential, which is why it is the
+whole of the *web* tool surface. Every agent's roster carries it (see
+``museai/fsm/tools/registry.py``).
 
 **This function never raises.** It sits inside an agentic loop that a model
 drives, and a search that throws would abort a draft over a rate limit or a
@@ -130,7 +131,3 @@ def web_search(query: str, max_results: int = 5) -> list[dict]:
     if not results:
         _log_empty(f"no results for {text!r}")
     return results
-
-
-# Tool name -> callable, as the agentic loop resolves them.
-TOOL_IMPLS: dict[str, Any] = {"web_search": web_search}

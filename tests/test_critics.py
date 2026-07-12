@@ -165,14 +165,21 @@ class TestCleanPass:
         # The passive-voice breach still counts against the draft.
         assert delta["best_seen_failure_count"] == 1
 
-    async def test_the_loop_gets_the_one_v1_tool_and_the_configured_budget(self, patched_loop):
+    async def test_the_loop_gets_the_critic_roster_and_the_configured_budget(self, patched_loop):
         calls = patched_loop(CLEAN_RESPONSE)
 
         await adversarial_critics(state_with())
 
         call = calls[0]
-        assert [t["function"]["name"] for t in call["tools"]] == ["web_search"]
-        assert set(call["tool_impls"]) == {"web_search"}
+        offered = [t["function"]["name"] for t in call["tools"]]
+        assert offered == [
+            "search_manuscript", "get_full_outline", "get_thread_status",
+            "get_thread_history", "get_canonical_state",
+            "get_current_pointer_context", "get_recent_commits",
+            "find_repetition",
+        ]
+        assert "web_search" not in offered  # research_mode is off by default
+        assert set(call["tool_impls"]) == set(offered)
         assert call["max_iterations"] == 6
 
 

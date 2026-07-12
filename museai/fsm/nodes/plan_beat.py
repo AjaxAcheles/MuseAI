@@ -33,7 +33,7 @@ from museai.core.stream_bus import bus
 from museai.fsm.nodes.deps import PlanningError, get_node_config
 from museai.fsm.pad import PAD_AXES, resolve_pad_constraint
 from museai.fsm.state import FSM_Pointer, OrchestratorState
-from museai.fsm.tools.web_search import TOOL_IMPLS, WEB_SEARCH_TOOL_SPEC
+from museai.fsm.tools.registry import tool_impls_for, tool_specs_for
 from museai.llm.planning import call_llm_for_json_array
 from museai.llm.prompts import render_messages
 from museai.memory.db import (
@@ -424,7 +424,21 @@ async def plan_beat(state: OrchestratorState) -> dict:
                 threads=threads,
                 characters=characters,
                 recent_prose=[row["prose"] for row in recent],
+                research_mode=config.generation.research_mode,
             )
+            async def on_tool_call(event: dict) -> None:
+                log_node_event(
+                    "plan_beat",
+                    event="tool_call",
+                    chapter_id=chapter["id"],
+                    tool=event["tool"],
+                    args=event["arguments"],
+                )
+                await bus.publish(
+                    "planner_tool",
+                    {"node": "plan_beat", "chapter_id": chapter["id"], **event},
+                )
+
             planned = await call_llm_for_json_array(
                 config.endpoint,
                 messages,
@@ -432,9 +446,11 @@ async def plan_beat(state: OrchestratorState) -> dict:
                 agent="beat_planner",
                 node="plan_beat",
                 retries=config.generation.planner_parse_retries,
-                tools=[WEB_SEARCH_TOOL_SPEC],
-                tool_impls=TOOL_IMPLS,
+                tools=tool_specs_for("beat_planner"),
+                tool_impls=tool_impls_for("beat_planner"),
                 max_tool_iterations=config.generation.max_agent_iterations,
+                on_tool_event=on_tool_call,
+                tool_call_cap=config.generation.tool_call_cap,
             )
 
             # If the plan comes back with the emotional register pinned at
@@ -471,9 +487,11 @@ async def plan_beat(state: OrchestratorState) -> dict:
                     agent="beat_planner",
                     node="plan_beat",
                     retries=config.generation.planner_parse_retries,
-                    tools=[WEB_SEARCH_TOOL_SPEC],
-                    tool_impls=TOOL_IMPLS,
+                    tools=tool_specs_for("beat_planner"),
+                    tool_impls=tool_impls_for("beat_planner"),
                     max_tool_iterations=config.generation.max_agent_iterations,
+                    on_tool_event=on_tool_call,
+                    tool_call_cap=config.generation.tool_call_cap,
                 )
 
             beats = []

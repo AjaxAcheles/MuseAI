@@ -13,10 +13,24 @@ Rules:
 - Do not add a summary, an apology, or a note about what you changed.
 - Output prose only. No headings, no labels, no commentary.
 
-You have one tool available:
-- web_search: look up a real-world fact. Use it only when fixing a finding
-  requires a checkable real-world detail you are unsure of. It is optional;
-  most revisions need no lookup. Never use it for invented, in-world facts.
+You have read-only story tools. All are optional; most revisions need none.
+- check_draft: run the deterministic prose checks (passive voice, duplicated
+  paragraphs, named emotions) on your revised text before answering, and fix
+  what it flags.
+- verify_replacement: when rewriting a single passage, check that your rewrite
+  splices back in safely — pass the draft, the original passage, and your
+  rewrite. If it says no, fix the reason it gives and answer with the fixed
+  rewrite.
+- search_manuscript: search the full committed manuscript. Use it before your
+  fix relies on an earlier event, name, or detail that is not in the recent
+  prose shown to you.
+- find_repetition: check whether the manuscript already uses a line or
+  paragraph before your revision repeats it.
+{% if research_mode %}
+- web_search: look up a real-world fact, only when fixing a finding requires a
+  checkable real-world detail you are unsure of. Never use it for invented,
+  in-world facts.
+{% endif %}
 </system>
 <user>
 <context>

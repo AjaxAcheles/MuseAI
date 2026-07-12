@@ -21,7 +21,7 @@ from museai.fsm.nodes.assemble_context import drafter_messages
 from museai.fsm.nodes.deps import DraftingError, get_node_config
 from museai.fsm.state import OrchestratorState
 from museai.fsm.tools.loop import run_agent_loop
-from museai.fsm.tools.web_search import TOOL_IMPLS, WEB_SEARCH_TOOL_SPEC
+from museai.fsm.tools.registry import tool_impls_for, tool_specs_for
 
 PHASE = "Auditing"
 
@@ -80,12 +80,13 @@ async def draft_prose(state: OrchestratorState) -> dict:
     response = await run_agent_loop(
         config.endpoint,
         messages,
-        [WEB_SEARCH_TOOL_SPEC],
-        TOOL_IMPLS,
+        tool_specs_for("drafter"),
+        tool_impls_for("drafter"),
         config.generation.max_agent_iterations,
         on_event=on_tool_call,
         agent="drafter",
         on_token=on_token,
+        tool_call_cap=config.generation.tool_call_cap,
     )
 
     # The final turn's text is the draft. Tokens streamed to the browser may

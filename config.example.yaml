@@ -48,5 +48,7 @@ generation:
   planner_intensity_retries: 1   # re-prompts for a varied emotional arc when a plan is all high-arousal
   intensity_hot_threshold: 0.6   # |target arousal| at/above which a beat counts as "hot"
   intensity_flat_fraction: 0.8   # fraction of a chapter's beats that may be hot before re-prompting
+  research_mode: false           # offer web_search to the agents; off = story-canon tools only
+  tool_call_cap: 3               # max calls to any one tool within a single agent loop
   # repetition_allowlist: []     # optional: phrases allowed to recur verbatim (author-declared)
   # emotion_words: [...]         # optional: override the named-emotion vocabulary the guard counts

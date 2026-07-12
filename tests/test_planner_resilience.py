@@ -167,6 +167,28 @@ def published(monkeypatch):
 # repair_json_text                                                             #
 # --------------------------------------------------------------------------- #
 
+class TestNestedArrayUnwrap:
+    """qwen2.5:3b wrapped a live beat plan once more: `[[{...}]]` (v1.17)."""
+
+    def test_a_doubly_nested_array_is_flattened_one_level(self):
+        nested = json.dumps([[{"ordering": 1, "intent": "a"},
+                              {"ordering": 2, "intent": "b"}]])
+        beats = parse_json_array(nested, what="beats")
+        assert [b["ordering"] for b in beats] == [1, 2]
+
+    def test_two_wrapped_groups_flatten_in_order(self):
+        nested = json.dumps([[{"n": 1}], [{"n": 2}]])
+        assert [b["n"] for b in parse_json_array(nested, what="beats")] == [1, 2]
+
+    def test_deeper_nesting_is_still_a_shape_error(self):
+        with pytest.raises(StructuredOutputError, match="not a JSON object"):
+            parse_json_array(json.dumps([[[{"n": 1}]]]), what="beats")
+
+    def test_a_mixed_array_is_still_a_shape_error(self):
+        with pytest.raises(StructuredOutputError, match="not a JSON object"):
+            parse_json_array(json.dumps([{"n": 1}, [{"n": 2}]]), what="beats")
+
+
 class TestRepairJsonText:
     def test_the_production_payload_is_unparseable_until_repaired(self):
         with pytest.raises(StructuredOutputError):

@@ -73,8 +73,7 @@
         <p class="panel-subtitle">Targets and caps for the draft → audit → revise loop.</p>
       </div>
       {% for key, label, min, max, step, hint in [
-        ("word_count_target", "Word count target", 500, 200000, 500, "Total manuscript length to aim for."),
-        ("beat_word_target", "Beat word target", 100, 5000, 50, "Words drafted per beat."),
+        ("word_count_target", "Word count target", 0, 200000, 500, "Total manuscript length to aim for. 0 or empty means no limit."),
         ("revision_retry_cap", "Revision retry cap", 0, 10, 1, "Failed audits before parking for human review."),
         ("max_agent_iterations", "Max agent iterations", 1, 20, 1, "Critic tool-use loop ceiling."),
         ("recent_prose_beats", "Recent prose beats", 0, 20, 1, "Prior beats included in drafting context."),

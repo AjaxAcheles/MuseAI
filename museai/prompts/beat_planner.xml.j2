@@ -28,12 +28,27 @@ maximum arousal exhausts the reader and flattens the climax. Use quieter beats
 between the peaks, and reserve the highest arousal for the chapter's turning
 point.
 
-You have one tool available:
-- web_search: look up a real-world fact. Use it only when planning a beat that
-  hinges on a checkable real-world detail — a setting, a procedure, a date —
-  and being wrong would break the reader's trust. It is optional; most chapters
-  need no lookup. When you are done, still return the fenced JSON array and
-  nothing else.
+You have read-only story tools. All are optional.
+- get_seed_contract: the project's genre, premise, cast, and threads — the
+  commitments your plan must honour.
+- get_current_pointer_context: the active arc, chapter, and beat as recorded,
+  to orient before planning.
+- get_chapter_context: an earlier chapter's obligations and its beats' intents
+  and exit states, when this chapter builds on it.
+- get_character_emotion_history: a character's current PAD and the target PAD
+  of every committed beat that focused on them. Use it to shape target_pad
+  values that vary against where the character has actually been.
+- get_canonical_state: the recorded arcs, chapters, beats, threads, or
+  characters, by id, when you need to check a specific fact.
+- check_plan_node: validate one of your planned beats before you include it in
+  the answer; fix any problems it names.
+{% if research_mode %}
+- web_search: look up a real-world fact, only when planning a beat that hinges
+  on a checkable real-world detail — a setting, a procedure, a date — and being
+  wrong would break the reader's trust.
+{% endif %}
+When you have used your tools, still return the fenced JSON array and nothing
+else.
 </system>
 <user>
 <context>

@@ -22,6 +22,7 @@ session ritual.
 | v1.14 | Web UI polish: compact story rail + instant node tooltips; View Chat keeps in-flight thinking across reloads and auto-scrolls it; richer seed timeline; Database tab remembers its record type | done |
 | v1.15 | Manuscript-quality fixes: repetition guard + emotion-tell audit; beat-planner positional context + thread advancement (dead path reconnected); intensity-arc re-prompt; physical-continuity critic line | done |
 | v1.16 | Export/project sync (seed rewrites config.yaml; export keyed to the run); span-splice guard; structured tool calls in View Chat; per-beat word target removed; optional global target (0 = unlimited); web_search for every agent; arc/epigraph export format | done |
+| v1.17 | Story-canon agent tools: shared registry with per-agent rosters; 15 read-only project-scoped tools; web_search gated behind research_mode; per-tool call caps; structured tool-error objects; tool-call activity events for every agent | done |
 
 Next up: v1 complete
 
@@ -1351,3 +1352,83 @@ manuscript, invisible tool calls in View Chat, and a pacing rework.
 - The style-echo loop and event-less beat specs (root causes of the
   doppelganger manuscript's repetition/abstraction) are documented as
   follow-ups in `docs/agent-tools.md`, not fixed here.
+
+## v1.17 — done
+
+The agent-tool wave from `docs/agent-tools.md`, built to its implementation
+notes: story-canon tools are the default grounding for every agent, and the
+web is an explicit research mode.
+
+**Fixes / changes**
+
+- **Registry** (`museai/fsm/tools/registry.py`). One module per tool, each
+  exporting an OpenAI spec + impl; `TOOL_SPECS`/`TOOL_IMPLS` plus per-agent
+  rosters (`AGENT_TOOLS`, `tool_specs_for`/`tool_impls_for`). All five nodes
+  fetch their roster from it; an agent is never handed an impl its spec list
+  does not offer.
+- **Fifteen read-only, project-scoped tools.** All DB access through
+  `project_db.project_connection()` (`PRAGMA query_only`, scoped to
+  `config.project_id`): `search_manuscript` (scored FTS, snippets only,
+  `scope="committed_only"`), `get_seed_contract`,
+  `get_current_pointer_context`, `get_full_outline`, `get_chapter_context`
+  (structure, deliberately not prose — the full-text `get_chapter_prose` was
+  rejected in design), `get_canonical_state` (beats as metadata, no prose),
+  `get_thread_history`, `get_thread_status`,
+  `get_character_emotion_history`, `get_character_sheet` (sampled committed
+  dialogue), `get_recent_commits` (closing words, not dumps),
+  `check_plan_node`, `check_draft` (the audit's exact heuristics as a tool),
+  `verify_replacement` (the v1.16 splice guard as a tool), `find_repetition`
+  (the "have I written this before?" check). Domain errors are structured
+  payloads naming the valid ids/scopes.
+- **web_search demoted to research mode.** `generation.research_mode`
+  (default false) appends `web_search` to every roster; each prompt's
+  web_search bullet renders only under `{% if research_mode %}`, so no prompt
+  advertises a tool the roster does not carry.
+- **Loop hardening** (`museai/fsm/tools/loop.py`). Tool faults are structured
+  objects (`{"error": {"tool", "type", "message"}}` — `unknown_tool`,
+  `bad_arguments`, `tool_failure`, `call_cap_exceeded`), and
+  `generation.tool_call_cap` bounds how many times any one tool may run per
+  loop.
+- **Prompts.** All five templates carry a "read-only story tools" block
+  matched to their roster; planners still end with "return the fenced JSON
+  array and nothing else".
+- **Frontend.** `planner_tool` and `reviser_tool` bus events join
+  `drafter_tool`/`critic_tool`; the dashboard activity log renders any
+  agent's tool call as `Tool call: name(args)` (`main.js:toolCallLabel` — the
+  old handler assumed web_search's `query`). View Chat needed no change: the
+  v1.16 collapsible cards render every new tool generically.
+- **Planner parser: one level of array unwrapping.** The live rerun caught
+  qwen2.5:3b returning a beat plan as `[[{...}]]`; `parse_json_array` now
+  flattens exactly one unambiguous level (every element a list, everything
+  inside an object) instead of failing the run. Deeper or mixed nesting is
+  still a shape error.
+- Config: `research_mode` + `tool_call_cap` in `config.yaml`,
+  `config.example.yaml`, `GenerationConfig` (validated ≥ 1).
+
+**Done-check**
+
+- `uv run pytest -q` → **564 passed** (v1.16 baseline 495). New:
+  `tests/test_agent_tools.py` (49 tests — registry/roster integrity, research
+  -mode gating, read-only enforcement, cross-project leak checks, and
+  behaviour of every tool including error payloads), loop call-cap and
+  structured-error tests, per-node roster assertions (drafter, reviser, both
+  planners, critic), prompt research-mode rendering tests, and
+  nested-array unwrap tests for the planner parser.
+- Live sandboxed headless run (qwen2.5:3b via Ollama, scratch config/DB/logs;
+  the real `data/museai.db` untouched): the chapter planner made real
+  `get_seed_contract`, `get_full_outline`, and `get_thread_history` calls
+  (`node=plan_chapter event=tool_call`), the transcript carried structured
+  `tool_calls: [{name, arguments}]` plus the named JSON tool results the View
+  Chat cards render, two beats drafted (340 and 115 words) and committed, and
+  the manual export produced 455 words in the arc/epigraph format under the
+  correct project name.
+**Known limitations**
+
+- Small local models call the canon tools rarely and sometimes emit tool JSON
+  as text; the parse ladders absorb it. The rosters are honest either way —
+  the tools are there when the model reaches.
+- `get_character_sheet` attributes dialogue at paragraph level (a mention
+  heuristic), so its samples are voice reference, not a transcript.
+- The style-echo loop and event-less beat specs remain the documented
+  follow-ups in `docs/agent-tools.md`; `find_repetition` supplies the check,
+  not the cure.

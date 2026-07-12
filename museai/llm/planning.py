@@ -60,6 +60,8 @@ async def call_llm_for_json_array(
     tools: Sequence[Mapping[str, Any]] | None = None,
     tool_impls: Mapping[str, Any] | None = None,
     max_tool_iterations: int = 1,
+    on_tool_event: Any = None,
+    tool_call_cap: int | None = None,
 ) -> list[dict]:
     """Call ``agent`` until it yields a usable JSON array of ``what``, or give up.
 
@@ -70,6 +72,7 @@ async def call_llm_for_json_array(
     When ``tools`` and ``tool_impls`` are given, each attempt runs the bounded
     agent loop so the planner may gather context before answering; the loop
     always terminates in a plain reply, which is parsed exactly as before.
+    ``on_tool_event`` is handed to that loop: one event per executed tool call.
     """
     if tools is not None and tool_impls is not None:
         # Imported here, not at module top: llm/ stays importable without fsm/,
@@ -78,7 +81,14 @@ async def call_llm_for_json_array(
 
         async def _ask(conv: list) -> Any:
             return await run_agent_loop(
-                endpoint, conv, tools, tool_impls, max_tool_iterations, agent=agent
+                endpoint,
+                conv,
+                tools,
+                tool_impls,
+                max_tool_iterations,
+                on_event=on_tool_event,
+                agent=agent,
+                tool_call_cap=tool_call_cap,
             )
     else:
 

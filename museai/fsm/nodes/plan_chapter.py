@@ -23,7 +23,7 @@ from museai.core.logging_setup import log_node_event
 from museai.core.stream_bus import bus
 from museai.fsm.nodes.deps import PlanningError, get_node_config
 from museai.fsm.state import FSM_Pointer, OrchestratorState
-from museai.fsm.tools.web_search import TOOL_IMPLS, WEB_SEARCH_TOOL_SPEC
+from museai.fsm.tools.registry import tool_impls_for, tool_specs_for
 from museai.llm.planning import call_llm_for_json_array
 from museai.llm.prompts import render_messages
 from museai.memory.db import (
@@ -151,7 +151,21 @@ async def plan_chapter(state: OrchestratorState) -> dict:
                 arc={"description": arc["description"]},
                 threads=_thread_context(threads),
                 characters=_character_context(characters),
+                research_mode=config.generation.research_mode,
             )
+            async def on_tool_call(event: dict) -> None:
+                log_node_event(
+                    "plan_chapter",
+                    event="tool_call",
+                    arc_id=arc["id"],
+                    tool=event["tool"],
+                    args=event["arguments"],
+                )
+                await bus.publish(
+                    "planner_tool",
+                    {"node": "plan_chapter", "arc_id": arc["id"], **event},
+                )
+
             planned = await call_llm_for_json_array(
                 config.endpoint,
                 messages,
@@ -159,9 +173,11 @@ async def plan_chapter(state: OrchestratorState) -> dict:
                 agent="chapter_planner",
                 node="plan_chapter",
                 retries=config.generation.planner_parse_retries,
-                tools=[WEB_SEARCH_TOOL_SPEC],
-                tool_impls=TOOL_IMPLS,
+                tools=tool_specs_for("chapter_planner"),
+                tool_impls=tool_impls_for("chapter_planner"),
                 max_tool_iterations=config.generation.max_agent_iterations,
+                on_tool_event=on_tool_call,
+                tool_call_cap=config.generation.tool_call_cap,
             )
 
             chapters = []

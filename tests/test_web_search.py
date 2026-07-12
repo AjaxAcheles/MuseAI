@@ -14,7 +14,8 @@ import pytest
 from museai.core.logging_setup import get_fsm_logger
 from museai.fsm.nodes.deps import set_node_config
 from museai.fsm.tools import web_search as web_search_module
-from museai.fsm.tools.web_search import TOOL_IMPLS, WEB_SEARCH_TOOL_SPEC, web_search
+from museai.fsm.tools.registry import TOOL_IMPLS
+from museai.fsm.tools.web_search import WEB_SEARCH_TOOL_SPEC, web_search
 
 ROWS = [
     {
@@ -211,5 +212,5 @@ class TestRegistry:
         assert set(function["parameters"]["properties"]) == {"query", "max_results"}
         assert function["parameters"]["required"] == ["query"]
 
-    def test_registry_maps_the_one_v1_tool(self):
-        assert TOOL_IMPLS == {"web_search": web_search}
+    def test_the_shared_registry_maps_web_search(self):
+        assert TOOL_IMPLS["web_search"] is web_search

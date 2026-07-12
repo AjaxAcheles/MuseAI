@@ -323,3 +323,21 @@ class TestStateDelta:
         assert revision["mode"] == "span"
         assert revision["failures_fixed"] == 1
         assert revision["retry_count"] == 1
+
+
+class TestToolRoster:
+    async def test_the_loop_is_offered_the_reviser_roster(self, _config, monkeypatch):
+        offered: list = []
+
+        async def fake(endpoint, messages, **kwargs):
+            offered.append(kwargs.get("tools"))
+            return _Response(REPLACEMENT)
+
+        monkeypatch.setattr(loop_module, "call_llm", fake)
+
+        await revise_prose(state_with([failure()]))
+
+        assert [t["function"]["name"] for t in offered[0]] == [
+            "check_draft", "verify_replacement", "search_manuscript",
+            "find_repetition",
+        ]

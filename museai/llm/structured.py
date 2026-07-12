@@ -215,6 +215,13 @@ def _as_object_array(data: Any, what: str) -> list[dict]:
         raise StructuredOutputError(
             f"expected a JSON array of {what}, got {type(data).__name__}"
         )
+    # A weak model sometimes wraps the array once more: `[[{...}, {...}]]`.
+    # One level of unwrapping is unambiguous when every element is a list and
+    # everything inside is an object; deeper nesting stays an error.
+    if data and all(isinstance(element, list) for element in data):
+        flattened = [item for element in data for item in element]
+        if flattened and all(isinstance(item, dict) for item in flattened):
+            data = flattened
     if not data:
         raise StructuredOutputError(f"model returned an empty array of {what}")
 

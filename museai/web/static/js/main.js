@@ -50,6 +50,9 @@
     beat_start: "drafter",
     token: "drafter",
     revision: "drafter",
+    drafter_tool: "drafter",
+    reviser_tool: "drafter",
+    planner_tool: "planner",
     audit: "critics",
     critic_tool: "critics",
     critic_reasoning: "critics",
@@ -624,6 +627,19 @@
 
     /* ------------------------------------------------------------------ SSE */
 
+    /** One activity-log line for any agent's tool call: `name(args…)`. */
+    function toolCallLabel(data) {
+      let args = "";
+      try {
+        args = JSON.stringify(data.arguments || {});
+      } catch (error) {
+        args = "";
+      }
+      if (args === "{}") args = "";
+      if (args.length > 80) args = `${args.slice(0, 77)}…`;
+      return `${data.tool || "tool"}(${args})`;
+    }
+
     const handlers = {
       hydration(snapshot) {
         // Replay the last payload of each type; run_status last so it wins the command bar.
@@ -702,8 +718,19 @@
       },
 
       critic_tool(data) {
-        const query = (data.arguments && data.arguments.query) || "";
-        logActivity("critic_tool", `Searched: ${query}`, "critic");
+        logActivity("critic_tool", `Tool call: ${toolCallLabel(data)}`, "critic");
+      },
+
+      drafter_tool(data) {
+        logActivity("drafter_tool", `Tool call: ${toolCallLabel(data)}`, "drafter");
+      },
+
+      reviser_tool(data) {
+        logActivity("reviser_tool", `Tool call: ${toolCallLabel(data)}`, "reviser");
+      },
+
+      planner_tool(data) {
+        logActivity("planner_tool", `Tool call: ${toolCallLabel(data)}`, "planner");
       },
 
       critic_reasoning(data) {

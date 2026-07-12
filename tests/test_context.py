@@ -150,8 +150,9 @@ async def test_assembles_every_section_when_the_budget_is_ample(config_factory):
 
 
 async def test_over_budget_drops_the_oldest_prose_first(config_factory):
-    # A budget that fits the protected core plus roughly one passage.
-    config = config_factory(project_id=PROJECT_ID, context_token_budget=700)
+    # A budget that fits the protected core (~780 tokens with the drafter's
+    # tool block) plus roughly one ~390-token passage.
+    config = config_factory(project_id=PROJECT_ID, context_token_budget=1200)
     _seed(config)
     set_node_config(config)
 
@@ -163,11 +164,13 @@ async def test_over_budget_drops_the_oldest_prose_first(config_factory):
     surviving = package["recent_prose"]
     assert surviving == PASSAGES[len(PASSAGES) - len(surviving):]
     assert "OLDEST." not in "".join(surviving)
-    assert _tokens(package, config) <= 700
+    assert _tokens(package, config) <= 1200
 
 
 async def test_prose_is_exhausted_before_any_thread_is_dropped(config_factory):
-    config = config_factory(project_id=PROJECT_ID, context_token_budget=700)
+    # Tight enough that every passage must go, roomy enough that the (small)
+    # threads all fit once the prose is gone.
+    config = config_factory(project_id=PROJECT_ID, context_token_budget=800)
     _seed(config)
     set_node_config(config)
 
