@@ -1,3 +1,4 @@
+.pytest_*
 _design/
 .claude
 .codex
