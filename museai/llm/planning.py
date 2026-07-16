@@ -5,8 +5,8 @@ in the water without one. `parse_json_array` raises, `PlanningError` never gets 
 chance, and the manager's catch-all kills a run that may already have committed
 hours of prose.
 
-The escalation ladder here mirrors ``fsm/nodes/critics.py``, which has been
-carrying it since v1.12:
+The bounded correction path here mirrors ``fsm/nodes/critics.py``, which has
+been carrying it since v1.12:
 
 1. Ask. Parse strictly.
 2. On a parse failure, show the model its own reply and the exact error, and ask
@@ -39,7 +39,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Mapping, Sequence
-from typing import Any
+from typing import Any, Callable
 
 from museai.core.config import EndpointConfig
 from museai.core.logging_setup import log_node_event
@@ -118,7 +118,9 @@ async def call_llm_for_json_array(
     max_tool_iterations: int = 1,
     on_tool_event: Any = None,
     tool_call_cap: int | None = None,
+    tool_timeout: float | None = None,
     element_keys: Sequence[str] | None = None,
+    item_validator: Callable[[dict, int], dict] | None = None,
 ) -> list[dict]:
     """Call ``agent`` until it yields a usable JSON array of ``what``, or give up.
 
@@ -151,6 +153,7 @@ async def call_llm_for_json_array(
                 on_event=on_tool_event,
                 agent=agent,
                 tool_call_cap=tool_call_cap,
+                tool_timeout=tool_timeout,
                 conversation_out=conv_out,
             )
     else:
@@ -165,6 +168,14 @@ async def call_llm_for_json_array(
     last_text = ""
     last_error = ""
     last_truncated = False
+
+    def _parse(text: str, *, repair: bool = False) -> list[dict]:
+        planned = parse_json_array(
+            text, what=what, repair=repair, element_keys=element_keys
+        )
+        if item_validator is None:
+            return planned
+        return [item_validator(item, index) for index, item in enumerate(planned, start=1)]
 
     for attempt in range(retries + 1):
         # The working conversation as the model saw it: the original messages
@@ -212,7 +223,7 @@ async def call_llm_for_json_array(
             correction = _EMPTY_CORRECTION_TEMPLATE
         else:
             try:
-                return parse_json_array(last_text, what=what, element_keys=element_keys)
+                return _parse(last_text)
             except StructuredOutputError as exc:
                 last_error = str(exc)
                 fake_tool_text = isinstance(exc, FakeToolCallTextError)
@@ -249,9 +260,7 @@ async def call_llm_for_json_array(
         )
 
     # Last rung: the model will not fix its own quoting, so we do — and say so.
-    planned = parse_json_array(
-        last_text, what=what, repair=True, element_keys=element_keys
-    )
+    planned = _parse(last_text, repair=True)
     log_node_event(
         node,
         level=logging.WARNING,

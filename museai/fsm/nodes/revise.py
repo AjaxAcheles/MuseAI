@@ -34,6 +34,7 @@ from museai.fsm.tools.loop import run_agent_loop
 from museai.fsm.tools.registry import tool_impls_for, tool_specs_for
 from museai.llm.prompts import render_messages
 from museai.llm.tokenizer import count_message_tokens
+from museai.llm.structured import StructuredOutputError, validate_plain_text_response
 
 PHASE = "Drafting"
 
@@ -208,8 +209,8 @@ async def _rewrite(config, messages: list[dict], what: str, beat_id: str) -> str
         on_event=on_tool_call,
         agent="reviser",
         tool_call_cap=config.generation.tool_call_cap,
+        tool_timeout=config.generation.tool_timeout,
     )
-    revised = response.text.strip()
     # Truncation first: it explains an empty reply as readily as a half-written
     # one, and unlike "no prose" it names the knob. Splicing a truncated rewrite
     # into the draft is worse than failing.
@@ -219,11 +220,10 @@ async def _rewrite(config, messages: list[dict], what: str, beat_id: str) -> str
             f"token limit (finish_reason='length'); raise "
             f"endpoint.max_output_tokens or leave it unset to omit the cap"
         )
-    if not revised:
-        raise DraftingError(
-            f"the endpoint returned no prose revising {what} "
-            f"(finish_reason={response.finish_reason!r})"
-        )
+    try:
+        revised = validate_plain_text_response(response.text, what=f"revision of {what}")
+    except StructuredOutputError as exc:
+        raise DraftingError(str(exc)) from exc
     return revised
 
 

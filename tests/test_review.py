@@ -25,7 +25,7 @@ CHAPTERS_JSON = """[
 BEATS_JSON = """[
   {"ordering": 1, "intent": "The letter arrives.",
    "entry_state": "Routine watch.", "exit_state": "Mara must decide.",
-   "word_target": 100, "focal_character_id": "review-project-char-1",
+   "focal_character_id": "review-project-char-1",
    "target_pad": {"pleasure": -0.5, "arousal": 0.6, "dominance": -0.2}}
 ]"""
 FAILURE_JSON = """[

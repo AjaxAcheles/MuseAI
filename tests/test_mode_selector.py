@@ -8,7 +8,13 @@ from __future__ import annotations
 import pytest
 
 from museai.fsm.nodes.deps import set_node_config
-from museai.fsm.routers.mode_selector import COMMIT, REVIEW, REVISE, mode_selector
+from museai.fsm.routers.mode_selector import (
+    COMMIT,
+    RETRY_CRITIC,
+    REVIEW,
+    REVISE,
+    mode_selector,
+)
 from museai.fsm.state import FSM_Pointer, FailureObject, make_initial_state
 
 RETRY_CAP = 3
@@ -23,13 +29,14 @@ def failure(code: str = "CONTRADICTS_CHARACTER") -> FailureObject:
     )
 
 
-def state_with(failures, retry_count: int):
+def state_with(failures, retry_count: int, *, parse_streak: int = 0):
     return make_initial_state(
         "test-project",
         FSM_Pointer(arc_id="arc-1", chapter_id="arc-1-c01", beat_index=0),
         current_draft_text="prose",
         critic_failures=failures,
         retry_count=retry_count,
+        critic_parse_failure_streak=parse_streak,
     )
 
 
@@ -64,6 +71,13 @@ class TestRouting:
         set_node_config(config_factory(revision_retry_cap=1))
         assert mode_selector(state_with([failure()], retry_count=0)) == REVISE
         assert mode_selector(state_with([failure()], retry_count=1)) == REVIEW
+
+    def test_an_unreadable_critic_reply_retries_the_critic(self):
+        assert mode_selector(state_with([], 0, parse_streak=1)) == RETRY_CRITIC
+
+    def test_persistently_unreadable_critic_reply_goes_to_review(self, config_factory):
+        set_node_config(config_factory(critic_degrade_threshold=2))
+        assert mode_selector(state_with([], 0, parse_streak=2)) == REVIEW
 
 
 class TestPurity:

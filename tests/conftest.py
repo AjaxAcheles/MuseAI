@@ -59,6 +59,7 @@ _GENERATION_DEFAULTS = dict(
     intensity_flat_fraction=0.8,
     research_mode=False,
     tool_call_cap=3,
+    tool_timeout=0.2,
 )
 
 

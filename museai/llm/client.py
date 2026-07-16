@@ -20,7 +20,8 @@ Behaviour worth knowing:
   they arrive, and the full assembled text is still returned. A mid-stream
   fault retries even after tokens have been emitted: a ``chat_restart`` event
   tells the live view to discard the partial, and the attempt's text is
-  rebuilt from scratch, so the caller never sees duplicates.
+  rebuilt from scratch. Callback consumers can use ``on_restart`` to discard
+  tokens from the failed attempt too.
 * **Secrets** — the API key arrives already resolved from the config layer.
   This module never reads the environment and never logs the key.
 """
@@ -72,6 +73,7 @@ _SSE_TERMINATOR = "[DONE]"
 _LOG_CONTENT_PREVIEW_CHARS = 500
 
 TokenCallback = Callable[[str], Any | Awaitable[Any]]
+RestartCallback = Callable[[], Any | Awaitable[Any]]
 
 
 @dataclass
@@ -108,8 +110,16 @@ class _EmptyCompletionError(Exception):
     opted into ``retry_on_empty``. Never escapes this module."""
 
 
+class _TransientStreamError(Exception):
+    """A 200/SSE response ended malformed or before a terminal completion."""
+
+
 # Everything the retry loop is willing to attempt again.
-_RETRYABLE = _TRANSIENT_EXCEPTIONS + (_TransientStatusError, _EmptyCompletionError)
+_RETRYABLE = _TRANSIENT_EXCEPTIONS + (
+    _TransientStatusError,
+    _EmptyCompletionError,
+    _TransientStreamError,
+)
 
 
 def resolve_inference_url(base_url: str) -> str:
@@ -212,10 +222,67 @@ def _build_request(
 
 
 def _normalise_tool_calls(raw_calls: Any) -> list[dict]:
-    """Coerce a response's ``tool_calls`` to a plain list of dicts."""
+    """Validate a response's ``tool_calls`` as OpenAI-style function calls."""
     if not raw_calls:
         return []
-    return [dict(call) for call in raw_calls]
+    if not isinstance(raw_calls, list):
+        raise LLMCallError(
+            f"message.tool_calls must be an array, got {type(raw_calls).__name__}"
+        )
+    calls: list[dict] = []
+    seen_ids: set[str] = set()
+    for index, raw_call in enumerate(raw_calls):
+        if not isinstance(raw_call, Mapping):
+            raise LLMCallError(
+                f"message.tool_calls[{index}] must be an object, "
+                f"got {type(raw_call).__name__}"
+            )
+        call = dict(raw_call)
+        call_id = call.get("id")
+        if not isinstance(call_id, str) or not call_id:
+            raise LLMCallError(f"message.tool_calls[{index}].id must be a non-empty string")
+        if call_id in seen_ids:
+            raise LLMCallError(f"message.tool_calls contains duplicate id {call_id!r}")
+        seen_ids.add(call_id)
+        if call.get("type", "function") != "function":
+            raise LLMCallError(
+                f"message.tool_calls[{index}].type must be 'function'"
+            )
+        function = call.get("function")
+        if not isinstance(function, Mapping):
+            raise LLMCallError(
+                f"message.tool_calls[{index}].function must be an object"
+            )
+        name = function.get("name")
+        if not isinstance(name, str) or not name:
+            raise LLMCallError(
+                f"message.tool_calls[{index}].function.name must be a non-empty string"
+            )
+        arguments = function.get("arguments", "")
+        if arguments is not None and not isinstance(arguments, (str, Mapping)):
+            raise LLMCallError(
+                f"message.tool_calls[{index}].function.arguments has unusable type "
+                f"{type(arguments).__name__}"
+            )
+        calls.append(
+            {
+                "id": call_id,
+                "type": "function",
+                "function": {"name": name, "arguments": arguments},
+            }
+        )
+    return calls
+
+
+_FINISH_REASONS = frozenset(
+    {"stop", "length", "tool_calls", "content_filter", "function_call"}
+)
+
+
+def _normalise_finish_reason(raw: Any) -> str:
+    if not isinstance(raw, str) or raw not in _FINISH_REASONS:
+        raise LLMCallError(f"response had invalid finish_reason {raw!r}")
+    return raw
 
 
 # OpenAI-compatible endpoints expose chain-of-thought two ways: a dedicated
@@ -246,10 +313,10 @@ def _split_think_block(text: str) -> tuple[str, str]:
     """
     lead = len(text) - len(text.lstrip())
     stripped = text[lead:]
-    if not stripped.startswith(_THINK_OPEN):
+    if not stripped.lower().startswith(_THINK_OPEN):
         return "", text
     rest = stripped[len(_THINK_OPEN) :]
-    close = rest.find(_THINK_CLOSE)
+    close = rest.lower().find(_THINK_CLOSE)
     if close == -1:
         return rest.strip(), ""
     return rest[:close].strip(), rest[close + len(_THINK_CLOSE) :].lstrip("\n")
@@ -280,9 +347,10 @@ class _ThinkTagSplitter:
         self._buffer += text
         if self._mode == "start":
             candidate = self._buffer.lstrip()
-            if _THINK_OPEN.startswith(candidate):
+            lowered = candidate.lower()
+            if _THINK_OPEN.startswith(lowered):
                 return pieces  # still ambiguous; keep buffering
-            if not candidate.startswith(_THINK_OPEN):
+            if not lowered.startswith(_THINK_OPEN):
                 self._mode = "response"
                 pieces.append(("response", self._buffer))
                 self._buffer = ""
@@ -290,7 +358,7 @@ class _ThinkTagSplitter:
             self._mode = "thinking"
             self._buffer = candidate[len(_THINK_OPEN) :]
 
-        close = self._buffer.find(_THINK_CLOSE)
+        close = self._buffer.lower().find(_THINK_CLOSE)
         if close != -1:
             thinking = self._buffer[:close]
             remainder = self._buffer[close + len(_THINK_CLOSE) :].lstrip("\n")
@@ -324,21 +392,41 @@ def _parse_response(
     payload: Mapping[str, Any],
 ) -> tuple[str, str, list[dict], str | None]:
     """Extract (text, thinking, tool_calls, finish_reason) from a response."""
+    if not isinstance(payload, Mapping):
+        raise LLMCallError(
+            f"response body must be a JSON object, got {type(payload).__name__}"
+        )
+    if payload.get("error"):
+        raise LLMCallError(f"endpoint returned an error object: {payload['error']!r}")
     choices = payload.get("choices")
-    if not choices:
+    if not isinstance(choices, list) or not choices:
         raise LLMCallError(f"response contained no choices: {payload!r}")
 
     choice = choices[0]
-    message = choice.get("message") or {}
+    if not isinstance(choice, Mapping):
+        raise LLMCallError(
+            f"response choice 0 must be an object, got {type(choice).__name__}"
+        )
+    message = choice.get("message")
+    if not isinstance(message, Mapping):
+        raise LLMCallError("response choice 0 contained no message object")
 
     # A tool-calling reply legitimately has null content.
-    text = message.get("content") or ""
+    content = message.get("content")
+    if content is not None and not isinstance(content, str):
+        raise LLMCallError(
+            f"message.content must be a string or null, got {type(content).__name__}"
+        )
+    text = content or ""
     thinking = _reasoning_text(message)
     tagged_thinking, text = _split_think_block(text)
     if tagged_thinking:
         thinking = f"{thinking}\n{tagged_thinking}".strip() if thinking else tagged_thinking
     tool_calls = _normalise_tool_calls(message.get("tool_calls"))
-    return text, thinking, tool_calls, choice.get("finish_reason")
+    finish_reason = _normalise_finish_reason(choice.get("finish_reason"))
+    if finish_reason == "tool_calls" and not tool_calls:
+        raise LLMCallError("finish_reason='tool_calls' but message.tool_calls was empty")
+    return text, thinking, tool_calls, finish_reason
 
 
 def _accumulate_tool_call_deltas(
@@ -349,20 +437,56 @@ def _accumulate_tool_call_deltas(
     Endpoints stream a tool call across chunks: the id and function name arrive
     first, then the JSON arguments in pieces. Text fields concatenate.
     """
-    for delta in deltas:
+    if not isinstance(deltas, list):
+        raise LLMCallError(
+            f"delta.tool_calls must be an array, got {type(deltas).__name__}"
+        )
+    if len(deltas) > 1 and any(
+        not isinstance(delta, Mapping) or "index" not in delta for delta in deltas
+    ):
+        raise LLMCallError("parallel streamed tool calls must carry distinct indices")
+    for position, delta in enumerate(deltas):
+        if not isinstance(delta, Mapping):
+            raise LLMCallError(
+                f"delta.tool_calls[{position}] must be an object, "
+                f"got {type(delta).__name__}"
+            )
         index = delta.get("index", 0)
+        if isinstance(index, bool) or not isinstance(index, int) or index < 0:
+            raise LLMCallError(
+                f"delta.tool_calls[{position}].index must be a non-negative integer"
+            )
         entry = accumulator.setdefault(
             index,
             {"id": "", "type": "function", "function": {"name": "", "arguments": ""}},
         )
         if delta.get("id"):
-            entry["id"] = delta["id"]
+            incoming_id = delta["id"]
+            if not isinstance(incoming_id, str):
+                raise LLMCallError(
+                    f"delta.tool_calls[{position}].id must be a string"
+                )
+            if entry["id"] and entry["id"] != incoming_id:
+                raise LLMCallError(
+                    f"streamed tool-call index {index} was reused for multiple ids"
+                )
+            entry["id"] = incoming_id
         if delta.get("type"):
+            if delta["type"] != "function":
+                raise LLMCallError("streamed tool-call type must be 'function'")
             entry["type"] = delta["type"]
         function = delta.get("function") or {}
+        if not isinstance(function, Mapping):
+            raise LLMCallError(
+                f"delta.tool_calls[{position}].function must be an object"
+            )
         if function.get("name"):
+            if not isinstance(function["name"], str):
+                raise LLMCallError("streamed tool-call function.name must be a string")
             entry["function"]["name"] += function["name"]
         if function.get("arguments"):
+            if not isinstance(function["arguments"], str):
+                raise LLMCallError("streamed tool-call arguments must be a string")
             entry["function"]["arguments"] += function["arguments"]
 
 
@@ -398,6 +522,7 @@ async def _parse_stream(
     splitter = _ThinkTagSplitter()
     tool_call_parts: dict[int, dict] = {}
     finish_reason: str | None = None
+    saw_done = False
 
     async def _route(kind: str, text: str) -> None:
         emitted[0] = True
@@ -416,32 +541,79 @@ async def _parse_stream(
 
         data = line[len(_SSE_DATA_PREFIX) :].strip()
         if data == _SSE_TERMINATOR:
+            saw_done = True
             break
 
         try:
             chunk = json.loads(data)
         except json.JSONDecodeError as exc:
-            raise LLMCallError(f"malformed JSON in stream chunk: {data!r}") from exc
+            raise _TransientStreamError(
+                f"malformed JSON in stream chunk: {data!r}"
+            ) from exc
+
+        if not isinstance(chunk, Mapping):
+            raise _TransientStreamError(
+                f"stream chunk must be a JSON object, got {type(chunk).__name__}"
+            )
+        if chunk.get("error"):
+            raise _TransientStreamError(
+                f"endpoint streamed an error object: {chunk['error']!r}"
+            )
 
         chunks.append(chunk)
-        for choice in chunk.get("choices") or []:
+        choices = chunk.get("choices") or []
+        if not isinstance(choices, list):
+            raise _TransientStreamError("stream chunk choices must be an array")
+        for position, choice in enumerate(choices):
+            if not isinstance(choice, Mapping):
+                raise _TransientStreamError(
+                    f"stream choice {position} must be an object"
+                )
             delta = choice.get("delta") or {}
+            if not isinstance(delta, Mapping):
+                raise _TransientStreamError(
+                    f"stream choice {position}.delta must be an object"
+                )
             reasoning = _reasoning_text(delta)
             if reasoning:
                 await _route("thinking", reasoning)
             content = delta.get("content")
+            if content is not None and not isinstance(content, str):
+                raise _TransientStreamError(
+                    f"stream choice {position}.delta.content must be a string or null"
+                )
             if content:
                 for kind, piece in splitter.feed(content):
                     await _route(kind, piece)
             if delta.get("tool_calls"):
-                _accumulate_tool_call_deltas(tool_call_parts, delta["tool_calls"])
+                try:
+                    _accumulate_tool_call_deltas(tool_call_parts, delta["tool_calls"])
+                except LLMCallError as exc:
+                    raise _TransientStreamError(str(exc)) from exc
             if choice.get("finish_reason"):
-                finish_reason = choice["finish_reason"]
+                try:
+                    finish_reason = _normalise_finish_reason(choice["finish_reason"])
+                except LLMCallError as exc:
+                    raise _TransientStreamError(str(exc)) from exc
 
     for kind, piece in splitter.flush():
         await _route(kind, piece)
 
-    tool_calls = [tool_call_parts[i] for i in sorted(tool_call_parts)]
+    if finish_reason is None:
+        terminal = "[DONE]" if saw_done else "clean EOF"
+        raise _TransientStreamError(
+            f"stream ended at {terminal} without a terminal finish_reason"
+        )
+    try:
+        tool_calls = _normalise_tool_calls(
+            [tool_call_parts[i] for i in sorted(tool_call_parts)]
+        )
+    except LLMCallError as exc:
+        raise _TransientStreamError(str(exc)) from exc
+    if finish_reason == "tool_calls" and not tool_calls:
+        raise _TransientStreamError(
+            "finish_reason='tool_calls' but the stream contained no tool calls"
+        )
     return (
         "".join(pieces),
         "".join(thinking_pieces).strip(),
@@ -611,6 +783,7 @@ async def call_llm(
     agent: str = "system",
     stream: bool = False,
     on_token: TokenCallback | None = None,
+    on_restart: RestartCallback | None = None,
     temperature: float | None = None,
     max_tokens: int | None = None,
     tools: Sequence[Mapping[str, Any]] | None = None,
@@ -709,6 +882,10 @@ async def call_llm(
                 live["thinking"] = ""
                 live["seq"] = 0
             await bus.publish("chat_restart", {"id": call_id, "agent": agent})
+            if on_restart is not None:
+                restart_result = on_restart()
+                if inspect.isawaitable(restart_result):
+                    await restart_result
         await asyncio.sleep(backoff[min(attempt - 1, len(backoff) - 1)])
 
     while attempt < MAX_ATTEMPTS:
@@ -732,6 +909,14 @@ async def call_llm(
         except _RETRYABLE as exc:
             await _note_transient(exc, attempt, emitted[0])
             continue
+        except Exception as exc:  # shape/callback bugs must still close live state
+            description = f"{type(exc).__name__}: {exc}".rstrip(": ")
+            message = f"unexpected response-processing failure: {description}"
+            _log_error(safe_url, endpoint, stream, attempt, message)
+            await _chat_end(
+                call_id, agent, endpoint, ok=False, attempt=attempt, error=message
+            )
+            raise LLMCallError(message) from exc
 
         # A reply that is empty *because* it was cut off is not a transient
         # fault — retrying truncates again, three times, and buries the cause.

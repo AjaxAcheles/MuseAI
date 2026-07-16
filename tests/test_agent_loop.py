@@ -8,6 +8,8 @@ without tools.
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from museai.fsm.tools import loop as loop_module
@@ -248,6 +250,60 @@ class TestToolFaults:
 
         assert "TypeError" in fake.calls[1]["messages"][2]["content"]
 
+    async def test_a_malformed_tool_envelope_becomes_a_structured_error(self, patched):
+        fake = patched(
+            response(tool_calls=[{"id": "call-bad", "function": "web_search"}]),
+            response(text="recovered"),
+        )
+
+        result = await run_agent_loop(
+            ENDPOINT, MESSAGES, TOOLS, {"web_search": lambda **k: []}, max_iterations=3
+        )
+
+        assert result.text == "recovered"
+        assert "bad_arguments" in fake.calls[1]["messages"][2]["content"]
+
+    async def test_duplicate_argument_keys_do_not_reach_the_tool(self, patched):
+        fake = patched(
+            response(
+                tool_calls=[tool_call("web_search", '{"query":"a","query":"b"}')]
+            ),
+            response(text="recovered"),
+        )
+        called = []
+
+        await run_agent_loop(
+            ENDPOINT,
+            MESSAGES,
+            TOOLS,
+            {"web_search": lambda **kwargs: called.append(kwargs)},
+            max_iterations=3,
+        )
+
+        assert called == []
+        assert "duplicate JSON key" in fake.calls[1]["messages"][2]["content"]
+
+    async def test_a_tool_timeout_is_returned_to_the_model(self, patched):
+        fake = patched(
+            response(tool_calls=[tool_call("web_search", "{}")]),
+            response(text="continued without it"),
+        )
+
+        async def never_returns():
+            await asyncio.Event().wait()
+
+        result = await run_agent_loop(
+            ENDPOINT,
+            MESSAGES,
+            TOOLS,
+            {"web_search": never_returns},
+            max_iterations=3,
+            tool_timeout=0.01,
+        )
+
+        assert result.text == "continued without it"
+        assert "tool_timeout" in fake.calls[1]["messages"][2]["content"]
+
 
 class TestBound:
     async def test_max_iterations_forces_a_final_tool_free_call(self, patched):
@@ -288,6 +344,21 @@ class TestBound:
         patched()
         with pytest.raises(AgentLoopError):
             await run_agent_loop(ENDPOINT, MESSAGES, TOOLS, {}, max_iterations=0)
+
+    async def test_tool_calls_from_the_forced_tool_free_turn_fail_loudly(self, patched):
+        patched(
+            response(tool_calls=[tool_call("web_search", "{}")]),
+            response(tool_calls=[tool_call("web_search", "{}")]),
+        )
+
+        with pytest.raises(AgentLoopError, match="after tools were withheld"):
+            await run_agent_loop(
+                ENDPOINT,
+                MESSAGES,
+                TOOLS,
+                {"web_search": lambda **k: []},
+                max_iterations=1,
+            )
 
 
 class TestEvents:

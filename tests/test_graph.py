@@ -26,11 +26,11 @@ CHAPTERS_JSON = """[
 BEATS_JSON = """[
   {"ordering": 1, "intent": "The first letter arrives.",
    "entry_state": "Routine watch.", "exit_state": "Mara sees her own hand.",
-   "word_target": 100, "focal_character_id": "graph-project-char-1",
+   "focal_character_id": "graph-project-char-1",
    "target_pad": {"pleasure": -0.5, "arousal": 0.6, "dominance": -0.2}},
   {"ordering": 2, "intent": "The second letter confirms the pattern.",
    "entry_state": "Mara doubts the first letter.", "exit_state": "Mara accepts the pattern.",
-   "word_target": 100, "focal_character_id": "graph-project-char-1",
+   "focal_character_id": "graph-project-char-1",
    "target_pad": {"pleasure": -0.2, "arousal": 0.4, "dominance": 0.1}}
 ]"""
 

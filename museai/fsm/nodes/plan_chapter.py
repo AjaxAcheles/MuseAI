@@ -25,6 +25,7 @@ from museai.fsm.nodes.deps import PlanningError, get_node_config
 from museai.fsm.state import FSM_Pointer, OrchestratorState
 from museai.fsm.tools.registry import tool_impls_for, tool_specs_for
 from museai.llm.planning import call_llm_for_json_array
+from museai.llm.structured import StructuredOutputError
 from museai.llm.prompts import render_messages
 from museai.memory.db import (
     connect_db,
@@ -93,6 +94,36 @@ def _normalise_obligations(value: object, ordering: int) -> list[str]:
             f"got {type(value).__name__}"
         )
     return [str(item).strip() for item in value if str(item).strip()]
+
+
+_CHAPTER_PLAN_KEYS = {"ordering", "description", "obligations"}
+
+
+def _validate_chapter_item(item: dict, ordering: int) -> dict:
+    """Validate one model-produced chapter before the planner retry ladder exits."""
+    extra = set(item) - _CHAPTER_PLAN_KEYS
+    if extra:
+        raise StructuredOutputError(
+            f"chapter {ordering} has unexpected fields: {', '.join(sorted(extra))}"
+        )
+    declared_order = item.get("ordering")
+    if isinstance(declared_order, bool) or not isinstance(declared_order, int):
+        raise StructuredOutputError(f"chapter {ordering} ordering must be an integer")
+    if declared_order != ordering:
+        raise StructuredOutputError(
+            f"chapter {ordering} declares ordering {declared_order}; order must be contiguous"
+        )
+    description = item.get("description")
+    if not isinstance(description, str) or not description.strip():
+        raise StructuredOutputError(f"chapter {ordering} description must be a non-empty string")
+    obligations = item.get("obligations")
+    if not isinstance(obligations, list) or any(
+        not isinstance(value, str) or not value.strip() for value in obligations
+    ):
+        raise StructuredOutputError(
+            f"chapter {ordering} obligations must be an array of non-empty strings"
+        )
+    return item
 
 
 async def plan_chapter(state: OrchestratorState) -> dict:
@@ -179,9 +210,11 @@ async def plan_chapter(state: OrchestratorState) -> dict:
                 max_tool_iterations=config.generation.max_agent_iterations,
                 on_tool_event=on_tool_call,
                 tool_call_cap=config.generation.tool_call_cap,
+                tool_timeout=config.generation.tool_timeout,
                 # A real chapter always has a description; a truncated reply's
                 # inner array (obligations) never does.
                 element_keys=("description",),
+                item_validator=_validate_chapter_item,
             )
 
             chapters = []

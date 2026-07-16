@@ -12,17 +12,20 @@ import pytest
 
 from museai.fsm.state import FailureObject
 from museai.llm.structured import (
+    AmbiguousStructuredOutputError,
     StructuredOutputError,
     TruncatedResponseError,
     is_clean_verdict,
     parse_failure_objects,
     parse_json_array,
+    validate_plain_text_response,
 )
 
 VALID_FINDING = (
     '{"error_code": "CONTRADICTS_PRIOR_PROSE", '
     '"offending_text": "the red door", '
-    '"suggested_fix": "make it blue again"}'
+    '"suggested_fix": "make it blue again", '
+    '"critic_source": "continuity_critic"}'
 )
 
 
@@ -38,13 +41,11 @@ class TestElementKeysGuard:
     def test_a_truncated_reply_must_not_yield_its_inner_array_as_the_plan(self):
         with pytest.raises(StructuredOutputError) as excinfo:
             parse_json_array(self.TRUNCATED_BEAT, what="beats", element_keys=("intent",))
-        assert "expected keys" in str(excinfo.value)
+        assert "could not extract a JSON array" in str(excinfo.value)
 
-    def test_without_the_guard_the_fragment_would_have_passed(self):
-        # Documents why element_keys exists: acceptance, not extraction, is
-        # what narrows. Extraction still finds the fragment.
-        planned = parse_json_array(self.TRUNCATED_BEAT, what="beats")
-        assert planned == [{"id": "t1", "status": "resolved"}]
+    def test_without_the_guard_the_truncated_outer_array_is_still_rejected(self):
+        with pytest.raises(StructuredOutputError):
+            parse_json_array(self.TRUNCATED_BEAT, what="beats")
 
     def test_a_real_plan_with_a_nested_array_still_parses(self):
         text = (
@@ -95,19 +96,20 @@ class TestCriticSpanSearch:
         assert len(findings) == 1
         assert findings[0].error_code == "CONTRADICTS_PRIOR_PROSE"
 
-    def test_a_bare_object_still_parses(self):
-        findings = parse_failure_objects(f"Here you go: {VALID_FINDING}")
-        assert len(findings) == 1
+    def test_a_bare_object_is_rejected(self):
+        with pytest.raises(StructuredOutputError):
+            parse_failure_objects(f"Here you go: {VALID_FINDING}")
 
     def test_a_bracket_inside_a_finding_does_not_shadow_the_finding(self):
         """The array-first search scans raw text, so a `[...]` inside a string
         value is a candidate span. It must not stop the real object from being
         found once that fragment fails to validate."""
-        text = (
+        text = "[" + (
             '{"error_code": "CONTRADICTS_CHARACTER", '
             '"offending_text": "Mara lied", '
-            '"suggested_fix": "use [\\"silence\\"] instead"}'
-        )
+            '"suggested_fix": "use [\\"silence\\"] instead", '
+            '"critic_source": "continuity_critic"}'
+        ) + "]"
         findings = parse_failure_objects(text)
         assert len(findings) == 1
         assert findings[0].suggested_fix == 'use ["silence"] instead'
@@ -182,3 +184,51 @@ class TestRegressionShapes:
     def test_planner_array_in_a_fence_with_prose(self):
         text = 'Sure!\n```json\n[{"description": "ch1"}, {"description": "ch2"}]\n```\nDone.'
         assert len(parse_json_array(text, what="chapters", element_keys=("description",))) == 2
+
+
+class TestAdversarialSerialization:
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            '[{"description":"first"}][{"description":"second"}]',
+            '[{"description":"first"}]\n[{"description":"second"}]',
+        ],
+    )
+    def test_concatenated_or_repeated_arrays_are_ambiguous(self, payload):
+        with pytest.raises(AmbiguousStructuredOutputError):
+            parse_json_array(payload, what="chapters", element_keys=("description",))
+
+    def test_duplicate_keys_are_rejected_instead_of_last_value_winning(self):
+        payload = '[{"description":"safe","description":"overwritten"}]'
+        with pytest.raises(StructuredOutputError, match="duplicate JSON key"):
+            parse_json_array(payload, what="chapters")
+
+    @pytest.mark.parametrize("constant", ["NaN", "Infinity", "-Infinity"])
+    def test_non_finite_numbers_are_not_treated_as_json(self, constant):
+        with pytest.raises(StructuredOutputError, match="non-finite JSON number"):
+            parse_json_array(f'[{{"value":{constant}}}]', what="items")
+
+    def test_a_single_object_is_not_coerced_to_an_array(self):
+        with pytest.raises(StructuredOutputError, match="expected a JSON array"):
+            parse_json_array('{"description":"only"}', what="chapters")
+
+
+class TestPlainTextBoundary:
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            "```markdown\nMara opened the door.\n```",
+            '<think>reasoning</think>\nMara opened the door.',
+            '{"name":"read_context","parameters":{"id":"x"}}',
+            'I will use this call: {"name":"read_context","arguments":{"id":"x"}}',
+            "Here is the revised prose: Mara opened the door.",
+            "Mara opened the door.\nHope this helps!",
+        ],
+    )
+    def test_formatting_artifacts_are_rejected(self, payload):
+        with pytest.raises(StructuredOutputError):
+            validate_plain_text_response(payload, what="draft")
+
+    def test_unicode_and_literal_newlines_remain_valid_prose(self):
+        payload = "Mara said, “Déjà vu.”\n\nSnow gathered at the café door."
+        assert validate_plain_text_response(payload, what="draft") == payload

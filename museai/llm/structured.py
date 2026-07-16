@@ -1,19 +1,18 @@
-"""Structured-output validation for JSON that arrives wrapped in prose.
+"""Strict structured-output validation at the model boundary.
 
-Models return JSON in prose. Sometimes they wrap it in a markdown fence, or
-preface it with "Here are the issues I found:". This module turns whatever came
-back into validated Python, or fails loudly.
+Ordinary markdown fences and surrounding prose are tolerated, but the payload
+itself must be one unambiguous JSON array. Duplicate keys, non-finite numbers,
+concatenated arrays, truncated outer arrays, and schema drift fail loudly so a
+caller can use its bounded correction path instead of committing partial data.
 
-Two bounded *extraction* passes, never a loop:
-
-1. **Direct** — ``json.loads`` on the response as given.
-2. **Salvaged** — strip markdown fences, then take the first balanced ``[...]``
-   or ``{...}`` and parse that.
+Extraction first tries the complete response, then scans every balanced array
+candidate. It accepts exactly one valid candidate; zero or multiple candidates
+are errors.
 
 (Not to be confused with :func:`parse_failure_objects`'s ``lenient`` flag, which
 relaxes how each *element* is validated once extraction has already succeeded.)
 
-Both entry points share those passes:
+The structured entry points share this policy:
 
 * :func:`parse_failure_objects` — the continuity critic's findings, validated
   into ``list[FailureObject]``. An empty array is a valid, clean result: it means
@@ -22,8 +21,8 @@ Both entry points share those passes:
   plain dicts. Here an empty array is *not* valid: a plan with no elements is a
   failed plan, not an empty one.
 
-If both passes fail, :class:`StructuredOutputError` is raised for the caller to
-handle.
+If extraction or validation fails, :class:`StructuredOutputError` is raised for
+the caller to handle.
 """
 
 from __future__ import annotations
@@ -47,6 +46,28 @@ _STRING_FIELD_LINE = re.compile(r'^(\s*"[\w-]+"\s*:\s*")(.*)("\s*,?\s*)$')
 
 # A double quote not already escaped.
 _BARE_QUOTE = re.compile(r'(?<!\\)"')
+
+CRITIC_ERROR_CODES = frozenset(
+    {
+        "CONTRADICTS_PRIOR_PROSE",
+        "CONTRADICTS_CHARACTER",
+        "CONTRADICTS_THREAD",
+        "CONTRADICTS_PREMISE",
+        "UNFULFILLED_OBLIGATION",
+        "FALSE_REAL_WORLD_CLAIM",
+        "INCOHERENT_BLOCKING",
+    }
+)
+
+_META_PROSE_PREFIX = re.compile(
+    r"^(?:here(?:'s| is)|sure[,!:]?|certainly[,!:]?)\s+"
+    r"(?:(?:the|your|a)\s+)?(?:revised\s+)?(?:prose|draft|revision|story|text)\b",
+    re.IGNORECASE,
+)
+_META_PROSE_SUFFIX = re.compile(
+    r"(?:^|\n)\s*(?:hope this helps!?|let me know if you(?:'d| would) like[^\n]*)\s*$",
+    re.IGNORECASE,
+)
 
 
 class _LenientFailureObject(FailureObject):
@@ -77,6 +98,34 @@ class TruncatedResponseError(StructuredOutputError):
     never see a finish reason. A truncated reply must not be parsed: a cleanly
     balanced inner fragment of a half-written plan can masquerade as the plan.
     """
+
+
+class AmbiguousStructuredOutputError(StructuredOutputError):
+    """More than one complete payload could be read from one model reply."""
+
+
+def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """Build a JSON object while rejecting duplicate keys instead of losing one."""
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise StructuredOutputError(f"duplicate JSON key {key!r}")
+        result[key] = value
+    return result
+
+
+def _reject_nonfinite_constant(value: str) -> None:
+    """JSON has no NaN or infinity; accepting them silently corrupts numeric fields."""
+    raise StructuredOutputError(f"non-finite JSON number {value!r} is not allowed")
+
+
+def strict_json_loads(text: str) -> Any:
+    """Decode standards-compliant JSON without duplicate keys or non-finite numbers."""
+    return json.loads(
+        text,
+        object_pairs_hook=_unique_object,
+        parse_constant=_reject_nonfinite_constant,
+    )
 
 
 def _strip_fences(text: str) -> str:
@@ -174,8 +223,10 @@ def _balanced_spans_with_opener(text: str, opener: str) -> list[str]:
             continue
         span = _balanced_span_from(text, index)
         if span is None:
-            index += 1
-            continue
+            # Do not salvage a balanced child array from inside a truncated
+            # outer array.  Doing so silently turns a partial plan into a
+            # complete-looking response containing only its first nested item.
+            break
         spans.append(span)
         index += max(1, len(span))
     return spans
@@ -186,7 +237,10 @@ def _fake_tool_names(text: str) -> list[str]:
     names: list[str] = []
     for match in re.finditer(r'"name"\s*:\s*"([A-Za-z_][\w-]*)"', text):
         tail = text[match.end() : match.end() + 160]
-        if re.search(r'"parameters"\s*:', tail) and match.group(1) not in names:
+        if (
+            re.search(r'"(?:parameters|arguments)"\s*:', tail)
+            and match.group(1) not in names
+        ):
             names.append(match.group(1))
     return names
 
@@ -204,15 +258,12 @@ def _fake_tool_call_error(what: str, names: list[str]) -> FakeToolCallTextError:
 def _validate(data: Any, *, lenient: bool = False) -> list[FailureObject]:
     """Validate parsed JSON into failure objects.
 
-    A bare object is accepted as a single finding; anything that is not an
-    object or a list of objects is a hard failure.
+    Anything other than an array of objects is a hard failure.
 
     Strictly, one bad element fails the whole response — the caller re-prompts.
     Leniently, a bad element is logged and skipped, so a run whose critic has
     given up on the schema still gets whatever findings were readable.
     """
-    if isinstance(data, dict):
-        data = [data]
     if not isinstance(data, list):
         raise StructuredOutputError(
             f"expected a JSON array of failure objects, got {type(data).__name__}"
@@ -221,6 +272,55 @@ def _validate(data: Any, *, lenient: bool = False) -> list[FailureObject]:
     model = _LenientFailureObject if lenient else FailureObject
     findings: list[FailureObject] = []
     for index, element in enumerate(data):
+        if not isinstance(element, dict):
+            if not lenient:
+                raise StructuredOutputError(
+                    f"element {index} is not a JSON object, got {type(element).__name__}"
+                )
+            get_fsm_logger().warning(
+                "critic_finding_skipped index=%d reason=not_an_object", index
+            )
+            continue
+        if not lenient:
+            expected = {
+                "error_code", "offending_text", "suggested_fix", "critic_source"
+            }
+            actual = set(element)
+            missing = expected - actual
+            unexpected = actual - expected
+            if missing or unexpected:
+                deviations: list[str] = []
+                if missing:
+                    deviations.append(
+                        f"missing required fields: {', '.join(sorted(missing))}"
+                    )
+                if unexpected:
+                    deviations.append(
+                        f"unexpected fields: {', '.join(sorted(unexpected))}"
+                    )
+                raise StructuredOutputError(
+                    f"element {index} schema deviation: {'; '.join(deviations)}"
+                )
+        error_code = element.get("error_code")
+        if error_code not in CRITIC_ERROR_CODES:
+            if not lenient:
+                raise StructuredOutputError(
+                    f"element {index} has unknown error_code {error_code!r}"
+                )
+            get_fsm_logger().warning(
+                "critic_finding_skipped index=%d reason=unknown_error_code", index
+            )
+            continue
+        source = element.get("critic_source", "continuity_critic")
+        if source != "continuity_critic":
+            if not lenient:
+                raise StructuredOutputError(
+                    f"element {index} has invalid critic_source {source!r}"
+                )
+            get_fsm_logger().warning(
+                "critic_finding_skipped index=%d reason=invalid_critic_source", index
+            )
+            continue
         try:
             findings.append(model.model_validate(element))
         except ValidationError as exc:
@@ -321,31 +421,30 @@ def parse_failure_objects(raw_text: str, *, lenient: bool = False) -> list[Failu
 
     # Pass 1: the response as given.
     try:
-        return _validate(json.loads(raw_text), lenient=lenient)
+        return _validate(strict_json_loads(raw_text), lenient=lenient)
+    except StructuredOutputError:
+        raise
     except json.JSONDecodeError:
         pass
 
     # Pass 2: strip fences and prose, then try every balanced array span — a
     # preamble like "I found 1 issue [see below]:" must not mask the real
     # array behind it — before falling back to the first object span.
-    stripped = _strip_fences(raw_text)
     shape_error: StructuredOutputError | None = None
-    for candidate in _balanced_spans_with_opener(stripped, "["):
+    valid: list[list[FailureObject]] = []
+    for candidate in _balanced_spans_with_opener(raw_text, "["):
         try:
-            return _validate(json.loads(candidate), lenient=lenient)
+            valid.append(_validate(strict_json_loads(candidate), lenient=lenient))
         except StructuredOutputError as exc:
             shape_error = exc
         except json.JSONDecodeError:
             pass
-
-    candidate = _first_balanced_span_with_opener(stripped, "{")
-    if candidate is not None:
-        try:
-            return _validate(json.loads(candidate), lenient=lenient)
-        except StructuredOutputError as exc:
-            shape_error = exc
-        except json.JSONDecodeError:
-            pass
+    if len(valid) > 1:
+        raise AmbiguousStructuredOutputError(
+            "critic response contained multiple complete JSON arrays"
+        )
+    if valid:
+        return valid[0]
 
     # A reply that carried JSON-ish spans was talking findings, however badly;
     # is_clean_verdict rejects any text containing a bracket, so these two
@@ -375,8 +474,10 @@ def _as_object_array(
     ``obligations`` — as the only balanced span, and without a key check that
     fragment parses cleanly and becomes "the plan".
     """
-    if isinstance(data, dict):
-        data = [data]
+    if isinstance(data, dict) and "name" in data and isinstance(data.get("parameters"), dict):
+        raise FakeToolCallTextError(
+            f"{what} reply looks like a tool call, not a planner array: {data.get('name')!r}"
+        )
     if not isinstance(data, list):
         raise StructuredOutputError(
             f"expected a JSON array of {what}, got {type(data).__name__}"
@@ -479,65 +580,59 @@ def parse_json_array(
 
     # Pass 1: strict.
     try:
-        return _as_object_array(json.loads(raw_text), what, element_keys)
+        return _as_object_array(strict_json_loads(raw_text), what, element_keys)
     except StructuredOutputError:
         raise  # parsed as JSON, but the shape is wrong — a re-prompt won't fix it
     except json.JSONDecodeError:
         pass
 
     # Pass 2: lenient extraction.
-    stripped = _strip_fences(raw_text)
     shape_error: StructuredOutputError | None = None
-    for candidate in _balanced_spans_with_opener(stripped, "["):
+    valid: list[list[dict]] = []
+    for candidate in _balanced_spans_with_opener(raw_text, "["):
         try:
-            return _as_object_array(json.loads(candidate), what, element_keys)
+            valid.append(_as_object_array(strict_json_loads(candidate), what, element_keys))
         except FakeToolCallTextError:
             raise
         except StructuredOutputError as exc:
             shape_error = exc
         except json.JSONDecodeError:
             pass
+    if len(valid) > 1:
+        raise AmbiguousStructuredOutputError(
+            f"model response contained multiple complete JSON arrays of {what}"
+        )
+    if valid:
+        return valid[0]
 
-    names = _fake_tool_names(stripped)
+    names = _fake_tool_names(raw_text)
     if names:
         raise _fake_tool_call_error(what, names)
 
-    candidate = _first_balanced_span(stripped)
-    if candidate is not None:
-        try:
-            return _as_object_array(json.loads(candidate), what, element_keys)
-        except FakeToolCallTextError:
-            raise
-        except StructuredOutputError as exc:
-            shape_error = exc
-        except json.JSONDecodeError:
-            pass
-
     # Pass 3: repair the model's quoting, then extract again.
     if repair:
-        repaired = repair_json_text(stripped)
+        repaired = repair_json_text(raw_text)
+        valid = []
         for candidate in _balanced_spans_with_opener(repaired, "["):
             try:
-                return _as_object_array(json.loads(candidate), what, element_keys)
+                valid.append(
+                    _as_object_array(strict_json_loads(candidate), what, element_keys)
+                )
             except FakeToolCallTextError:
                 raise
             except StructuredOutputError as exc:
                 shape_error = exc
             except json.JSONDecodeError:
                 pass
+        if len(valid) > 1:
+            raise AmbiguousStructuredOutputError(
+                f"model response contained multiple complete JSON arrays of {what}"
+            )
+        if valid:
+            return valid[0]
         names = _fake_tool_names(repaired)
         if names:
             raise _fake_tool_call_error(what, names)
-        candidate = _first_balanced_span(repaired)
-        if candidate is not None:
-            try:
-                return _as_object_array(json.loads(candidate), what, element_keys)
-            except FakeToolCallTextError:
-                raise
-            except StructuredOutputError as exc:
-                shape_error = exc
-            except json.JSONDecodeError:
-                pass
 
     if shape_error is not None:
         raise shape_error
@@ -546,3 +641,27 @@ def parse_json_array(
         f"could not extract a JSON array of {what} from the model response: "
         f"{raw_text[:200]!r}"
     )
+
+
+def validate_plain_text_response(raw_text: str, *, what: str) -> str:
+    """Return clean prose, rejecting wrappers, meta-text, and textual tool calls."""
+    text = raw_text.strip()
+    if not text:
+        raise StructuredOutputError(f"model produced no prose for {what}")
+    if "```" in text:
+        raise StructuredOutputError(f"{what} was wrapped in a markdown code fence")
+    if re.match(r"^<think\b", text, re.IGNORECASE):
+        raise StructuredOutputError(f"{what} still contains a reasoning block")
+    if _fake_tool_names(text):
+        raise FakeToolCallTextError(
+            f"{what} wrote a tool call as plain text instead of returning prose"
+        )
+    try:
+        decoded = strict_json_loads(text)
+    except (json.JSONDecodeError, StructuredOutputError):
+        decoded = None
+    if isinstance(decoded, (dict, list)):
+        raise StructuredOutputError(f"{what} returned JSON instead of prose")
+    if _META_PROSE_PREFIX.search(text) or _META_PROSE_SUFFIX.search(text):
+        raise StructuredOutputError(f"{what} contains assistant meta-commentary")
+    return text

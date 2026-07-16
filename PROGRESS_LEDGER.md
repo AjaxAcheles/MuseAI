@@ -1470,3 +1470,55 @@ beat plan array:
 
 - `uv run pytest -q tests/test_planner_resilience.py` → `29 passed`.
 - `uv run pytest -q tests/test_planner_resilience.py tests/test_planners.py tests/test_prompts.py tests/test_critic_resilience.py` → `163 passed`.
+
+## Post-v1.17 maintenance — adversarial LLM boundary hardening
+
+The structured-output, tool-call, streaming, and prose boundaries now reject
+ambiguous or incomplete model replies instead of silently accepting a usable-
+looking fragment.
+
+**Fixes / changes**
+
+- **Strict JSON extraction** (`museai/llm/structured.py`). Ordinary fences,
+  surrounding prose, Unicode content, and escaped newlines remain supported.
+  Duplicate keys, `NaN`/`Infinity`, bare objects where arrays are required,
+  truncated outer arrays, and concatenated/repeated valid arrays fail loudly.
+  Multiple valid candidates are an explicit ambiguity error rather than
+  "first payload wins". Critic findings require the exact field set, source,
+  and supported error-code enum.
+- **Planner schemas** (`plan_chapter.py`, `plan_beat.py`, `llm/planning.py`).
+  Schema validation runs inside the bounded correction path, before a response
+  can be persisted. Chapter fields and ordering are exact; beat core fields,
+  PAD axes/types/ranges, optional text/list fields, thread-update shape, and
+  thread status enums are validated without string/boolean coercion. Invalid
+  extras no longer disappear, and invalid thread updates no longer get dropped.
+- **Prose-only boundary** (`draft_prose.py`, `revise.py`). Empty prose,
+  markdown fences, leaked reasoning blocks, JSON/tool-call text, and common
+  assistant preambles/sign-offs raise a drafting error. Literal prose
+  newlines, smart quotes, and non-ASCII story text remain valid.
+- **Critic uncertainty routing** (`critics.py`, `mode_selector.py`, `graph.py`).
+  An unreadable critic response is not a clean verdict. The graph retries the
+  single critic up to its configured degradation threshold, then parks at the
+  explicit review boundary when nothing was salvageable. A balanced JSON
+  response with `finish_reason="length"` is still treated as truncated.
+- **Tool protocol and execution** (`fsm/tools/loop.py`). Malformed envelopes,
+  malformed/duplicate-key/non-object arguments, unknown tools, tool faults,
+  and per-tool call-cap failures become structured tool results. The new
+  positive `generation.tool_timeout` setting bounds each execution and returns
+  `tool_timeout` to the model. Tool calls returned from the forced tool-free
+  turn are a loud bounded protocol error.
+- **Transport and SSE validation** (`llm/client.py`). HTTP 200 bodies must have
+  the expected object/choices/message/content/finish/tool-call shapes; server
+  error objects and malformed tool calls cannot become empty successes.
+  Stream chunks are validated, fragmented tool calls require coherent indices
+  and IDs, malformed SSE and clean EOF without a terminal finish reason use
+  bounded retries, and all terminal failures close live chat state. Stream
+  retries expose `on_restart` so callback consumers can discard partial tokens.
+- **Endpoint probe** (`web/routes/settings.py`). The probe opts into empty-
+  response retries and succeeds only on the requested `ok` reply.
+
+**Done-check**
+
+- `.venv/win/Scripts/python.exe -m compileall -q museai` → success.
+- `.venv/win/Scripts/python.exe -m pytest -q --basetemp .venv/pytest-final2 -o cache_dir=.venv/pytest-cache-final2` → **710 passed** in 33.49s.
+- `git diff --check` → clean.

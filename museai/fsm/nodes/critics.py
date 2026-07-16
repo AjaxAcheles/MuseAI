@@ -21,7 +21,8 @@ laundered into a clean pass either. Each beat whose critic stayed unreadable
 increments ``critic_parse_failure_streak``, and once the streak reaches
 ``generation.critic_degrade_threshold`` the run is **degraded**: element
 validation loosens, and every ``critic_health`` event says so, loudly, in the UI.
-Degraded beats commit with only the programmatic ``audit`` behind them.
+An unreadable verdict is never treated as clean: the graph retries this critic
+until the degradation threshold, then routes to the explicit review boundary.
 """
 
 from __future__ import annotations
@@ -147,6 +148,7 @@ async def adversarial_critics(state: OrchestratorState) -> dict:
     failures: list | None = None
     last_error = ""
     last_text = ""
+    last_truncated = False
 
     for attempt in range(generation.critic_parse_retries + 1):
         response = await run_agent_loop(
@@ -158,14 +160,21 @@ async def adversarial_critics(state: OrchestratorState) -> dict:
             on_event=on_tool_call,
             agent="critic",
             tool_call_cap=generation.tool_call_cap,
+            tool_timeout=generation.tool_timeout,
         )
         last_text = response.text
+        last_truncated = getattr(response, "finish_reason", None) == "length"
         await bus.publish(
             "critic_reasoning",
             {"beat_id": beat_id, "critic": CRITIC_NAME, "text": response.text},
         )
 
         try:
+            if last_truncated:
+                raise StructuredOutputError(
+                    "critic reply was cut off at the endpoint output token limit "
+                    "(finish_reason='length')"
+                )
             failures = parse_failure_objects(response.text)
             break
         except StructuredOutputError as exc:
@@ -189,6 +198,7 @@ async def adversarial_critics(state: OrchestratorState) -> dict:
             ]
 
     lenient_used = False
+    unreadable = failures is None
     if failures is not None:
         streak = 0
     else:
@@ -196,7 +206,7 @@ async def adversarial_critics(state: OrchestratorState) -> dict:
         # module docstring — but the streak climbs and the UI is told.
         streak = state["critic_parse_failure_streak"] + 1
         failures = []
-        if streak >= generation.critic_degrade_threshold:
+        if streak >= generation.critic_degrade_threshold and not last_truncated:
             try:
                 failures = parse_failure_objects(last_text, lenient=True)
             except StructuredOutputError:
@@ -229,7 +239,10 @@ async def adversarial_critics(state: OrchestratorState) -> dict:
     if failures:
         delta["critic_failures"] = failures
 
-    summary = f"{total} issues found" if total else "clean"
+    if unreadable and not failures:
+        summary = "critic output unreadable"
+    else:
+        summary = f"{total} issues found" if total else "clean"
     log_node_event(
         "critics",
         event="critiqued",

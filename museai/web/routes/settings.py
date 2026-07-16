@@ -139,7 +139,15 @@ async def test_endpoint():
             [{"role": "user", "content": "Reply with the single word: ok"}],
             agent="endpoint_test",
             max_tokens=8,
+            retry_on_empty=True,
         )
     except Exception as exc:
         return jsonify({"ok": False, "error": str(exc)})
+    if response.text.strip().casefold() != "ok":
+        return jsonify(
+            {
+                "ok": False,
+                "error": f"endpoint returned an unexpected probe reply: {response.text[:80]!r}",
+            }
+        )
     return jsonify({"ok": True, "model": response.model_name})

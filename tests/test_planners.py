@@ -17,8 +17,12 @@ from museai.core.stream_bus import bus
 from museai.fsm.nodes import plan_beat as plan_beat_module
 from museai.fsm.nodes import plan_chapter as plan_chapter_module
 from museai.fsm.nodes.deps import PlanningError, set_node_config
-from museai.fsm.nodes.plan_beat import plan_beat
-from museai.fsm.nodes.plan_chapter import chapter_id_for, plan_chapter
+from museai.fsm.nodes.plan_beat import _validate_beat_item, plan_beat
+from museai.fsm.nodes.plan_chapter import (
+    _validate_chapter_item,
+    chapter_id_for,
+    plan_chapter,
+)
 from museai.fsm.pad import (
     PAD_BAND_THRESHOLD,
     PAD_BASELINES_PATH,
@@ -71,11 +75,11 @@ BEATS_JSON = """```json
    "beat_function": "discovery",
    "discharges": ["Mara dates the earliest letter.", "Not a real obligation."],
    "thread_updates": [{"id": "thread-1", "status": "progressing"}],
-   "word_target": 550, "focal_character_id": "char-mara",
+   "focal_character_id": "char-mara",
    "target_pad": {"pleasure": -0.6, "arousal": 0.8, "dominance": -0.4}},
   {"ordering": 2, "intent": "Mara files the letter and says nothing.",
    "entry_state": "Mara is holding the letter.", "exit_state": "The letter is locked away.",
-   "word_target": 700, "focal_character_id": "char-idris",
+   "focal_character_id": "char-idris",
    "target_pad": {"pleasure": -0.3, "arousal": -0.5, "dominance": 0.6}}
 ]
 ```
@@ -429,7 +433,7 @@ BEATS_CLOSING_THREAD = """```json
 [
   {"ordering": 1, "intent": "Mara admits who wrote the letters.",
    "entry_state": "Denial.", "exit_state": "Confession.",
-   "word_target": 500, "focal_character_id": "char-mara",
+   "focal_character_id": "char-mara",
    "target_pad": {"pleasure": -0.2, "arousal": 0.3, "dominance": 0.1},
    "thread_updates": [{"id": "thread-1", "status": "closed"}]}
 ]
@@ -439,7 +443,7 @@ BEATS_WITH_REFRAIN = """```json
 [
   {"ordering": 1, "intent": "Establish the keeper's creed.",
    "entry_state": "Dawn.", "exit_state": "The creed spoken.",
-   "word_target": 500, "focal_character_id": "char-mara",
+   "focal_character_id": "char-mara",
    "target_pad": {"pleasure": 0.1, "arousal": -0.2, "dominance": 0.4},
    "intended_refrain": ["The lantern must never go dark."]}
 ]
@@ -449,13 +453,13 @@ BEATS_WITH_REFRAIN = """```json
 FLAT_HOT_BEATS = """```json
 [
   {"ordering": 1, "intent": "Terror one.", "entry_state": "a", "exit_state": "b",
-   "word_target": 400, "focal_character_id": "char-mara",
+   "focal_character_id": "char-mara",
    "target_pad": {"pleasure": -0.5, "arousal": 0.9, "dominance": -0.3}},
   {"ordering": 2, "intent": "Terror two.", "entry_state": "b", "exit_state": "c",
-   "word_target": 400, "focal_character_id": "char-mara",
+   "focal_character_id": "char-mara",
    "target_pad": {"pleasure": -0.6, "arousal": 0.9, "dominance": -0.4}},
   {"ordering": 3, "intent": "Terror three.", "entry_state": "c", "exit_state": "d",
-   "word_target": 400, "focal_character_id": "char-mara",
+   "focal_character_id": "char-mara",
    "target_pad": {"pleasure": -0.7, "arousal": 0.95, "dominance": -0.5}}
 ]
 ```"""
@@ -465,13 +469,13 @@ FLAT_HOT_BEATS = """```json
 VARIED_BEATS = """```json
 [
   {"ordering": 1, "intent": "A quiet opening.", "entry_state": "a", "exit_state": "b",
-   "word_target": 333, "focal_character_id": "char-mara",
+   "focal_character_id": "char-mara",
    "target_pad": {"pleasure": 0.1, "arousal": -0.3, "dominance": 0.2}},
   {"ordering": 2, "intent": "The peak.", "entry_state": "b", "exit_state": "c",
-   "word_target": 333, "focal_character_id": "char-mara",
+   "focal_character_id": "char-mara",
    "target_pad": {"pleasure": -0.6, "arousal": 0.9, "dominance": -0.4}},
   {"ordering": 3, "intent": "The settling.", "entry_state": "c", "exit_state": "d",
-   "word_target": 333, "focal_character_id": "char-mara",
+   "focal_character_id": "char-mara",
    "target_pad": {"pleasure": 0.0, "arousal": 0.1, "dominance": 0.3}}
 ]
 ```"""
@@ -763,3 +767,60 @@ async def test_each_planner_is_offered_its_own_tool_roster(seeded, monkeypatch):
         "get_seed_contract", "get_current_pointer_context", "get_chapter_context",
         "get_character_emotion_history", "get_canonical_state", "check_plan_node",
     ]
+
+
+class TestPlannerItemSchemas:
+    def test_chapter_fields_are_exact_and_strictly_typed(self):
+        with pytest.raises(StructuredOutputError, match="unexpected fields"):
+            _validate_chapter_item(
+                {
+                    "ordering": 1,
+                    "description": "A chapter.",
+                    "obligations": [],
+                    "summary": "renamed description",
+                },
+                1,
+            )
+        with pytest.raises(StructuredOutputError, match="ordering must be an integer"):
+            _validate_chapter_item(
+                {"ordering": "1", "description": "A chapter.", "obligations": []},
+                1,
+            )
+
+    @pytest.mark.parametrize("value", ["0.5", True, None, float("nan"), float("inf")])
+    def test_beat_pad_values_are_finite_json_numbers(self, value):
+        item = {
+            "ordering": 1,
+            "intent": "A change occurs.",
+            "target_pad": {"pleasure": value, "arousal": 0.0, "dominance": 0.0},
+        }
+        with pytest.raises(StructuredOutputError, match="target_pad.pleasure"):
+            _validate_beat_item(item, 1)
+
+    def test_renamed_beat_key_is_rejected(self):
+        item = {
+            "ordering": 1,
+            "Intent": "wrong casing",
+            "target_pad": {"pleasure": 0.0, "arousal": 0.0, "dominance": 0.0},
+        }
+        with pytest.raises(StructuredOutputError, match="unexpected fields: Intent"):
+            _validate_beat_item(item, 1)
+
+    def test_missing_core_beat_field_is_rejected(self):
+        item = {
+            "ordering": 1,
+            "target_pad": {"pleasure": 0.0, "arousal": 0.0, "dominance": 0.0},
+        }
+        with pytest.raises(StructuredOutputError, match="missing required fields: intent"):
+            _validate_beat_item(item, 1)
+
+    @pytest.mark.parametrize("status", ["open", "resolved", "Progressing", True])
+    def test_thread_update_status_is_an_exact_enum(self, status):
+        item = {
+            "ordering": 1,
+            "intent": "A change occurs.",
+            "target_pad": {"pleasure": 0.0, "arousal": 0.0, "dominance": 0.0},
+            "thread_updates": [{"id": "thread-1", "status": status}],
+        }
+        with pytest.raises(StructuredOutputError, match="invalid status"):
+            _validate_beat_item(item, 1)

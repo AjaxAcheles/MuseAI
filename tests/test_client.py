@@ -200,6 +200,28 @@ class TestNonStreaming:
         with pytest.raises(LLMCallError, match="not valid JSON"):
             await call_llm(endpoint, MESSAGES, transport=transport)
 
+    @pytest.mark.parametrize(
+        ("payload", "error"),
+        [
+            ([], "JSON object"),
+            ({"error": {"message": "server failed"}}, "error object"),
+            ({"choices": "not-an-array"}, "no choices"),
+            ({"choices": ["not-an-object"]}, "choice 0 must be an object"),
+            (
+                {"choices": [{"message": {"content": 7}, "finish_reason": "stop"}]},
+                "content must be a string or null",
+            ),
+            (
+                {"choices": [{"message": {"content": "partial"}, "finish_reason": None}]},
+                "invalid finish_reason",
+            ),
+        ],
+    )
+    async def test_malformed_200_shapes_fail_loudly(self, endpoint, payload, error):
+        transport = httpx.MockTransport(lambda r: httpx.Response(200, json=payload))
+        with pytest.raises(LLMCallError, match=error):
+            await call_llm(endpoint, MESSAGES, transport=transport)
+
 
 class TestToolCalls:
     async def test_tool_calls_are_parsed(self, endpoint):
@@ -223,6 +245,49 @@ class TestToolCalls:
         assert len(result.tool_calls) == 1
         assert result.tool_calls[0]["function"]["name"] == "web_search"
         assert json.loads(result.tool_calls[0]["function"]["arguments"]) == {"query": "moon"}
+
+    @pytest.mark.parametrize(
+        ("tool_calls", "error"),
+        [
+            ({"id": "c1"}, "must be an array"),
+            ([{"id": "c1", "function": "web_search"}], "function must be an object"),
+            (
+                [{"id": "c1", "function": {"name": "web_search", "arguments": 9}}],
+                "arguments has unusable type",
+            ),
+            (
+                [
+                    {"id": "c1", "function": {"name": "web_search", "arguments": "{}"}},
+                    {"id": "c1", "function": {"name": "web_search", "arguments": "{}"}},
+                ],
+                "duplicate id",
+            ),
+        ],
+    )
+    async def test_malformed_tool_call_envelopes_fail_loudly(
+        self, endpoint, tool_calls, error
+    ):
+        payload = {
+            "choices": [
+                {
+                    "message": {"content": None, "tool_calls": tool_calls},
+                    "finish_reason": "tool_calls",
+                }
+            ]
+        }
+        transport = httpx.MockTransport(lambda r: json_response(payload))
+        with pytest.raises(LLMCallError, match=error):
+            await call_llm(endpoint, MESSAGES, transport=transport)
+
+    async def test_tool_call_finish_without_calls_fails_loudly(self, endpoint):
+        payload = {
+            "choices": [
+                {"message": {"content": None}, "finish_reason": "tool_calls"}
+            ]
+        }
+        transport = httpx.MockTransport(lambda r: json_response(payload))
+        with pytest.raises(LLMCallError, match="tool_calls.*empty"):
+            await call_llm(endpoint, MESSAGES, transport=transport)
 
     async def test_tools_are_forwarded_on_the_wire(self, endpoint):
         seen: list[dict] = []
@@ -313,7 +378,11 @@ class TestStreaming:
 
     async def test_sync_on_token_receives_each_delta(self, endpoint):
         seen: list[str] = []
-        payload = sse(content_chunk("a"), content_chunk("b"), content_chunk("c"))
+        payload = sse(
+            content_chunk("a"),
+            content_chunk("b"),
+            content_chunk("c", finish_reason="stop"),
+        )
         transport = httpx.MockTransport(lambda r: httpx.Response(200, content=payload))
 
         result = await call_llm(
@@ -328,7 +397,7 @@ class TestStreaming:
         async def on_token(token: str) -> None:
             seen.append(token)
 
-        payload = sse(content_chunk("x"), content_chunk("y"))
+        payload = sse(content_chunk("x"), content_chunk("y", finish_reason="stop"))
         transport = httpx.MockTransport(lambda r: httpx.Response(200, content=payload))
 
         result = await call_llm(
@@ -365,7 +434,7 @@ class TestStreaming:
             b"\n"
             b': keep-alive comment\n'
             b"\n"
-            + f"data: {json.dumps(content_chunk('ok'))}\n".encode()
+            + f"data: {json.dumps(content_chunk('ok', finish_reason='stop'))}\n".encode()
             + b"\n"
             b"data: [DONE]\n"
             b'data: {"never": "parsed"}\n'
@@ -381,6 +450,48 @@ class TestStreaming:
             await call_llm(
                 endpoint, MESSAGES, stream=True, transport=transport, retry_backoff=NO_BACKOFF
             )
+
+    async def test_clean_eof_without_finish_reason_exhausts_bounded_retries(self, endpoint):
+        calls = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls.append(request)
+            return httpx.Response(200, content=sse(content_chunk("partial"), done=False))
+
+        with pytest.raises(LLMCallError, match="without a terminal finish_reason"):
+            await call_llm(
+                endpoint,
+                MESSAGES,
+                stream=True,
+                transport=httpx.MockTransport(handler),
+                retry_backoff=NO_BACKOFF,
+            )
+        assert len(calls) == MAX_ATTEMPTS
+
+    async def test_malformed_streamed_tool_shape_exhausts_bounded_retries(self, endpoint):
+        calls = []
+        chunk = {
+            "choices": [
+                {
+                    "delta": {"tool_calls": {"id": "call-1"}},
+                    "finish_reason": "tool_calls",
+                }
+            ]
+        }
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls.append(request)
+            return httpx.Response(200, content=sse(chunk))
+
+        with pytest.raises(LLMCallError, match="tool_calls must be an array"):
+            await call_llm(
+                endpoint,
+                MESSAGES,
+                stream=True,
+                transport=httpx.MockTransport(handler),
+                retry_backoff=NO_BACKOFF,
+            )
+        assert len(calls) == MAX_ATTEMPTS
 
     async def test_streaming_4xx_raises_without_consuming_a_stream(self, endpoint):
         transport = httpx.MockTransport(
@@ -502,6 +613,7 @@ class TestRetry:
         """
         calls = []
         seen: list[str] = []
+        callback_restarts: list[bool] = []
         queue = bus.subscribe()
 
         def handler(request: httpx.Request) -> httpx.Response:
@@ -523,6 +635,7 @@ class TestRetry:
                 MESSAGES,
                 stream=True,
                 on_token=seen.append,
+                on_restart=lambda: callback_restarts.append(True),
                 transport=httpx.MockTransport(handler),
                 retry_backoff=NO_BACKOFF,
             )
@@ -534,6 +647,7 @@ class TestRetry:
         # on_token saw both attempts; the chat_restart between them is the
         # signal that the first attempt's tokens are void.
         assert seen == ["partial", "recovered"]
+        assert callback_restarts == [True]
         events = []
         while not queue.empty():
             events.append(queue.get_nowait())
@@ -581,7 +695,7 @@ class TestRetry:
 
 
 class TestRetryOnEmpty:
-    EMPTY = {"choices": [{"message": {"content": None}, "finish_reason": None}]}
+    EMPTY = {"choices": [{"message": {"content": None}, "finish_reason": "stop"}]}
 
     async def test_an_empty_completion_is_retried_when_opted_in(self, endpoint):
         calls = []
@@ -796,7 +910,11 @@ class TestLogging:
     async def test_a_streamed_call_logs_once_per_message_not_per_token(
         self, endpoint, records
     ):
-        chunks = [content_chunk("one"), content_chunk(" two"), content_chunk(" three")]
+        chunks = [
+            content_chunk("one"),
+            content_chunk(" two"),
+            content_chunk(" three", finish_reason="stop"),
+        ]
         transport = httpx.MockTransport(lambda r: httpx.Response(200, content=sse(*chunks)))
 
         seen: list[str] = []

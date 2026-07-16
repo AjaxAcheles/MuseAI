@@ -193,6 +193,9 @@ class GenerationConfig(BaseModel):
     # Stops a model from spending its bounded iterations re-running the same
     # search instead of answering.
     tool_call_cap: int = 3
+    # Wall-clock bound for one tool execution. The loop turns expiry into a
+    # structured tool_timeout result instead of hanging the generation task.
+    tool_timeout: float = 30.0
 
     @field_validator("word_count_target", mode="before")
     @classmethod
@@ -237,6 +240,13 @@ class GenerationConfig(BaseModel):
         """A threshold of 0 would degrade before the first failure ever happened."""
         if value < 1:
             raise ValueError(f"{info.field_name} must be >= 1, got {value}")
+        return value
+
+    @field_validator("tool_timeout")
+    @classmethod
+    def _positive_timeout(cls, value: float) -> float:
+        if value <= 0:
+            raise ValueError(f"tool_timeout must be > 0, got {value}")
         return value
 
 

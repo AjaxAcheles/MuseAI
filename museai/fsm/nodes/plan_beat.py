@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import sqlite3
 
 from museai.core.logging_setup import get_fsm_logger, log_node_event
@@ -35,6 +36,7 @@ from museai.fsm.pad import PAD_AXES, resolve_pad_constraint
 from museai.fsm.state import FSM_Pointer, OrchestratorState
 from museai.fsm.tools.registry import tool_impls_for, tool_specs_for
 from museai.llm.planning import call_llm_for_json_array
+from museai.llm.structured import StructuredOutputError
 from museai.llm.prompts import render_messages
 from museai.memory.db import (
     connect_db,
@@ -329,7 +331,7 @@ def _is_flat_hot(planned: list[dict], *, hot_threshold: float, flat_fraction: fl
 
 
 def _target_pad(item: dict, ordering: int) -> dict[str, float]:
-    """Validate a beat's target PAD, clamped to the axes' [-1.0, 1.0] range."""
+    """Validate a beat's target PAD as finite JSON numbers in [-1.0, 1.0]."""
     raw = item.get("target_pad") or {}
     if not isinstance(raw, dict):
         raise PlanningError(
@@ -339,15 +341,104 @@ def _target_pad(item: dict, ordering: int) -> dict[str, float]:
 
     target: dict[str, float] = {}
     for axis in PAD_AXES:
-        value = raw.get(axis, 0.0)
-        try:
-            value = float(value)
-        except (TypeError, ValueError) as exc:
+        value = raw.get(axis)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
             raise PlanningError(
                 f"beat {ordering}: target_pad.{axis} is not a number: {value!r}"
-            ) from exc
-        target[axis] = max(-1.0, min(1.0, value))
+            )
+        numeric = float(value)
+        if not math.isfinite(numeric) or not -1.0 <= numeric <= 1.0:
+            raise PlanningError(
+                f"beat {ordering}: target_pad.{axis} must be finite and in -1.0..1.0"
+            )
+        target[axis] = numeric
     return target
+
+
+_BEAT_PLAN_KEYS = {
+    "ordering", "intent", "entry_state", "exit_state", "required_change",
+    "observable_event", "beat_function", "discharges", "focal_character_id",
+    "target_pad", "thread_updates", "intended_refrain",
+}
+_BEAT_REQUIRED_KEYS = {"ordering", "intent", "target_pad"}
+_BEAT_TEXT_KEYS = {
+    "intent", "entry_state", "exit_state", "required_change", "observable_event",
+    "beat_function", "focal_character_id",
+}
+
+
+def _validate_beat_item(item: dict, ordering: int) -> dict:
+    """Validate one model-produced beat while a corrective re-prompt is possible."""
+    extra = set(item) - _BEAT_PLAN_KEYS
+    if extra:
+        raise StructuredOutputError(
+            f"beat {ordering} has unexpected fields: {', '.join(sorted(extra))}"
+        )
+    missing = _BEAT_REQUIRED_KEYS - set(item)
+    if missing:
+        raise StructuredOutputError(
+            f"beat {ordering} is missing required fields: {', '.join(sorted(missing))}"
+        )
+    declared_order = item.get("ordering")
+    if isinstance(declared_order, bool) or not isinstance(declared_order, int):
+        raise StructuredOutputError(f"beat {ordering} ordering must be an integer")
+    if declared_order != ordering:
+        raise StructuredOutputError(
+            f"beat {ordering} declares ordering {declared_order}; order must be contiguous"
+        )
+    for key in _BEAT_TEXT_KEYS:
+        value = item.get(key)
+        if key == "intent":
+            if not isinstance(value, str) or not value.strip():
+                raise StructuredOutputError(
+                    f"beat {ordering} intent must be a non-empty string"
+                )
+        elif value is not None and not isinstance(value, str):
+            raise StructuredOutputError(f"beat {ordering} {key} must be a string")
+    for key in ("discharges", "intended_refrain"):
+        value = item.get(key)
+        if value is not None and (
+            not isinstance(value, list)
+            or any(not isinstance(entry, str) or not entry.strip() for entry in value)
+        ):
+            raise StructuredOutputError(
+                f"beat {ordering} {key} must be an array of non-empty strings"
+            )
+    pad = item.get("target_pad")
+    if not isinstance(pad, dict) or set(pad) != set(PAD_AXES):
+        raise StructuredOutputError(
+            f"beat {ordering} target_pad must contain exactly {', '.join(PAD_AXES)}"
+        )
+    for axis in PAD_AXES:
+        value = pad[axis]
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise StructuredOutputError(
+                f"beat {ordering} target_pad.{axis} must be a JSON number"
+            )
+        if not math.isfinite(float(value)) or not -1.0 <= float(value) <= 1.0:
+            raise StructuredOutputError(
+                f"beat {ordering} target_pad.{axis} must be finite and in -1.0..1.0"
+            )
+    updates = item.get("thread_updates")
+    if updates is not None:
+        if not isinstance(updates, list):
+            raise StructuredOutputError(
+                f"beat {ordering} thread_updates must be a JSON array"
+            )
+        for update_index, update in enumerate(updates, start=1):
+            if not isinstance(update, dict) or set(update) != {"id", "status"}:
+                raise StructuredOutputError(
+                    f"beat {ordering} thread update {update_index} must contain only id and status"
+                )
+            if not isinstance(update["id"], str) or not update["id"].strip():
+                raise StructuredOutputError(
+                    f"beat {ordering} thread update {update_index} id must be a non-empty string"
+                )
+            if update["status"] not in ("progressing", "closed"):
+                raise StructuredOutputError(
+                    f"beat {ordering} thread update {update_index} has invalid status {update['status']!r}"
+                )
+    return item
 
 
 def _row(beat: dict) -> dict:
@@ -474,9 +565,11 @@ async def plan_beat(state: OrchestratorState) -> dict:
                 max_tool_iterations=config.generation.max_agent_iterations,
                 on_tool_event=on_tool_call,
                 tool_call_cap=config.generation.tool_call_cap,
+                tool_timeout=config.generation.tool_timeout,
                 # A real beat always has an intent; a truncated reply's inner
                 # array (thread_updates, obligations) never does.
                 element_keys=("intent",),
+                item_validator=_validate_beat_item,
             )
 
             # If the plan comes back with the emotional register pinned at
@@ -518,7 +611,9 @@ async def plan_beat(state: OrchestratorState) -> dict:
                     max_tool_iterations=config.generation.max_agent_iterations,
                     on_tool_event=on_tool_call,
                     tool_call_cap=config.generation.tool_call_cap,
+                    tool_timeout=config.generation.tool_timeout,
                     element_keys=("intent",),
+                    item_validator=_validate_beat_item,
                 )
 
             beats = []

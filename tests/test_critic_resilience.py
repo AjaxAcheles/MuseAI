@@ -43,7 +43,8 @@ CORRECTED = """```json
   {
     "error_code": "CONTRADICTS_CHARACTER",
     "offending_text": "Mara lied about the letter.",
-    "suggested_fix": "Mara never lies; have her say nothing."
+    "suggested_fix": "Mara never lies; have her say nothing.",
+    "critic_source": "continuity_critic"
   }
 ]
 ```"""
@@ -73,9 +74,10 @@ PACKAGE = {
 
 
 class _Response:
-    def __init__(self, text: str) -> None:
+    def __init__(self, text: str, *, finish_reason: str = "stop") -> None:
         self.text = text
         self.tool_calls: list = []
+        self.finish_reason = finish_reason
 
 
 def state_with(**overrides):
@@ -160,6 +162,21 @@ async def test_the_production_payload_no_longer_kills_the_run(configure, scripte
     assert delta["critic_parse_failure_streak"] == 1
     assert "critic_failures" not in delta
     assert health_events[-1]["degraded"] is False
+
+
+async def test_a_truncated_balanced_array_is_never_accepted_as_complete(
+    configure, monkeypatch
+):
+    configure(critic_parse_retries=0, critic_degrade_threshold=1)
+
+    async def truncated(*args, **kwargs):
+        return _Response(CORRECTED, finish_reason="length")
+
+    monkeypatch.setattr(critics_module, "run_agent_loop", truncated)
+    delta = await adversarial_critics(state_with())
+
+    assert delta["critic_parse_failure_streak"] == 1
+    assert "critic_failures" not in delta
 
 
 # ----------------------------------------------------------------- re-prompting

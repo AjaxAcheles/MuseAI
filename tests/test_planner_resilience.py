@@ -61,7 +61,6 @@ PRODUCTION_BEAT_PLAN = """```json
     "intent": "Establish Mara's paralyzing internal struggle.",
     "entry_state": "Mara is suspended in silent paralysis.",
     "exit_state": "Mara traces a hairline fracture in the metalwork.",
-    "word_target": 350,
     "focal_character_id": "char-mara",
     "target_pad": {"pleasure": -0.6, "arousal": 0.7, "dominance": -0.2}
   },
@@ -70,7 +69,6 @@ PRODUCTION_BEAT_PLAN = """```json
     "intent": "Mara seeks an external justification for her fear.",
     "entry_state": "Mara reacts to the evidence, seeking a scapegoat.",
     "exit_state": "Mara expresses vague regret ("It was meant to be stronger") while trying to contain the chaotic energy within her.",
-    "word_target": 380,
     "focal_character_id": "char-mara",
     "target_pad": {"pleasure": -0.4, "arousal": 0.8, "dominance": 0.1}
   }
@@ -81,7 +79,7 @@ VALID_BEAT_PLAN = """```json
 [
   {"ordering": 1, "intent": "The letter arrives.",
    "entry_state": "A routine morning.", "exit_state": "Mara holds her handwriting.",
-   "word_target": 400, "focal_character_id": "char-mara",
+   "focal_character_id": "char-mara",
    "target_pad": {"pleasure": -0.6, "arousal": 0.8, "dominance": -0.4}}
 ]
 ```"""

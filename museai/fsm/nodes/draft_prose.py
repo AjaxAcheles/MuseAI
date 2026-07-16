@@ -22,6 +22,7 @@ from museai.core.stream_bus import bus
 from museai.fsm.nodes.assemble_context import drafter_messages
 from museai.fsm.nodes.deps import DraftingError, get_node_config
 from museai.fsm.state import OrchestratorState
+from museai.llm.structured import StructuredOutputError, validate_plain_text_response
 from museai.fsm.tools.loop import run_agent_loop
 from museai.fsm.tools.registry import tool_impls_for, tool_specs_for
 
@@ -89,11 +90,11 @@ async def draft_prose(state: OrchestratorState) -> dict:
         agent="drafter",
         on_token=on_token,
         tool_call_cap=config.generation.tool_call_cap,
+        tool_timeout=config.generation.tool_timeout,
     )
 
     # The final turn's text is the draft. Tokens streamed to the browser may
     # include earlier tool-requesting turns; the committed prose never does.
-    draft = response.text.strip()
     # Truncation first: a reply cut off at the token limit can be empty (a
     # reasoning model that spent the whole budget thinking) as easily as it can
     # stop mid-sentence, and "no prose" would name neither the cause nor the fix.
@@ -103,12 +104,10 @@ async def draft_prose(state: OrchestratorState) -> dict:
             f"output token limit (finish_reason='length'); raise "
             f"endpoint.max_output_tokens or leave it unset to omit the cap"
         )
-    if not draft:
-        raise DraftingError(
-            f"the endpoint returned no prose for beat {beat_id!r} "
-            f"(finish_reason={response.finish_reason!r})"
-        )
-
+    try:
+        draft = validate_plain_text_response(response.text, what=f"draft for beat {beat_id!r}")
+    except StructuredOutputError as exc:
+        raise DraftingError(str(exc)) from exc
     log_node_event(
         "draft_prose",
         event="drafted",

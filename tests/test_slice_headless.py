@@ -31,11 +31,11 @@ CHAPTERS_JSON = """[
 BEATS_JSON = """[
   {"ordering": 1, "intent": "The letter arrives in the day's post.",
    "entry_state": "A routine morning.", "exit_state": "Mara holds her own handwriting.",
-   "word_target": 120, "focal_character_id": "lantern-keeper-char-1",
+   "focal_character_id": "lantern-keeper-char-1",
    "target_pad": {"pleasure": -0.7, "arousal": 0.8, "dominance": -0.5}},
   {"ordering": 2, "intent": "Mara locks the letter away.",
    "entry_state": "Mara holds the letter.", "exit_state": "The letter is hidden.",
-   "word_target": 120, "focal_character_id": "lantern-keeper-char-1",
+   "focal_character_id": "lantern-keeper-char-1",
    "target_pad": {"pleasure": -0.2, "arousal": -0.3, "dominance": 0.4}}
 ]"""
 

@@ -397,10 +397,10 @@ class TestParseFailureObjects:
         raw = f"I found one issue. {WELL_FORMED}"
         assert len(parse_failure_objects(raw)) == 1
 
-    def test_single_object_is_accepted_as_one_finding(self):
+    def test_single_object_is_rejected(self):
         raw = json.loads(WELL_FORMED)[0]
-        findings = parse_failure_objects(json.dumps(raw))
-        assert len(findings) == 1
+        with pytest.raises(StructuredOutputError, match="expected a JSON array"):
+            parse_failure_objects(json.dumps(raw))
 
     def test_brackets_inside_strings_do_not_end_the_span(self):
         payload = [
@@ -425,14 +425,14 @@ class TestParseFailureObjects:
 
     def test_missing_required_field_is_rejected(self):
         raw = json.dumps([{"error_code": "X", "offending_text": "y"}])
-        with pytest.raises(StructuredOutputError, match="not a valid failure object"):
+        with pytest.raises(StructuredOutputError, match="missing required fields"):
             parse_failure_objects(raw)
 
     def test_extra_field_is_rejected(self):
         """FailureObject forbids extra keys; a hallucinated field is a hard failure."""
         payload = json.loads(WELL_FORMED)
         payload[0]["severity"] = "high"
-        with pytest.raises(StructuredOutputError, match="not a valid failure object"):
+        with pytest.raises(StructuredOutputError, match="unexpected fields: severity"):
             parse_failure_objects(json.dumps(payload))
 
     def test_non_array_json_is_rejected(self):
@@ -443,12 +443,12 @@ class TestParseFailureObjects:
         with pytest.raises(StructuredOutputError, match="empty response"):
             parse_failure_objects("   ")
 
-    def test_critic_source_defaults_when_omitted(self):
-        """v1 has one critic; making the model echo the constant bought nothing."""
+    def test_critic_source_is_required(self):
         raw = json.dumps(
-            [{"error_code": "X", "offending_text": "y", "suggested_fix": "z"}]
+            [{"error_code": "CONTRADICTS_THREAD", "offending_text": "y", "suggested_fix": "z"}]
         )
-        assert parse_failure_objects(raw)[0].critic_source == "continuity_critic"
+        with pytest.raises(StructuredOutputError, match="critic_source"):
+            parse_failure_objects(raw)
 
     def test_the_error_carries_the_validation_detail(self):
         """The message is fed back to the model verbatim, so it must name the field."""

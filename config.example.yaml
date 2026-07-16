@@ -58,5 +58,6 @@ generation:
   intensity_flat_fraction: 0.8   # fraction of a chapter's beats that may be hot before re-prompting
   research_mode: false           # offer web_search to the agents; off = story-canon tools only
   tool_call_cap: 6               # max calls to any one tool within a single agent loop
+  tool_timeout: 30               # seconds allowed for one tool execution
   # repetition_allowlist: []     # optional: phrases allowed to recur verbatim (author-declared)
   # emotion_words: [...]         # optional: override the named-emotion vocabulary the guard counts

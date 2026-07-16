@@ -72,7 +72,9 @@ def delta_chunk(**delta) -> dict:
 
 
 def transport_for(*chunks: dict) -> httpx.MockTransport:
-    return httpx.MockTransport(lambda r: httpx.Response(200, content=sse(*chunks)))
+    completed = [json.loads(json.dumps(chunk)) for chunk in chunks]
+    completed[-1]["choices"][0]["finish_reason"] = "stop"
+    return httpx.MockTransport(lambda r: httpx.Response(200, content=sse(*completed)))
 
 
 # ------------------------------------------------------------ thinking capture

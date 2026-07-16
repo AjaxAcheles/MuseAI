@@ -72,6 +72,7 @@ generation:
   # Per tool name, across one whole agent loop. 6, not 3: a critic that issues
   # one batch of three parallel searches must still be able to search again.
   tool_call_cap: 6
+  tool_timeout: 30
 agents: {}
 log_level: INFO
 host: 127.0.0.1

@@ -38,7 +38,13 @@ from museai.fsm.routers.commit_router import (
     PLAN_CHAPTER,
     commit_router,
 )
-from museai.fsm.routers.mode_selector import COMMIT, REVIEW, REVISE, mode_selector
+from museai.fsm.routers.mode_selector import (
+    COMMIT,
+    RETRY_CRITIC,
+    REVIEW,
+    REVISE,
+    mode_selector,
+)
 from museai.fsm.state import FSM_Pointer, OrchestratorState
 from museai.memory.db import connect_db
 
@@ -225,7 +231,12 @@ def build_graph(config: AppConfig, entry_point: GraphEntry = "plan_chapter"):
     graph.add_conditional_edges(
         "critics",
         mode_selector,
-        {COMMIT: "commit", REVISE: "revise", REVIEW: "review"},
+        {
+            COMMIT: "commit",
+            REVISE: "revise",
+            REVIEW: "review",
+            RETRY_CRITIC: "critics",
+        },
     )
     graph.add_edge("revise", "audit")
     graph.add_conditional_edges(

@@ -10,17 +10,19 @@ Two properties matter more than anything else here:
 * **It is bounded.** A model that keeps calling tools cannot spin forever. Once
   ``max_iterations`` model turns have each come back asking for another tool,
   the loop makes one final call with ``tools`` omitted entirely, which leaves
-  the endpoint no way to answer except in prose. The loop always terminates with
-  a plain answer.
+  a conforming endpoint no way to answer except in prose. If an endpoint still
+  returns tool calls, the loop raises a bounded protocol error.
 * **A tool never crashes the loop.** An unknown tool name, a malformed argument
   blob, or an exception inside a tool becomes a structured error *object*
   (``{"error": {"tool", "type", "message"}}``, serialised as that call's result)
   handed back to the model. Models recover from being told exactly what failed;
-  they cannot recover from a traceback. Only ``call_llm`` itself may raise.
+  they cannot recover from a traceback.
 
 The loop also enforces a per-tool call cap (``tool_call_cap``): a model that
 keeps re-running the same search gets a ``call_cap_exceeded`` error instead of
 another result, so the bounded iterations are spent answering, not looping.
+``tool_timeout`` similarly turns a tool that does not return into a structured
+``tool_timeout`` result.
 """
 
 from __future__ import annotations
@@ -32,6 +34,7 @@ from typing import Any, Awaitable, Callable, Mapping, Sequence
 
 from museai.core.logging_setup import get_fsm_logger
 from museai.llm.client import LLMResponse, call_llm
+from museai.llm.structured import StructuredOutputError, strict_json_loads
 
 # Tool results echoed into an event are for a human watching a browser, not a
 # transcript. The model still receives the full result.
@@ -76,8 +79,8 @@ def _parse_arguments(raw: Any) -> tuple[dict[str, Any], str | None]:
         return {}, f"arguments had unusable type {type(raw).__name__}"
 
     try:
-        parsed = json.loads(raw)
-    except json.JSONDecodeError as exc:
+        parsed = strict_json_loads(raw)
+    except (json.JSONDecodeError, StructuredOutputError) as exc:
         return {}, f"arguments were not valid JSON: {exc}"
     if not isinstance(parsed, dict):
         return {}, f"arguments must decode to an object, got {type(parsed).__name__}"
@@ -98,6 +101,7 @@ async def _invoke_tool(
     name: str,
     kwargs: dict[str, Any],
     tool_impls: Mapping[str, Callable[..., Any]],
+    timeout: float | None,
 ) -> str:
     """Run one tool and return its result as a string, never raising.
 
@@ -113,13 +117,21 @@ async def _invoke_tool(
 
     try:
         if inspect.iscoroutinefunction(impl):
-            result = await impl(**kwargs)
+            result = await asyncio.wait_for(impl(**kwargs), timeout=timeout)
         else:
             # A sync tool (e.g. web_search's blocking HTTP) must not stall the
             # event loop — SSE streaming and the web UI share it.
-            result = await asyncio.to_thread(impl, **kwargs)
+            result = await asyncio.wait_for(
+                asyncio.to_thread(impl, **kwargs), timeout=timeout
+            )
             if inspect.isawaitable(result):
-                result = await result
+                result = await asyncio.wait_for(result, timeout=timeout)
+    except asyncio.TimeoutError:
+        return _error_payload(
+            name,
+            "tool_timeout",
+            f"tool {name!r} exceeded its {timeout:g}-second execution timeout",
+        )
     except Exception as exc:  # noqa: BLE001 - a tool fault is data, not a crash
         return _error_payload(
             name, "tool_failure", f"{type(exc).__name__}: {exc}"
@@ -133,6 +145,7 @@ async def _run_tool_calls(
     on_event: EventCallback | None,
     call_counts: dict[str, int],
     call_cap: int | None,
+    tool_timeout: float | None,
 ) -> list[dict[str, Any]]:
     """Execute every tool call in one model turn, in order, into tool messages.
 
@@ -143,9 +156,24 @@ async def _run_tool_calls(
     logger = get_fsm_logger()
 
     for call in tool_calls:
-        function = call.get("function") or {}
+        if not isinstance(call, Mapping):
+            call = {}
+            function: Mapping[str, Any] = {}
+            envelope_error = "tool call must be a JSON object"
+        else:
+            raw_function = call.get("function")
+            if not isinstance(raw_function, Mapping):
+                function = {}
+                envelope_error = "tool call function must be a JSON object"
+            else:
+                function = raw_function
+                envelope_error = None
         name = function.get("name") or ""
+        if not isinstance(name, str):
+            name = ""
+            envelope_error = "tool call function name must be a string"
         kwargs, error = _parse_arguments(function.get("arguments"))
+        error = envelope_error or error
         # A malformed call — bad arguments, unknown tool — never burns the
         # budget: nothing ran, and charging for it can blind an agent whose
         # remaining calls would have been well-formed.
@@ -165,7 +193,7 @@ async def _run_tool_calls(
             )
         else:
             call_counts[name] = call_counts.get(name, 0) + 1
-            content = await _invoke_tool(name, kwargs, tool_impls)
+            content = await _invoke_tool(name, kwargs, tool_impls, tool_timeout)
 
         logger.info(
             "agent_loop tool=%s args=%s result_chars=%d",
@@ -202,6 +230,7 @@ async def run_agent_loop(
     agent: str = "system",
     on_token: Callable[[str], Awaitable[None]] | None = None,
     tool_call_cap: int | None = None,
+    tool_timeout: float | None = None,
     conversation_out: list[dict[str, Any]] | None = None,
 ) -> LLMResponse:
     """Drive the model through tool calls until it answers in prose.
@@ -262,7 +291,12 @@ async def run_agent_loop(
         )
         working.extend(
             await _run_tool_calls(
-                response.tool_calls, tool_impls, on_event, call_counts, tool_call_cap
+                response.tool_calls,
+                tool_impls,
+                on_event,
+                call_counts,
+                tool_call_cap,
+                tool_timeout,
             )
         )
 
@@ -275,5 +309,9 @@ async def run_agent_loop(
     response = await call_llm(
         endpoint, working, agent=agent, stream=True, on_token=on_token, retry_on_empty=True
     )
+    if response.tool_calls:
+        raise AgentLoopError(
+            "endpoint returned tool calls after tools were withheld at the loop limit"
+        )
     _export_conversation()
     return response
