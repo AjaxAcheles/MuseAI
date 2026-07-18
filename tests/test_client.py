@@ -865,6 +865,60 @@ class TestTimeoutsAndOutputCap:
         )
         assert seen[0]["max_tokens"] == 8
 
+    async def test_configured_extra_body_reaches_the_wire(self):
+        endpoint = EndpointConfig(
+            base_url="https://example.invalid/v1",
+            api_key="k",
+            model_name="m",
+            tokenizer_family="char_heuristic",
+            extra_body={"options": {"num_ctx": 16384}},
+        )
+        seen: list[dict] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(json.loads(request.content))
+            return json_response(completion())
+
+        await call_llm(endpoint, MESSAGES, transport=httpx.MockTransport(handler))
+        assert seen[0]["options"] == {"num_ctx": 16384}
+
+    async def test_context_window_reserves_output_when_no_cap_is_set(self):
+        endpoint = EndpointConfig(
+            base_url="https://example.invalid/v1",
+            api_key="k",
+            model_name="m",
+            tokenizer_family="char_heuristic",
+            context_window=8192,
+            output_reservation=512,
+        )
+        seen: list[dict] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(json.loads(request.content))
+            return json_response(completion())
+
+        await call_llm(endpoint, MESSAGES, transport=httpx.MockTransport(handler))
+        assert seen[0]["max_tokens"] == 512
+
+    async def test_explicit_output_cap_wins_over_the_reservation(self):
+        endpoint = EndpointConfig(
+            base_url="https://example.invalid/v1",
+            api_key="k",
+            model_name="m",
+            tokenizer_family="char_heuristic",
+            context_window=8192,
+            output_reservation=512,
+            max_output_tokens=2048,
+        )
+        seen: list[dict] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(json.loads(request.content))
+            return json_response(completion())
+
+        await call_llm(endpoint, MESSAGES, transport=httpx.MockTransport(handler))
+        assert seen[0]["max_tokens"] == 2048
+
 
 class TestLogging:
     @pytest.fixture

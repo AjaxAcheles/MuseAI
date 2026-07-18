@@ -8,6 +8,7 @@ needs no mocking at all.
 from __future__ import annotations
 
 import json
+import logging
 from itertools import product
 from types import SimpleNamespace
 
@@ -325,6 +326,49 @@ async def test_plan_beat_writes_ordered_rows_with_pad_constraints(seeded, monkey
     pointer = delta["fsm_pointer"]
     assert pointer.chapter_id == chapter_id
     assert pointer.beat_index == 0
+
+
+async def test_plan_beat_trims_the_prompt_to_a_declared_context_window(
+    seeded, monkeypatch, caplog
+):
+    """A declared context window makes the planner trim its prompt to leave the
+    reservation free — without one, the prompt is sent untrimmed (large models)."""
+    chapter_id = _seed_active_chapter(seeded)
+    seeded.endpoint.context_window = 120
+    seeded.endpoint.output_reservation = 20
+
+    async def fake_call_llm(endpoint, messages, **kwargs):
+        return _response(BEATS_JSON)
+
+    patch_planner_llm(monkeypatch, beat=fake_call_llm)
+
+    with caplog.at_level(logging.INFO, logger="museai"):
+        await plan_beat(_state(chapter_id))
+
+    pruned = [r.getMessage() for r in caplog.records if "event=context_pruned" in r.getMessage()]
+    assert pruned, "a declared context window must trigger pruning"
+    assert "budget=100" in pruned[0]  # context_window 120 - output_reservation 20
+
+    # The plan still completes off the trimmed prompt.
+    conn = connect_db(seeded.db_path)
+    rows = get_beats_for_chapter(conn, chapter_id)
+    conn.close()
+    assert [row["ordering"] for row in rows] == [1, 2]
+
+
+async def test_plan_beat_does_not_trim_without_a_context_window(seeded, monkeypatch, caplog):
+    """The default (no window) path sends the prompt untrimmed and logs no prune."""
+    chapter_id = _seed_active_chapter(seeded)
+
+    async def fake_call_llm(endpoint, messages, **kwargs):
+        return _response(BEATS_JSON)
+
+    patch_planner_llm(monkeypatch, beat=fake_call_llm)
+
+    with caplog.at_level(logging.INFO, logger="museai"):
+        await plan_beat(_state(chapter_id))
+
+    assert not any("event=context_pruned" in r.getMessage() for r in caplog.records)
 
 
 async def test_plan_beat_publishes_an_obligation_gap(seeded, monkeypatch):

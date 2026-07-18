@@ -25,11 +25,16 @@ import sqlite3
 
 from museai.core.logging_setup import get_fsm_logger, log_node_event
 from museai.core.stream_bus import bus
+from museai.fsm.nodes.context_budget import (
+    pop_back,
+    pop_front,
+    prune_to_budget,
+    window_budget,
+)
 from museai.fsm.nodes.deps import PlanningError, get_node_config
 from museai.fsm.pad import PAD_AXES
 from museai.fsm.state import FSM_Pointer, OrchestratorState
 from museai.llm.prompts import render_messages
-from museai.llm.tokenizer import count_message_tokens
 from museai.memory.db import (
     connect_db,
     get_beats_for_chapter,
@@ -62,14 +67,6 @@ def drafter_messages(package: dict) -> list[dict]:
         characters=package["characters"],
         recent_prose=package["recent_prose"],
         research_mode=get_node_config().generation.research_mode,
-    )
-
-
-def _count(package: dict, config) -> int:
-    # The budget is measured against the endpoint the drafter will send to.
-    endpoint = config.endpoint_for("drafter")
-    return count_message_tokens(
-        drafter_messages(package), endpoint.tokenizer_family, endpoint.model_name
     )
 
 
@@ -168,43 +165,43 @@ def _characters(conn: sqlite3.Connection, project_id: str) -> list[dict]:
 
 
 def _prune_to_budget(package: dict, config) -> dict:
-    """Drop context until the rendered prompt fits ``context_token_budget``.
+    """Drop context until the rendered drafter prompt fits the budget.
 
-    Returns a report of what was dropped and the final token count.
+    The budget is ``context_token_budget``, tightened to the endpoint's declared
+    context window (leaving output_reservation free) when one is set — so a small
+    model never leaves zero room to generate. Drop order, cheapest first: oldest
+    recent prose (the newest passage is what the beat continues), then the
+    lowest-priority open threads (``get_open_threads`` sorts them descending, so
+    the tail is cheapest). Returns a report of what was dropped.
     """
-    budget = config.generation.context_token_budget
-    before = _count(package, config)
-    dropped_prose = 0
-    dropped_threads = 0
-
-    # 1. Oldest recent prose first — the newest passage is what the beat continues.
-    while _count(package, config) > budget and package["recent_prose"]:
-        package["recent_prose"].pop(0)
-        dropped_prose += 1
-
-    # 2. Then the lowest-priority open threads. ``get_open_threads`` returns them
-    #    already sorted by priority_score descending, so the tail is cheapest.
-    while _count(package, config) > budget and package["threads"]:
-        package["threads"].pop()
-        dropped_threads += 1
-
-    after = _count(package, config)
-    if after > budget:
+    endpoint = config.endpoint_for("drafter")
+    budget = window_budget(endpoint, fallback=config.generation.context_token_budget)
+    report = prune_to_budget(
+        budget=budget,
+        render=lambda: drafter_messages(package),
+        tokenizer_family=endpoint.tokenizer_family,
+        model_name=endpoint.model_name,
+        drops=[
+            ("prose", lambda: pop_front(package["recent_prose"])),
+            ("threads", lambda: pop_back(package["threads"])),
+        ],
+    )
+    if report["over_budget"]:
         get_fsm_logger().warning(
             "node=assemble_context protected context exceeds budget: "
             "tokens=%d budget=%d beat_id=%s; drafting over budget",
-            after,
+            report["tokens"],
             budget,
             package["beat"]["id"],
         )
 
     return {
-        "budget": budget,
-        "tokens_before": before,
-        "tokens": after,
-        "dropped_prose_passages": dropped_prose,
-        "dropped_threads": dropped_threads,
-        "over_budget": after > budget,
+        "budget": report["budget"],
+        "tokens_before": report["tokens_before"],
+        "tokens": report["tokens"],
+        "dropped_prose_passages": report["dropped"]["prose"],
+        "dropped_threads": report["dropped"]["threads"],
+        "over_budget": report["over_budget"],
     }
 
 

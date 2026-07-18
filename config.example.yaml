@@ -49,6 +49,15 @@ endpoint:
   # ollama serve) or a Modelfile `PARAMETER num_ctx 16384`. Leave null to send
   # nothing extra.
   extra_body: null
+  # The model's real context window, in tokens. When set, MuseAI trims assembled
+  # prompts (planners and drafting) to leave output_reservation tokens free — so
+  # a small window never fills up and leaves zero room to generate, whatever the
+  # endpoint. Endpoint-agnostic (not just Ollama). Set this to your model's
+  # window when running small local models. null = trust the endpoint, no trim.
+  context_window: null
+  # Tokens kept free for generation under context_window; also sent as max_tokens
+  # when context_window is set and max_output_tokens is null.
+  output_reservation: 1024
 
 # Generation shape.
 generation:

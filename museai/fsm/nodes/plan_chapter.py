@@ -17,10 +17,12 @@ reasoning against that budget, and a plan truncated mid-array parses to nothing.
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 
 from museai.core.logging_setup import log_node_event
 from museai.core.stream_bus import bus
+from museai.fsm.nodes.context_budget import pop_back, prune_to_budget, window_budget
 from museai.fsm.nodes.deps import PlanningError, get_node_config
 from museai.fsm.plan_validation import validate_concrete_obligation
 from museai.fsm.state import FSM_Pointer, OrchestratorState
@@ -183,18 +185,48 @@ async def plan_chapter(state: OrchestratorState) -> dict:
                 characters=len(characters),
             )
 
-            messages = render_messages(
-                "chapter_planner",
-                project={
-                    "genre": project["genre"] or "",
-                    "premise": project["premise"] or "",
-                    "setting": project["setting"] or "",
-                },
-                arc={"description": arc["description"]},
-                threads=_thread_context(threads),
-                characters=_character_context(characters),
-                research_mode=config.generation.research_mode,
-            )
+            thread_ctx = _thread_context(threads)
+            character_ctx = _character_context(characters)
+
+            def _render() -> list[dict]:
+                return render_messages(
+                    "chapter_planner",
+                    project={
+                        "genre": project["genre"] or "",
+                        "premise": project["premise"] or "",
+                        "setting": project["setting"] or "",
+                    },
+                    arc={"description": arc["description"]},
+                    threads=thread_ctx,
+                    characters=character_ctx,
+                    research_mode=config.generation.research_mode,
+                )
+
+            # Trim to leave generation room when the endpoint declares a window.
+            # The project, arc, and cast are the instructions; only the
+            # lowest-priority open threads are shed.
+            chapter_endpoint = config.endpoint_for("chapter_planner")
+            budget = window_budget(chapter_endpoint)
+            if budget is not None:
+                report = prune_to_budget(
+                    budget=budget,
+                    render=_render,
+                    tokenizer_family=chapter_endpoint.tokenizer_family,
+                    model_name=chapter_endpoint.model_name,
+                    drops=[("threads", lambda: pop_back(thread_ctx))],
+                )
+                log_node_event(
+                    "plan_chapter",
+                    level=logging.WARNING if report["over_budget"] else logging.INFO,
+                    event="context_pruned",
+                    arc_id=arc["id"],
+                    budget=report["budget"],
+                    tokens_before=report["tokens_before"],
+                    tokens=report["tokens"],
+                    over_budget=report["over_budget"],
+                    dropped_threads=report["dropped"]["threads"],
+                )
+            messages = _render()
             async def on_tool_call(event: dict) -> None:
                 log_node_event(
                     "plan_chapter",

@@ -78,6 +78,14 @@ class EndpointConfig(BaseModel):
     # for server-specific knobs the OpenAI shape has no field for — notably
     # Ollama's context window: extra_body={"options": {"num_ctx": 16384}}.
     extra_body: dict[str, Any] | None = None
+    # The model's real context window, in tokens. When set, MuseAI trims assembled
+    # prompts (planners and drafting) to leave output_reservation tokens free, so
+    # a small window never leaves zero room to generate. None = trust the endpoint
+    # and do not trim (large models). Endpoint-agnostic: not tied to Ollama.
+    context_window: int | None = None
+    # Tokens kept free for the model to generate under context_window. Also sent
+    # as max_tokens when context_window is set and max_output_tokens is unset.
+    output_reservation: int = 1024
 
     @field_validator("api_key")
     @classmethod
@@ -104,6 +112,8 @@ class AgentEndpointOverride(BaseModel):
     temperature: float | None = None
     max_output_tokens: int | None = None
     extra_body: dict[str, Any] | None = None
+    context_window: int | None = None
+    output_reservation: int | None = None
 
     @field_validator("api_key")
     @classmethod

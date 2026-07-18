@@ -31,6 +31,11 @@ import sqlite3
 
 from museai.core.logging_setup import get_fsm_logger, log_node_event
 from museai.core.stream_bus import bus
+from museai.fsm.nodes.context_budget import (
+    pop_front,
+    prune_to_budget,
+    window_budget,
+)
 from museai.fsm.nodes.deps import PlanningError, get_node_config
 from museai.fsm.pad import PAD_AXES, resolve_pad_constraint
 from museai.fsm.state import FSM_Pointer, OrchestratorState
@@ -522,24 +527,60 @@ async def plan_beat(state: OrchestratorState) -> dict:
             )
 
             obligations = _chapter_obligations(chapter["obligations"])
-            messages = render_messages(
-                "beat_planner",
-                chapter={
-                    "description": chapter["description"],
-                    "obligations": obligations,
-                },
-                story_position={
-                    "arc_description": _arc_description(conn, chapter["arc_id"]),
-                    "chapter_ordering": chapter["ordering"],
-                    "chapter_count": len(all_chapters),
-                },
-                sibling_chapters=siblings,
-                already_dramatized=dramatized,
-                threads=threads,
-                characters=characters,
-                recent_prose=[row["prose"] for row in recent],
-                research_mode=config.generation.research_mode,
-            )
+            arc_description = _arc_description(conn, chapter["arc_id"])
+            recent_prose = [row["prose"] for row in recent]
+
+            def _render() -> list[dict]:
+                return render_messages(
+                    "beat_planner",
+                    chapter={
+                        "description": chapter["description"],
+                        "obligations": obligations,
+                    },
+                    story_position={
+                        "arc_description": arc_description,
+                        "chapter_ordering": chapter["ordering"],
+                        "chapter_count": len(all_chapters),
+                    },
+                    sibling_chapters=siblings,
+                    already_dramatized=dramatized,
+                    threads=threads,
+                    characters=characters,
+                    recent_prose=recent_prose,
+                    research_mode=config.generation.research_mode,
+                )
+
+            # When the endpoint declares a context window, trim the prompt to
+            # leave room to generate — otherwise a small window fills up and the
+            # reply comes back empty at finish_reason "length". The chapter spec,
+            # arc, and cast are the instructions and are never dropped.
+            beat_endpoint = config.endpoint_for("beat_planner")
+            budget = window_budget(beat_endpoint)
+            if budget is not None:
+                report = prune_to_budget(
+                    budget=budget,
+                    render=_render,
+                    tokenizer_family=beat_endpoint.tokenizer_family,
+                    model_name=beat_endpoint.model_name,
+                    drops=[
+                        ("recent_prose", lambda: pop_front(recent_prose)),
+                        ("dramatized", lambda: pop_front(dramatized)),
+                        ("siblings", lambda: pop_front(siblings)),
+                        ("threads", lambda: pop_front(threads)),
+                    ],
+                )
+                log_node_event(
+                    "plan_beat",
+                    level=logging.WARNING if report["over_budget"] else logging.INFO,
+                    event="context_pruned",
+                    chapter_id=chapter["id"],
+                    budget=report["budget"],
+                    tokens_before=report["tokens_before"],
+                    tokens=report["tokens"],
+                    over_budget=report["over_budget"],
+                    **{f"dropped_{name}": n for name, n in report["dropped"].items()},
+                )
+            messages = _render()
             async def on_tool_call(event: dict) -> None:
                 log_node_event(
                     "plan_beat",
