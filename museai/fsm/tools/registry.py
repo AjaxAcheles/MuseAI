@@ -111,16 +111,19 @@ TOOL_IMPLS: dict[str, Callable[..., Any]] = {
 # and the cast's voices; the reviser checks its drafts and splices; the critic
 # gets the broadest read-only continuity surface.
 AGENT_TOOLS: dict[str, tuple[str, ...]] = {
+    # The seed, open threads, and cast are already in the planner's <context>
+    # block, so get_seed_contract / get_thread_status are omitted here: a weak
+    # model that "gathers context" by calling them just burns its bounded
+    # iterations re-fetching what it was handed. What remains surfaces detail the
+    # context block does not: cross-arc outline, per-thread history, canonical
+    # records by id, and plan-node validation.
     "chapter_planner": (
-        "get_seed_contract",
         "get_full_outline",
         "get_thread_history",
-        "get_thread_status",
         "get_canonical_state",
         "check_plan_node",
     ),
     "beat_planner": (
-        "get_seed_contract",
         "get_current_pointer_context",
         "get_chapter_context",
         "get_character_emotion_history",

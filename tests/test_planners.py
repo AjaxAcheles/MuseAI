@@ -803,12 +803,15 @@ async def test_each_planner_is_offered_its_own_tool_roster(seeded, monkeypatch):
     chapter_id = chapter_id_for(ARC_ID, 1)
     await plan_beat(_state(chapter_id))
 
+    # get_seed_contract and get_thread_status are deliberately absent: the seed,
+    # threads, and cast are already in the planner's <context> block, so offering
+    # tools to re-fetch them only invites a weak model to burn its iterations.
     assert [t["function"]["name"] for t in offered["chapter_planner"]] == [
-        "get_seed_contract", "get_full_outline", "get_thread_history",
-        "get_thread_status", "get_canonical_state", "check_plan_node",
+        "get_full_outline", "get_thread_history",
+        "get_canonical_state", "check_plan_node",
     ]
     assert [t["function"]["name"] for t in offered["beat_planner"]] == [
-        "get_seed_contract", "get_current_pointer_context", "get_chapter_context",
+        "get_current_pointer_context", "get_chapter_context",
         "get_character_emotion_history", "get_canonical_state", "check_plan_node",
     ]
 
