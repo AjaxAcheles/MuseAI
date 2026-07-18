@@ -10,7 +10,7 @@ from __future__ import annotations
 import os
 import re
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import yaml
 from dotenv import load_dotenv
@@ -74,6 +74,10 @@ class EndpointConfig(BaseModel):
     # v1.02 wire-format finding: some endpoints bill hidden reasoning against
     # this budget. Truncation is detected via finish_reason either way.
     max_output_tokens: int | None = None
+    # Merged verbatim into every request body. The endpoint-agnostic escape hatch
+    # for server-specific knobs the OpenAI shape has no field for — notably
+    # Ollama's context window: extra_body={"options": {"num_ctx": 16384}}.
+    extra_body: dict[str, Any] | None = None
 
     @field_validator("api_key")
     @classmethod
@@ -99,6 +103,7 @@ class AgentEndpointOverride(BaseModel):
     stream_read_timeout: int | None = None
     temperature: float | None = None
     max_output_tokens: int | None = None
+    extra_body: dict[str, Any] | None = None
 
     @field_validator("api_key")
     @classmethod

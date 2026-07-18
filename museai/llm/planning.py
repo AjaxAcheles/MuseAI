@@ -50,6 +50,7 @@ from museai.llm.structured import (
     StructuredOutputError,
     TruncatedResponseError,
     parse_json_array,
+    truncation_remedy,
 )
 
 # Carries the validation error verbatim. A model that wrote `("It was stronger")`
@@ -168,6 +169,7 @@ async def call_llm_for_json_array(
     last_text = ""
     last_error = ""
     last_truncated = False
+    reset_done = False
 
     def _parse(text: str, *, repair: bool = False) -> list[dict]:
         planned = parse_json_array(
@@ -189,9 +191,10 @@ async def call_llm_for_json_array(
         if last_truncated:
             # Do not parse a truncated reply: a balanced inner fragment of a
             # half-written array can pass for the plan (and once did).
+            empty = not last_text.strip()
             last_error = (
-                f"the {what} reply was cut off at the endpoint's output token "
-                f"limit (finish_reason='length')"
+                f"the {what} reply was cut off (finish_reason='length'): "
+                + truncation_remedy(empty=empty)
             )
             log_node_event(
                 node,
@@ -200,10 +203,23 @@ async def call_llm_for_json_array(
                 what=what,
                 attempt=attempt + 1,
                 retries=retries,
+                empty=empty,
                 error=last_error[:200],
             )
             if attempt == retries:
                 break
+            if empty:
+                # Zero output tokens: the prompt filled the context window, so
+                # there was no room to generate. Asking for a shorter *reply* is
+                # futile, and a correction only enlarges the prompt. Instead drop
+                # any accreted tool turns back to the original prompt and retry
+                # once from that minimal base; if even that will not fit, nothing
+                # here can shrink it — fail fast rather than truncate identically.
+                if reset_done:
+                    break
+                reset_done = True
+                conversation = list(messages)
+                continue
             assistant_content = _TRUNCATED_REPLY_MARKER
             correction = _TRUNCATION_CORRECTION_TEMPLATE
         elif not last_text.strip():
@@ -252,11 +268,10 @@ async def call_llm_for_json_array(
         ]
 
     if last_truncated:
-        # Repairing half a written array is nonsense; name the actual knob.
+        # Repairing half a written array is nonsense; name the actual cause.
         raise TruncatedResponseError(
-            f"every {what} reply was cut off at the endpoint's output token "
-            f"limit; raise endpoint.max_output_tokens (or leave it unset to "
-            f"omit the cap) or ask for a shorter plan"
+            f"every {what} reply was cut off (finish_reason='length'): "
+            + truncation_remedy(empty=not last_text.strip())
         )
 
     # Last rung: the model will not fix its own quoting, so we do — and say so.

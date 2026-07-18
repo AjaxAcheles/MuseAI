@@ -34,7 +34,11 @@ from museai.fsm.tools.loop import run_agent_loop
 from museai.fsm.tools.registry import tool_impls_for, tool_specs_for
 from museai.llm.prompts import render_messages
 from museai.llm.tokenizer import count_message_tokens
-from museai.llm.structured import StructuredOutputError, validate_plain_text_response
+from museai.llm.structured import (
+    StructuredOutputError,
+    truncation_remedy,
+    validate_plain_text_response,
+)
 
 PHASE = "Drafting"
 
@@ -216,9 +220,8 @@ async def _rewrite(config, messages: list[dict], what: str, beat_id: str) -> str
     # into the draft is worse than failing.
     if response.finish_reason == "length":
         raise DraftingError(
-            f"the revision of {what} was truncated at the endpoint's output "
-            f"token limit (finish_reason='length'); raise "
-            f"endpoint.max_output_tokens or leave it unset to omit the cap"
+            f"the revision of {what} was cut off (finish_reason='length'): "
+            + truncation_remedy(empty=not response.text.strip())
         )
     try:
         revised = validate_plain_text_response(response.text, what=f"revision of {what}")

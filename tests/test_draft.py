@@ -196,8 +196,9 @@ async def test_an_empty_truncated_draft_names_the_cause_not_just_the_symptom(
     configured, monkeypatch
 ):
     """A reasoning model can burn its whole budget inside <think>, returning no
-    prose at all. "No prose" would be true and useless; the operator needs the
-    truncation and the knob."""
+    prose at all. "No prose" would be true and useless; and zero output at
+    finish_reason "length" is context-window exhaustion, so the operator needs
+    the real knob — the window (num_ctx), not the output cap."""
 
     async def truncated(endpoint, messages, *, stream=False, on_token=None, **kwargs):
         reply = _Response("")
@@ -206,7 +207,7 @@ async def test_an_empty_truncated_draft_names_the_cause_not_just_the_symptom(
 
     monkeypatch.setattr(loop_module, "call_llm", truncated)
 
-    with pytest.raises(DraftingError, match="truncated"):
+    with pytest.raises(DraftingError, match="context window"):
         await draft_prose(_state())
 
 

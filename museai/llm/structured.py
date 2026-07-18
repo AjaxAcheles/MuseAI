@@ -104,6 +104,30 @@ class AmbiguousStructuredOutputError(StructuredOutputError):
     """More than one complete payload could be read from one model reply."""
 
 
+def truncation_remedy(*, empty: bool) -> str:
+    """Remediation clause for a ``finish_reason == "length"`` failure.
+
+    ``empty`` distinguishes the two ways a reply gets cut off, which need
+    different fixes. Zero output tokens means the prompt filled the endpoint's
+    context window and left no room to generate — widening the output cap does
+    nothing; the window has to grow or the prompt has to shrink. A non-empty
+    reply that stopped mid-array is a genuine output-length limit, where
+    ``max_output_tokens`` is the right knob.
+    """
+    if empty:
+        return (
+            "the prompt filled the endpoint's context window and left no room to "
+            "generate (zero output tokens). Widen the model's context window "
+            "(for Ollama: set OLLAMA_CONTEXT_LENGTH, a Modelfile 'num_ctx', or "
+            "endpoint.extra_body={'options': {'num_ctx': N}}), shorten the "
+            "prompt, or ask for a shorter answer"
+        )
+    return (
+        "raise endpoint.max_output_tokens (or leave it unset to omit the cap) "
+        "or ask for a shorter answer"
+    )
+
+
 def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     """Build a JSON object while rejecting duplicate keys instead of losing one."""
     result: dict[str, Any] = {}

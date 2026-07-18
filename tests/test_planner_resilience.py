@@ -425,20 +425,36 @@ class TestTruncatedAndEmptyReplies:
         with pytest.raises(TruncatedResponseError, match="max_output_tokens"):
             await _plan_beats(seeded, retries=1)
 
-    async def test_an_empty_truncated_reply_is_truncation_not_emptiness(
+    async def test_persistent_empty_truncation_names_the_context_window(
+        self, seeded, scripted
+    ):
+        """Empty + length is context-window exhaustion, not an output-cap hit,
+        so the raised error must point at the window (num_ctx), not the cap."""
+        scripted([_Response("", finish_reason="length")])
+        with pytest.raises(TruncatedResponseError, match="num_ctx"):
+            await _plan_beats(seeded, retries=1)
+
+    async def test_an_empty_truncated_reply_resets_instead_of_growing(
         self, seeded, scripted, caplog
     ):
-        """A reasoning model that spent its whole budget thinking returns empty
-        text with finish_reason "length". That is truncation — the empty-reply
-        correction would ask it to try again at the same doomed cap."""
+        """Empty text with finish_reason "length" means the prompt filled the
+        context window, leaving no room to generate. Asking for a "shorter"
+        reply is futile — there is no output to shorten — and appending a
+        correction only enlarges the prompt. The retry drops back to the
+        original messages instead of growing them, and the log flags empty=True
+        so the operator sees the real cause (context window, not output cap)."""
         seen = scripted([_Response("", finish_reason="length"), VALID_BEAT_PLAN])
         with caplog.at_level(logging.WARNING, logger="museai"):
             beats = await _plan_beats(seeded, retries=2)
 
         assert len(beats) == 1
-        assert "shorter" in seen[1][-1]["content"]
+        # No "shorter" correction, and the retry is no larger than the first
+        # attempt — the ladder does not pile tokens onto an already-full window.
+        assert "shorter" not in seen[1][-1]["content"]
+        assert len(seen[1]) == len(seen[0])
         messages = [record.getMessage() for record in caplog.records]
         assert any("event=truncated" in message for message in messages)
+        assert any("empty=True" in message for message in messages)
         assert not any("event=empty_reply" in message for message in messages)
 
     async def test_a_truncated_last_reply_is_never_quote_repaired(

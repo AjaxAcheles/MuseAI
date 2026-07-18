@@ -36,7 +36,11 @@ from museai.fsm.state import OrchestratorState
 from museai.fsm.tools.loop import run_agent_loop
 from museai.fsm.tools.registry import tool_impls_for, tool_specs_for
 from museai.llm.prompts import render_messages
-from museai.llm.structured import StructuredOutputError, parse_failure_objects
+from museai.llm.structured import (
+    StructuredOutputError,
+    parse_failure_objects,
+    truncation_remedy,
+)
 
 PHASE = "Auditing"
 CRITIC_NAME = "continuity_critic"
@@ -172,8 +176,8 @@ async def adversarial_critics(state: OrchestratorState) -> dict:
         try:
             if last_truncated:
                 raise StructuredOutputError(
-                    "critic reply was cut off at the endpoint output token limit "
-                    "(finish_reason='length')"
+                    "critic reply was cut off (finish_reason='length'): "
+                    + truncation_remedy(empty=not last_text.strip())
                 )
             failures = parse_failure_objects(response.text)
             break

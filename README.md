@@ -41,6 +41,20 @@ All thresholds, caps, targets, and endpoint details live in `config.yaml`.
 Configuration is validated strictly at boot: an unknown or mistyped key is a
 fatal error. See `config.example.yaml` for every available key.
 
+### Small local models (Ollama context window)
+
+MuseAI's planner prompts run a few thousand tokens. Ollama's default context
+window is smaller than that, so the prompt fills the window and generation gets
+no room — every reply comes back truncated (`finish_reason "length"` with zero
+output tokens), and planning fails. Widen the window before running a small
+local model:
+
+- **Env var (reliable):** `OLLAMA_CONTEXT_LENGTH=16384 ollama serve`
+- **Modelfile:** `PARAMETER num_ctx 16384`, then `ollama create`
+- **Per-request (some builds only):** set `endpoint.extra_body` in `config.yaml`
+  to `{ options: { num_ctx: 16384 } }` — note some Ollama builds ignore
+  `options` on the OpenAI-compatible `/v1` endpoint.
+
 ## How to run
 
 Start the web UI at the configured `host`/`port`:

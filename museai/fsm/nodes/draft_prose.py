@@ -22,7 +22,11 @@ from museai.core.stream_bus import bus
 from museai.fsm.nodes.assemble_context import drafter_messages
 from museai.fsm.nodes.deps import DraftingError, get_node_config
 from museai.fsm.state import OrchestratorState
-from museai.llm.structured import StructuredOutputError, validate_plain_text_response
+from museai.llm.structured import (
+    StructuredOutputError,
+    truncation_remedy,
+    validate_plain_text_response,
+)
 from museai.fsm.tools.loop import run_agent_loop
 from museai.fsm.tools.registry import tool_impls_for, tool_specs_for
 
@@ -100,9 +104,8 @@ async def draft_prose(state: OrchestratorState) -> dict:
     # stop mid-sentence, and "no prose" would name neither the cause nor the fix.
     if response.finish_reason == "length":
         raise DraftingError(
-            f"the draft for beat {beat_id!r} was truncated at the endpoint's "
-            f"output token limit (finish_reason='length'); raise "
-            f"endpoint.max_output_tokens or leave it unset to omit the cap"
+            f"the draft for beat {beat_id!r} was cut off (finish_reason='length'): "
+            + truncation_remedy(empty=not response.text.strip())
         )
     try:
         draft = validate_plain_text_response(response.text, what=f"draft for beat {beat_id!r}")

@@ -38,6 +38,17 @@ endpoint:
   # cap when it is absent. Truncation (finish_reason "length") is detected and
   # reported either way.
   max_output_tokens: null
+  # Merged verbatim into every request body — the escape hatch for server knobs
+  # the OpenAI shape has no field for. The important one for small local models
+  # is Ollama's context window: its default (a few thousand tokens) is smaller
+  # than MuseAI's planner prompts, so generation gets zero room and every reply
+  # comes back truncated (finish_reason "length", zero output). Widen it:
+  #   extra_body: { options: { num_ctx: 16384 } }
+  # Note: some Ollama builds ignore `options` on the /v1 endpoint. The reliable
+  # levers are the OLLAMA_CONTEXT_LENGTH env var (e.g. OLLAMA_CONTEXT_LENGTH=16384
+  # ollama serve) or a Modelfile `PARAMETER num_ctx 16384`. Leave null to send
+  # nothing extra.
+  extra_body: null
 
 # Generation shape.
 generation:

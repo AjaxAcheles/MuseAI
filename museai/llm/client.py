@@ -816,6 +816,14 @@ async def call_llm(
     """
     if max_tokens is None:
         max_tokens = endpoint.max_output_tokens
+    # The endpoint's configured extra_body is the base; a per-call extra_body
+    # (rare) overrides key-by-key. Merged here so every caller benefits without
+    # threading the config through — e.g. Ollama's options.num_ctx.
+    if endpoint.extra_body:
+        merged_extra = dict(endpoint.extra_body)
+        if extra_body:
+            merged_extra.update(extra_body)
+        extra_body = merged_extra
     url, headers, body = _build_request(
         endpoint,
         messages,
