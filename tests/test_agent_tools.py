@@ -428,6 +428,14 @@ class TestCheckPlanNode:
         })
         assert verdict == {"valid": True, "node_type": "chapter", "problems": []}
 
+    def test_a_placeholder_chapter_obligation_is_named(self, world):
+        verdict = check_plan_node({
+            "description": "Mara rows to the mainland.",
+            "obligations": ["An event that must occur"],
+        })
+        assert verdict["valid"] is False
+        assert "output-format placeholder" in verdict["problems"][0]
+
 
 class TestFindRepetition:
     def test_a_copied_paragraph_is_found(self, world):

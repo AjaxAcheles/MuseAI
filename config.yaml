@@ -1,17 +1,12 @@
-project_id: the-last-postcard
+project_id: last-train-signal
 endpoint:
   base_url: http://127.0.0.1:11434/v1
   api_key: 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
-  model_name: cryptidbleh/gemma4-claude-opus-4.6:latest
+  model_name: qwen3.5:2b
   tokenizer_family: char_heuristic
   request_timeout: 60
-  # Maximum silent gap between streamed chunks. Separate from request_timeout
-  # (connect/write): a reasoning model legitimately pauses minutes mid-stream.
   stream_read_timeout: 300
-  temperature: 0.88
-  # Sent as max_tokens when set. Leave null to omit the field — some endpoints
-  # bill hidden reasoning against this budget. Truncation (finish_reason
-  # "length") is detected and reported either way.
+  temperature: 0.85
   max_output_tokens: null
 generation:
   word_count_target: null
@@ -69,10 +64,8 @@ generation:
   intensity_hot_threshold: 0.6
   intensity_flat_fraction: 0.8
   research_mode: false
-  # Per tool name, across one whole agent loop. 6, not 3: a critic that issues
-  # one batch of three parallel searches must still be able to search again.
   tool_call_cap: 6
-  tool_timeout: 30
+  tool_timeout: 30.0
 agents: {}
 log_level: INFO
 host: 127.0.0.1

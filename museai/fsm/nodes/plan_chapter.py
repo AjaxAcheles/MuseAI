@@ -22,6 +22,7 @@ import sqlite3
 from museai.core.logging_setup import log_node_event
 from museai.core.stream_bus import bus
 from museai.fsm.nodes.deps import PlanningError, get_node_config
+from museai.fsm.plan_validation import validate_concrete_obligation
 from museai.fsm.state import FSM_Pointer, OrchestratorState
 from museai.fsm.tools.registry import tool_impls_for, tool_specs_for
 from museai.llm.planning import call_llm_for_json_array
@@ -83,7 +84,7 @@ def _first_unfinished(rows: list[sqlite3.Row]) -> int:
 
 
 def _normalise_obligations(value: object, ordering: int) -> list[str]:
-    """Coerce a chapter's obligations to a list of non-empty strings."""
+    """Normalize a chapter's already-validated concrete obligations."""
     if value is None:
         return []
     if isinstance(value, str):
@@ -93,7 +94,14 @@ def _normalise_obligations(value: object, ordering: int) -> list[str]:
             f"chapter {ordering}: obligations must be a JSON array of strings, "
             f"got {type(value).__name__}"
         )
-    return [str(item).strip() for item in value if str(item).strip()]
+    normalized: list[str] = []
+    for position, item in enumerate(value, start=1):
+        text, problem = validate_concrete_obligation(item)
+        if problem:
+            raise PlanningError(f"chapter {ordering} obligation {position} {problem}")
+        assert text is not None
+        normalized.append(text)
+    return normalized
 
 
 _CHAPTER_PLAN_KEYS = {"ordering", "description", "obligations"}
@@ -117,12 +125,14 @@ def _validate_chapter_item(item: dict, ordering: int) -> dict:
     if not isinstance(description, str) or not description.strip():
         raise StructuredOutputError(f"chapter {ordering} description must be a non-empty string")
     obligations = item.get("obligations")
-    if not isinstance(obligations, list) or any(
-        not isinstance(value, str) or not value.strip() for value in obligations
-    ):
+    if not isinstance(obligations, list) or not obligations:
         raise StructuredOutputError(
-            f"chapter {ordering} obligations must be an array of non-empty strings"
+            f"chapter {ordering} obligations must be a non-empty array of concrete strings"
         )
+    for position, value in enumerate(obligations, start=1):
+        _, problem = validate_concrete_obligation(value)
+        if problem:
+            raise StructuredOutputError(f"chapter {ordering} obligation {position} {problem}")
     return item
 
 

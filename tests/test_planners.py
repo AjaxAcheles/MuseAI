@@ -769,6 +769,56 @@ async def test_each_planner_is_offered_its_own_tool_roster(seeded, monkeypatch):
     ]
 
 
+async def test_plan_chapter_retries_placeholder_obligations_before_writing(seeded, monkeypatch):
+    placeholder = json.dumps([
+        {
+            "ordering": 1,
+            "description": "Mara catalogs the letters.",
+            "obligations": ["An event that must occur"],
+        }
+    ])
+    replies = [placeholder, CHAPTERS_JSON]
+    calls = 0
+
+    async def fake_call_llm(endpoint, messages, **kwargs):
+        nonlocal calls
+        reply = replies[min(calls, len(replies) - 1)]
+        calls += 1
+        return _response(reply)
+
+    patch_planner_llm(monkeypatch, chapter=fake_call_llm)
+    await plan_chapter(_state())
+
+    conn = connect_db(seeded.db_path)
+    rows = get_chapters_for_arc(conn, ARC_ID)
+    conn.close()
+    assert calls == 2
+    assert json.loads(rows[0]["obligations"]) == [
+        "Mara dates the earliest letter.", "Mara hides it from Idris."
+    ]
+
+
+async def test_plan_chapter_does_not_persist_stubborn_placeholder_plan(seeded, monkeypatch):
+    placeholder = json.dumps([
+        {
+            "ordering": 1,
+            "description": "Mara catalogs the letters.",
+            "obligations": ["An event that must occur"],
+        }
+    ])
+
+    async def fake_call_llm(endpoint, messages, **kwargs):
+        return _response(placeholder)
+
+    patch_planner_llm(monkeypatch, chapter=fake_call_llm)
+    with pytest.raises(StructuredOutputError, match="output-format placeholder"):
+        await plan_chapter(_state())
+
+    conn = connect_db(seeded.db_path)
+    assert get_chapters_for_arc(conn, ARC_ID) == []
+    conn.close()
+
+
 class TestPlannerItemSchemas:
     def test_chapter_fields_are_exact_and_strictly_typed(self):
         with pytest.raises(StructuredOutputError, match="unexpected fields"):
@@ -785,6 +835,22 @@ class TestPlannerItemSchemas:
             _validate_chapter_item(
                 {"ordering": "1", "description": "A chapter.", "obligations": []},
                 1,
+            )
+
+    @pytest.mark.parametrize("value", [
+        "An event that must occur",
+        "  A CONCRETE EVENT THAT MUST OCCUR  ",
+    ])
+    def test_chapter_placeholder_obligations_are_rejected(self, value):
+        with pytest.raises(StructuredOutputError, match="output-format placeholder"):
+            _validate_chapter_item(
+                {"ordering": 1, "description": "A chapter.", "obligations": [value]}, 1
+            )
+
+    def test_chapter_needs_at_least_one_obligation(self):
+        with pytest.raises(StructuredOutputError, match="non-empty array"):
+            _validate_chapter_item(
+                {"ordering": 1, "description": "A chapter.", "obligations": []}, 1
             )
 
     @pytest.mark.parametrize("value", ["0.5", True, None, float("nan"), float("inf")])

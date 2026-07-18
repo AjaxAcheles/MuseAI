@@ -1,38 +1,41 @@
 {
   "project": {
-    "id": "lantern-keeper",
-    "genre": "compact literary mystery",
-    "premise": "In one stormy night, a lighthouse keeper receives a letter in her own handwriting that predicts the lamp will fail before dawn unless she admits the truth she has hidden from her apprentice.",
-    "setting": "A one-lamp island light station off a cold coast: the lantern room, the oil store, the winding stair, and a cottage the sea spray never quite leaves alone. Everything the keeper owns is logged, salted, or rusting.",
-    "word_count_target": 1500
+    "id": "last-train-signal",
+    "genre": "compact contemporary suspense",
+    "premise": "During a forty-minute signal outage at an isolated mountain station, acting dispatcher Imani Vale must stop the last passenger train from entering a single-track tunnel where a maintenance crew is still working. Her only available radio battery belongs to the porter whose career she once damaged by blaming him for her own mistake.",
+    "setting": "Ridgeway Station during a sleet storm: a locked signal cabinet on the platform, a dispatch office with a wall clock and failing landline, a maintenance access road below the tracks, and one tunnel east of the station. The last train is due at 9:40 p.m.; the crew must clear the tunnel before it arrives."
   },
   "arcs": [
     {
-      "description": "Tell a complete short story in one compact arc: Mara receives the impossible warning, investigates the lantern room with Tomas, confesses that she ignored an earlier safety fault, and chooses to repair the light before dawn rather than preserve her pride."
+      "description": "Tell one complete, fast-moving arc over the forty minutes before the 9:40 p.m. train reaches Ridgeway. Open at 9:00 with Imani discovering that the signal has failed and the maintenance crew is still in the east tunnel. In the first quarter, establish the deadline, the failed landline, and Imani's reluctance to ask Porter Daniel Cross for his charged radio because she previously let him take blame for a missed safety call. In the second quarter, force Imani to choose transparency over control: tell Daniel the truth and ask for help, then learn the radio can reach the train only from the exposed platform cabinet. In the third quarter, tighten the physical problem with sleet, a jammed cabinet, and an update that the train is ahead of schedule; Daniel risks missing his own escape route to help Imani restore the manual stop signal. At the climax, Imani must use the radio to warn the train and openly state her prior fault rather than hide behind procedure. Resolve after the train stops short of the tunnel: the crew is safe, Daniel decides whether to accept her apology, and Imani records the incident honestly. Keep each turn causally linked, avoid detours, and let quiet aftermath occupy only the final beat after the deadline has been met."
     }
   ],
   "threads": [
     {
-      "description": "Who wrote the warning letter in Mara's handwriting?",
-      "priority_score": 0.9,
+      "id": "last-train-signal-thread-tunnel",
+      "description": "Can Imani warn the 9:40 p.m. train before it enters the occupied east tunnel? The answer must be resolved in the climax.",
+      "priority_score": 1.0,
       "status": "open"
     },
     {
-      "description": "Whether Mara will admit she concealed the cracked lens bracket before it endangers a ship.",
-      "priority_score": 0.8,
+      "id": "last-train-signal-thread-daniel",
+      "description": "Will Daniel Cross trust Imani after learning she let him carry blame for her earlier missed safety call? This relationship thread must progress through the urgent action and receive a concrete, non-forced resolution after the train stops.",
+      "priority_score": 0.9,
       "status": "open"
     }
   ],
   "characters": [
     {
-      "name": "Mara Vane",
-      "description": "The island's meticulous lighthouse keeper; proud of her competence and frightened that one mistake will define her.",
-      "pad": {"pleasure": -0.3, "arousal": 0.4, "dominance": 0.2}
+      "id": "last-train-signal-imani-vale",
+      "name": "Imani Vale",
+      "description": "Ridgeway's acting night dispatcher. Precise, capable, and accustomed to solving problems alone; beneath that control is guilt over a prior safety call she mishandled and allowed Daniel to be blamed for. She begins anxious and defensive, becomes openly accountable under pressure, and ends shaken but steadier because she told the truth before it was safe to do so. She knows the station layout, the train timetable, and the manual signal procedure, but cannot repair the damaged relay by herself.",
+      "pad": {"pleasure": -0.45, "arousal": 0.7, "dominance": 0.15}
     },
     {
-      "name": "Tomas Reed",
-      "description": "Mara's young apprentice; observant, loyal, and unwilling to let reverence stop him from asking hard questions.",
-      "pad": {"pleasure": -0.1, "arousal": 0.3, "dominance": -0.1}
+      "id": "last-train-signal-daniel-cross",
+      "name": "Daniel Cross",
+      "description": "The station porter and former signal apprentice. Careful, practical, and guarded around Imani after losing a promotion because of the blame she allowed to stand. He carries the only charged hand radio for his walk home and understands the platform cabinet's manual release. He begins wary and hurt, acts decisively when lives are at stake, and does not forgive Imani instantly; any softening must follow her specific admission and the completed rescue.",
+      "pad": {"pleasure": -0.35, "arousal": 0.45, "dominance": -0.1}
     }
   ]
 }

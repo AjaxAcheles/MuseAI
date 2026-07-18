@@ -11,6 +11,7 @@ from __future__ import annotations
 from typing import Any
 
 from museai.fsm.pad import PAD_AXES
+from museai.fsm.plan_validation import validate_concrete_obligation
 from museai.fsm.tools.project_db import project_connection
 from museai.memory.db import get_characters, get_threads_for_project
 
@@ -55,8 +56,9 @@ def _check_chapter(node: dict) -> list[str]:
         problems.append("obligations must be a non-empty list of concrete promises")
     else:
         for index, item in enumerate(obligations, start=1):
-            if not str(item or "").strip():
-                problems.append(f"obligation {index} is empty")
+            _, problem = validate_concrete_obligation(item)
+            if problem:
+                problems.append(f"obligation {index} {problem}")
     return problems
 
 

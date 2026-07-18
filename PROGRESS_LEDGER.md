@@ -1522,3 +1522,30 @@ looking fragment.
 - `.venv/win/Scripts/python.exe -m compileall -q museai` → success.
 - `.venv/win/Scripts/python.exe -m pytest -q --basetemp .venv/pytest-final2 -o cache_dir=.venv/pytest-cache-final2` → **710 passed** in 33.49s.
 - `git diff --check` → clean.
+
+## Post-v1.17 maintenance — chapter obligation placeholder rejection
+
+Chapter planning now rejects generic output-schema placeholders before they can
+be persisted and handed to beat planning as story obligations.
+
+**Fixes / changes**
+
+- Added `museai/fsm/plan_validation.py`, a pure shared validator that normalizes
+  whitespace and rejects only the observed generic output-format placeholders;
+  it deliberately does not make subjective judgments about story-specific prose.
+- `museai/fsm/nodes/plan_chapter.py` now requires each chapter to include a
+  non-empty obligation array of concrete strings. Placeholder output enters the
+  existing bounded planner correction path; exhausted retries write no chapters.
+- `museai/fsm/tools/check_plan_node.py` uses the same validator, so the
+  planner-visible self-check reports the exact issue before an answer is sent.
+- Added regressions for normalization, placeholder rejection, correction and
+  persistence of a repaired chapter plan, retry exhaustion without DB writes,
+  and the self-check response.
+
+**Done-check**
+
+- `uv run pytest -q tests/test_plan_validation.py tests/test_planners.py tests/test_agent_tools.py` → **114 passed**.
+- `uv run pytest -q` → **714 passed, 9 failed**. The failures are pre-existing
+  bundled-seed/UI expectation mismatches (`lantern-keeper`/Mara/Tomas/1500
+  expected while the current example seed supplies `last-train-signal`/Imani/
+  Daniel/no target); none exercise the changed validation boundary.
