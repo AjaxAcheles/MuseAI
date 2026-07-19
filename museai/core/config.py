@@ -20,6 +20,7 @@ from pydantic import (
     ValidationError,
     ValidationInfo,
     field_validator,
+    model_validator,
 )
 
 # Load .env once at import so ${VAR} references can be resolved.
@@ -83,14 +84,33 @@ class EndpointConfig(BaseModel):
     # a small window never leaves zero room to generate. None = trust the endpoint
     # and do not trim (large models). Endpoint-agnostic: not tied to Ollama.
     context_window: int | None = None
-    # Tokens kept free for the model to generate under context_window. Also sent
-    # as max_tokens when context_window is set and max_output_tokens is unset.
+    # Minimum tokens kept free for the model to generate under context_window;
+    # prompts are trimmed to leave at least this much room. When context_window
+    # is set and max_output_tokens is unset, max_tokens is the window's actual
+    # remainder after the prompt (never below this), so long output is not capped
+    # at the reservation when the window has headroom. Must be < context_window.
     output_reservation: int = 1024
 
     @field_validator("api_key")
     @classmethod
     def _resolve_env_ref(cls, value: str) -> str:
         return _resolve_env_api_key(value)
+
+    @model_validator(mode="after")
+    def _reservation_fits_window(self) -> "EndpointConfig":
+        # A reservation as wide as the window leaves no room for the prompt: the
+        # pruner would shed everything and still overflow. Fail at boot with the
+        # exact numbers rather than degrade silently at generation time.
+        if (
+            self.context_window is not None
+            and self.output_reservation >= self.context_window
+        ):
+            raise ValueError(
+                f"output_reservation ({self.output_reservation}) must be smaller "
+                f"than context_window ({self.context_window}); otherwise no prompt "
+                f"tokens fit"
+            )
+        return self
 
 
 class AgentEndpointOverride(BaseModel):

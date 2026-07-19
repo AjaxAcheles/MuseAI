@@ -55,8 +55,11 @@ endpoint:
   # endpoint. Endpoint-agnostic (not just Ollama). Set this to your model's
   # window when running small local models. null = trust the endpoint, no trim.
   context_window: null
-  # Tokens kept free for generation under context_window; also sent as max_tokens
-  # when context_window is set and max_output_tokens is null.
+  # Minimum tokens kept free for generation under context_window. Prompts are
+  # trimmed to leave at least this much room. When context_window is set and
+  # max_output_tokens is null, max_tokens is sent as the window's actual
+  # remainder after the prompt (at least this value) — so long prose is not
+  # capped at the reservation when the window has headroom. Must be < context_window.
   output_reservation: 1024
 
 # Generation shape.

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from museai.core.config import EndpointConfig
 from museai.fsm.nodes.context_budget import (
     pop_back,
@@ -41,6 +43,13 @@ class TestWindowBudget:
     def test_a_generous_window_lets_the_fallback_win(self):
         ep = _endpoint(context_window=100_000, output_reservation=1024)
         assert window_budget(ep, fallback=8000) == 8000
+
+    def test_budget_never_goes_negative(self):
+        # EndpointConfig rejects reservation >= window at boot, but the helper is
+        # clamped so any direct caller gets a floor of 0 rather than a negative
+        # budget that would ask the pruner to shed everything and still overflow.
+        stub = SimpleNamespace(context_window=512, output_reservation=1024)
+        assert window_budget(stub) == 0
 
 
 class TestPruneToBudget:

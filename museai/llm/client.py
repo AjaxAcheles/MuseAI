@@ -816,11 +816,19 @@ async def call_llm(
     """
     if max_tokens is None:
         max_tokens = endpoint.max_output_tokens
-    # With a declared context window but no explicit output cap, reserve the
-    # generation budget as max_tokens so an endpoint that would otherwise run
-    # unbounded (or apply its own small default) leaves the planned room.
+    # With a declared context window but no explicit output cap, reserve output
+    # room so an endpoint that would otherwise run unbounded (or apply its own
+    # small default) leaves the planned space. Cap at the room the window has
+    # left after this prompt — not a fixed reservation, which would silently
+    # strangle long prose whenever the window has ample headroom — but never
+    # below output_reservation (the prompt was trimmed to keep at least that
+    # much free).
     if max_tokens is None and endpoint.context_window is not None:
-        max_tokens = endpoint.output_reservation
+        prompt_tokens = count_message_tokens(
+            messages, endpoint.tokenizer_family, endpoint.model_name
+        )
+        room = endpoint.context_window - prompt_tokens
+        max_tokens = max(endpoint.output_reservation, room)
     # The endpoint's configured extra_body is the base; a per-call extra_body
     # (rare) overrides key-by-key. Merged here so every caller benefits without
     # threading the config through — e.g. Ollama's options.num_ctx.

@@ -371,6 +371,78 @@ async def test_plan_beat_does_not_trim_without_a_context_window(seeded, monkeypa
     assert not any("event=context_pruned" in r.getMessage() for r in caplog.records)
 
 
+async def test_plan_beat_sheds_closed_low_priority_threads_before_open_ones(
+    seeded, monkeypatch
+):
+    """Under budget pressure the beat planner drops the cheapest threads — the
+    closed, lowest-priority tail — never the open high-priority threads the
+    chapter must advance. Regression: the drop popped the wrong end (pop_front)
+    and shed the most important open thread first."""
+    from museai.llm.tokenizer import count_message_tokens
+
+    # A small open high-priority thread and a large closed lowest-priority one;
+    # the large one gives the budget a wide margin so this is not knife-edge.
+    conn = connect_db(seeded.db_path)
+    with conn:
+        upsert_thread(
+            conn,
+            id="thread-hi",
+            project_id=PROJECT_ID,
+            description="HIGHPRIOMARKER open thread",
+            status="open",
+            priority_score=0.95,
+        )
+        upsert_thread(
+            conn,
+            id="thread-lo",
+            project_id=PROJECT_ID,
+            description="LOWPRIOMARKER closed thread " + "detail " * 400,
+            status="closed",
+            priority_score=0.1,
+        )
+        # Two active chapters sharing those threads: one to measure the untrimmed
+        # prompt, one to observe the trim (plan_beat reuses beats, so re-planning
+        # the same chapter would skip the LLM call entirely).
+        for ordering in (1, 2):
+            upsert_chapter(
+                conn,
+                id=chapter_id_for(ARC_ID, ordering),
+                arc_id=ARC_ID,
+                ordering=ordering,
+                description="Mara catalogs the letters.",
+                obligations=json.dumps(["Mara dates the earliest letter."]),
+                status="active",
+            )
+    conn.close()
+
+    captured: list[list[dict]] = []
+
+    async def fake_call_llm(endpoint, messages, **kwargs):
+        captured.append(list(messages))
+        return _response(BEATS_JSON)
+
+    patch_planner_llm(monkeypatch, beat=fake_call_llm)
+
+    # Measure the full (untrimmed) prompt on chapter 1, both threads present.
+    await plan_beat(_state(chapter_id_for(ARC_ID, 1)))
+    full_tokens = count_message_tokens(
+        captured[-1], seeded.endpoint.tokenizer_family, seeded.endpoint.model_name
+    )
+    full_text = " ".join(m["content"] for m in captured[-1])
+    assert "HIGHPRIOMARKER" in full_text and "LOWPRIOMARKER" in full_text
+
+    # A window that only fits once the large closed thread is gone. The margin is
+    # ~200 tokens (half the large thread), so small per-chapter differences and
+    # tokenizer rounding cannot flip which end is dropped.
+    seeded.endpoint.context_window = full_tokens - 200
+    seeded.endpoint.output_reservation = 4
+
+    await plan_beat(_state(chapter_id_for(ARC_ID, 2)))
+    trimmed_text = " ".join(m["content"] for m in captured[-1])
+    assert "HIGHPRIOMARKER" in trimmed_text  # open, high priority: kept
+    assert "LOWPRIOMARKER" not in trimmed_text  # closed, lowest priority: dropped
+
+
 async def test_plan_beat_publishes_an_obligation_gap(seeded, monkeypatch):
     """An obligation no beat discharges is surfaced loudly, not silently lost."""
     chapter_id = _seed_active_chapter(

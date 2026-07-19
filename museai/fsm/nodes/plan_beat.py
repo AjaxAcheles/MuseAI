@@ -32,6 +32,7 @@ import sqlite3
 from museai.core.logging_setup import get_fsm_logger, log_node_event
 from museai.core.stream_bus import bus
 from museai.fsm.nodes.context_budget import (
+    pop_back,
     pop_front,
     prune_to_budget,
     window_budget,
@@ -566,7 +567,11 @@ async def plan_beat(state: OrchestratorState) -> dict:
                         ("recent_prose", lambda: pop_front(recent_prose)),
                         ("dramatized", lambda: pop_front(dramatized)),
                         ("siblings", lambda: pop_front(siblings)),
-                        ("threads", lambda: pop_front(threads)),
+                        # threads are open→progressing→closed, highest-priority
+                        # first (get_threads_for_project); shed from the tail so
+                        # the cheapest (closed, lowest-priority) go before the
+                        # open threads this chapter must actually advance.
+                        ("threads", lambda: pop_back(threads)),
                     ],
                 )
                 log_node_event(

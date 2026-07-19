@@ -24,6 +24,7 @@ from museai.llm.client import (
     call_llm,
     resolve_inference_url,
 )
+from museai.llm.tokenizer import count_message_tokens
 
 NO_BACKOFF = [0.0, 0.0]
 MESSAGES = [{"role": "user", "content": "Write a chapter."}]
@@ -882,7 +883,10 @@ class TestTimeoutsAndOutputCap:
         await call_llm(endpoint, MESSAGES, transport=httpx.MockTransport(handler))
         assert seen[0]["options"] == {"num_ctx": 16384}
 
-    async def test_context_window_reserves_output_when_no_cap_is_set(self):
+    async def test_context_window_reserves_the_full_remainder_when_no_cap_is_set(self):
+        # No explicit cap: max_tokens is the window's real remainder after the
+        # prompt, so long output can use the headroom instead of being pinned to
+        # the reservation.
         endpoint = EndpointConfig(
             base_url="https://example.invalid/v1",
             api_key="k",
@@ -898,7 +902,29 @@ class TestTimeoutsAndOutputCap:
             return json_response(completion())
 
         await call_llm(endpoint, MESSAGES, transport=httpx.MockTransport(handler))
-        assert seen[0]["max_tokens"] == 512
+        prompt_tokens = count_message_tokens(MESSAGES, "char_heuristic", "m")
+        assert seen[0]["max_tokens"] == 8192 - prompt_tokens
+        assert seen[0]["max_tokens"] > 512
+
+    async def test_reservation_is_the_floor_when_the_window_is_nearly_full(self):
+        # A prompt that all but fills the window leaves less than the reservation
+        # of room; max_tokens never drops below output_reservation.
+        endpoint = EndpointConfig(
+            base_url="https://example.invalid/v1",
+            api_key="k",
+            model_name="m",
+            tokenizer_family="char_heuristic",
+            context_window=16,
+            output_reservation=8,
+        )
+        seen: list[dict] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(json.loads(request.content))
+            return json_response(completion())
+
+        await call_llm(endpoint, MESSAGES, transport=httpx.MockTransport(handler))
+        assert seen[0]["max_tokens"] == 8
 
     async def test_explicit_output_cap_wins_over_the_reservation(self):
         endpoint = EndpointConfig(
@@ -918,6 +944,19 @@ class TestTimeoutsAndOutputCap:
 
         await call_llm(endpoint, MESSAGES, transport=httpx.MockTransport(handler))
         assert seen[0]["max_tokens"] == 2048
+
+    def test_a_reservation_wider_than_the_window_is_rejected_at_boot(self):
+        # No prompt tokens would fit; fail loudly with the numbers rather than
+        # trim everything and still overflow at generation time.
+        with pytest.raises(ValueError, match="output_reservation"):
+            EndpointConfig(
+                base_url="https://example.invalid/v1",
+                api_key="k",
+                model_name="m",
+                tokenizer_family="char_heuristic",
+                context_window=512,
+                output_reservation=1024,
+            )
 
 
 class TestLogging:

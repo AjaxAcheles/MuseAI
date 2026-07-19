@@ -45,7 +45,10 @@ def window_budget(endpoint, *, fallback: int | None = None) -> int | None:
     if endpoint.context_window is None:
         return fallback
     reservation = endpoint.output_reservation or 0
-    room = endpoint.context_window - reservation
+    # Never negative: a reservation wider than the window would ask the pruner to
+    # shed everything and still report over budget. EndpointConfig rejects that
+    # combination at boot, but clamp defensively for any direct caller.
+    room = max(0, endpoint.context_window - reservation)
     return room if fallback is None else min(fallback, room)
 
 
