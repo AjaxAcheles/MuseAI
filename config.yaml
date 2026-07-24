@@ -1,19 +1,53 @@
-project_id: last-train-signal
+project_id: the-borrowed-ladder
+
 endpoint:
   base_url: http://127.0.0.1:11434/v1
-  api_key: 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
-  model_name: qwen3.5:2b
+  api_key: ollama
+  model_name: qwen3.5:9b
   tokenizer_family: char_heuristic
   request_timeout: 60
   stream_read_timeout: 300
-  temperature: 0.85
+  # Fallback only: every one of the five agent roles overrides this below.
+  temperature: 0.7
+  # Leave null. With context_window set, max_tokens is sent as the window's
+  # actual remainder after the prompt, so long prose is never capped early.
   max_output_tokens: null
+  # Retry policy. N attempts means N-1 sleeps; the last backoff value repeats
+  # if there are more retries than entries.
+  max_attempts: 3
+  retry_backoff_seconds: [5.0, 15.0]
+  # qwen3.5:9b is architecturally a 256k-context model, but Ollama serves its
+  # own small default (a few thousand tokens) unless told otherwise, and it
+  # discards the overflow from the LEFT — taking the system message with it.
+  # 16384 is sized for a 12 GB card: ~6.6 GB weights (Q4_K_M) plus KV cache
+  # still fits on the GPU, and spilling KV to system RAM would cost far more
+  # speed than the extra context is worth.
+  #
+  # This value must match what the server actually serves. Set it there too:
+  #   setx OLLAMA_CONTEXT_LENGTH 16384      (then restart `ollama serve`)
+  # extra_body is belt-and-braces — some Ollama builds ignore `options` on the
+  # /v1 endpoint, which is why the env var above is the load-bearing one.
+  context_window: 16384
+  extra_body:
+    options:
+      num_ctx: 16384
+  # Tokens kept free for generation. Prompts are trimmed to leave at least this
+  # much room. Raised from the 1024 default because a prose beat needs more
+  # headroom than a JSON verdict; per-agent values are set under `agents:`.
+  output_reservation: 2048
+
 generation:
   word_count_target: null
   revision_retry_cap: 4
-  max_agent_iterations: 6
+  # Must stay above tool_call_cap, or one tool can eat the whole agent loop and
+  # leave no iterations to answer with.
+  max_agent_iterations: 8
   recent_prose_beats: 4
-  context_token_budget: 32000
+  # Soft ceiling on the assembled drafting context. Must leave room under
+  # context_window for output: 12000 + the drafter's 3072 reservation still
+  # fits inside 16384 with slack for tokenizer drift (char_heuristic is an
+  # estimate, not an exact count).
+  context_token_budget: 12000
   passive_voice_threshold: 0.25
   critic_parse_retries: 2
   critic_degrade_threshold: 3
@@ -21,28 +55,144 @@ generation:
   repetition_threshold: 0.9
   repetition_min_run: 3
   repetition_allowlist: []
-  emotion_word_threshold: 0.3
+
+  # Proportion of a beat's sentences that may name an emotion outright.
+  # Matched whole-word and case-insensitively, so inflections need listing
+  # ("fear" does not match "feared"). Loosened from 0.30 to offset a
+  # vocabulary that grew 18 -> 115: the additions are mostly precision
+  # (catching "feared" where "fear" missed), but a few are common enough in
+  # dialogue to fault honest prose.
+  emotion_word_threshold: 0.35
   emotion_words:
-  - panic
-  - terror
-  - horror
-  - dread
-  - rage
-  - fury
-  - despair
-  - anguish
-  - misery
-  - grief
-  - guilt
-  - shame
-  - spite
-  - hatred
-  - anxiety
+  # fear
   - fear
+  - feared
+  - fearful
+  - afraid
+  - terror
+  - terrified
+  - terrifying
+  - dread
+  - dreaded
+  - panic
+  - panicked
+  - horror
+  - horrified
+  - alarm
+  - alarmed
+  - fright
+  - frightened
+  - scared
+  - nervous
+  - nervously
+  - anxiety
+  - anxious
+  - apprehension
+  - uneasy
+  - unease
+  - worried
+  - worry
+  # anger
+  - rage
+  - enraged
+  - fury
+  - furious
+  - anger
+  - angry
+  - angrily
+  - irritation
+  - irritated
+  - annoyed
+  - annoyance
+  - resentment
+  - resentful
+  - indignation
+  - indignant
+  - hatred
+  - loathing
+  - contempt
+  - spite
+  - bitterness
+  - bitterly
+  # sadness
+  - grief
+  - grieving
+  - sorrow
+  - sorrowful
+  - despair
+  - despairing
+  - misery
+  - miserable
+  - anguish
+  - anguished
+  - sadness
+  - sad
+  - sadly
+  - melancholy
+  - heartbreak
+  - heartbroken
+  - devastated
+  - devastation
+  - loneliness
+  - lonely
+  - regret
+  - remorse
+  # shame
+  - guilt
+  - guilty
+  - shame
+  - ashamed
+  - humiliation
+  - humiliated
+  - embarrassment
+  - embarrassed
+  - mortified
+  # joy
+  - joy
+  - joyful
+  - happiness
+  - happy
+  - happily
   - elation
+  - elated
   - euphoria
-  tic_phrase_threshold: 0.15
+  - euphoric
+  - delight
+  - delighted
+  - glee
+  - gleeful
+  - excitement
+  - excited
+  - excitedly
+  - relief
+  - relieved
+  # other named states
+  - confusion
+  - confused
+  - disgust
+  - disgusted
+  - jealousy
+  - jealous
+  - envy
+  - envious
+  - hopeless
+  - hopelessness
+  - pride
+  - proud
+  - longing
+  - yearning
+  - desperation
+  - desperate
+  - frustration
+  - frustrated
+
+  # Proportion of a beat's sentences that may lean on a stock gesture or
+  # abstract shorthand. Raised from 0.15, which was calibrated against 17
+  # phrases and is far tighter against 113. If legitimate prose still gets
+  # faulted, raise this further rather than gutting the vocabulary.
+  tic_phrase_threshold: 0.25
   tic_phrases:
+  # observed in this project's own drafts
   - trembling
   - trembled
   - deep breath
@@ -60,13 +210,188 @@ generation:
   - legacy
   - closure
   - bittersweet
-  planner_intensity_retries: 1
+  # stock cardiac / respiratory tells
+  - heart pounded
+  - heart pounding
+  - heart hammered
+  - heart raced
+  - heart racing
+  - heart skipped
+  - pulse quickened
+  - breath caught
+  - breath hitched
+  - caught her breath
+  - caught his breath
+  - let out a breath
+  - let out a sigh
+  - released a breath
+  - exhaled slowly
+  - breath she didn't know
+  - breath he didn't know
+  # throat / stomach tells
+  - lump in her throat
+  - lump in his throat
+  - throat tightened
+  - throat closed
+  - stomach lurched
+  - stomach dropped
+  - stomach churned
+  - stomach twisted
+  - knot in her stomach
+  - knot in his stomach
+  # stock gestures
+  - clenched her jaw
+  - clenched his jaw
+  - jaw tightened
+  - clenched her fists
+  - clenched his fists
+  - furrowed brow
+  - brow furrowed
+  - raised an eyebrow
+  - arched an eyebrow
+  - quirked an eyebrow
+  - ran a hand through her hair
+  - ran a hand through his hair
+  - raked a hand through
+  - bit her lip
+  - bit his lip
+  - chewed her lip
+  - rolled her eyes
+  - rolled his eyes
+  - shoulders slumped
+  - shoulders sagged
+  - squared her shoulders
+  - squared his shoulders
+  - swallowed hard
+  - nodded slowly
+  - shook her head slowly
+  - shook his head slowly
+  # eye-contact and chill tells
+  - eyes widened
+  - eyes narrowed
+  - eyes darted
+  - met her eyes
+  - met his eyes
+  - held her gaze
+  - held his gaze
+  - locked eyes
+  - blood ran cold
+  - blood turned to ice
+  - chill ran down
+  - shiver ran down
+  - shiver down her spine
+  - shiver down his spine
+  # voice tells
+  - barely above a whisper
+  - voice cracked
+  - voice broke
+  - voice barely a whisper
+  # abstract shorthand and AI-prose markers
+  - a testament to
+  - tapestry of
+  - symphony of
+  - dance of
+  - echoes of
+  - a reminder that
+  - served as a reminder
+  - palpable
+  - nestled
+  - bustling
+  - in that moment
+  - in that instant
+  - little did
+  - unbeknownst to
+  - couldn't help but
+  - couldn't shake the feeling
+  - something shifted
+  - something had changed
+  - air thick with
+  - the air was thick
+  - silence stretched
+  - time seemed to slow
+  - the world narrowed
+  - a mix of emotions
+  - wave of emotion
+
+  # Emotional arc of a planned chapter. A chapter shorter than
+  # intensity_min_beats has no arc to shape and is never flagged as flat.
+  # flat_fraction was 0.8 — permissive enough that a chapter could be 4/5
+  # high-arousal and never trip. 0.6 forces actual valleys between peaks, and
+  # the extra retry gives the planner a second chance to find them.
+  planner_intensity_retries: 2
   intensity_hot_threshold: 0.6
-  intensity_flat_fraction: 0.8
+  intensity_flat_fraction: 0.6
+  intensity_min_beats: 3
+
+  # Half-width of the PAD neutral band: where the 3x3x3 grid boundaries fall,
+  # and so which pad_baselines.json entry a beat's target PAD lands on.
+  pad_band_threshold: 0.33
+
+  # How much offending prose is quoted back. audit_quote_chars is what the
+  # reviser matches against to locate a span, so too short makes spans
+  # ambiguous and too long wastes the revision prompt.
+  audit_quote_chars: 240
+  critic_verdict_max_chars: 240
+
   research_mode: false
-  tool_call_cap: 6
+  # Was 6, equal to max_agent_iterations — one tool could consume the entire
+  # loop and leave nothing to answer with. Kept well below it now.
+  tool_call_cap: 3
   tool_timeout: 30.0
-agents: {}
+
+# How the revision node decides a critic's quoted span is trustworthy enough to
+# rewrite surgically instead of regenerating the whole beat.
+revision:
+  fuzzy_threshold: 0.8
+  min_span_chars: 4
+  span_growth_limit: 3.0
+  span_growth_slack_chars: 400
+  echo_min_words: 8
+
+# Retrieval budgets for the agents' read-only story tools. Each trades context
+# spend against how much true story an agent can see.
+tools:
+  recent_commit_closing_words: 40
+  character_dialogue_samples: 8
+  character_sample_chars: 200
+  search_snippet_chars: 300
+  search_phrase_bonus: 25
+  repetition_max_matches: 10
+  repetition_snippet_chars: 240
+  repetition_phrase_max_words: 12
+  check_draft_max_quotes: 5
+  check_draft_quote_chars: 240
+
+# Per-agent overrides of the shared endpoint above. Sparse: only the keys named
+# here differ, everything else is inherited.
+#
+# One temperature cannot serve all five roles. The planners and the critic emit
+# JSON, where heat buys nothing and costs parse failures — that is what
+# planner_parse_retries and critic_parse_retries were absorbing. The drafter is
+# the only role whose whole job is invention, so it is the only one that should
+# run hot. output_reservation follows the same logic: prose needs room to land,
+# a verdict does not.
+#
+# To split roles across machines, add `base_url` and `api_key: "${VAR}"` here —
+# the PLANNER_*/DRAFTER_*/CRITIC_* variables already in .env are wired nowhere
+# until they are referenced from this block.
+agents:
+  chapter_planner:
+    temperature: 0.3          # structural JSON: obligations and chapter shape
+    output_reservation: 2048
+  beat_planner:
+    temperature: 0.4          # JSON, but the intents need some invention
+    output_reservation: 2048
+  drafter:
+    temperature: 0.9          # prose — the one role that should run hot
+    output_reservation: 3072
+  reviser:
+    temperature: 0.6          # prose, but constrained by the failures it answers
+    output_reservation: 3072
+  critic:
+    temperature: 0.2          # judgement, emitted as JSON: heat is pure downside
+    output_reservation: 1024
+
 log_level: INFO
 host: 127.0.0.1
 port: 8000

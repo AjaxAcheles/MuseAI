@@ -90,11 +90,38 @@ class EndpointConfig(BaseModel):
     # remainder after the prompt (never below this), so long output is not capped
     # at the reservation when the window has headroom. Must be < context_window.
     output_reservation: int = 1024
+    # --- Retry policy -------------------------------------------------------
+    # Total attempts for one call, including the first. N attempts means N-1
+    # sleeps. Per-endpoint because a local server that OOMs under load and a
+    # hosted API that rate-limits want different patience.
+    max_attempts: int = 3
+    # Sleep before each retry, in seconds. The last value repeats if there are
+    # more retries than entries, so a single-element list is a flat delay.
+    retry_backoff_seconds: list[float] = [5.0, 15.0]
 
     @field_validator("api_key")
     @classmethod
     def _resolve_env_ref(cls, value: str) -> str:
         return _resolve_env_api_key(value)
+
+    @field_validator("max_attempts")
+    @classmethod
+    def _at_least_one_attempt(cls, value: int) -> int:
+        """0 attempts would never call the endpoint at all."""
+        if value < 1:
+            raise ValueError(f"max_attempts must be >= 1, got {value}")
+        return value
+
+    @field_validator("retry_backoff_seconds")
+    @classmethod
+    def _non_negative_backoff(cls, value: list[float]) -> list[float]:
+        """An empty list is legal (retry immediately); a negative sleep is a typo."""
+        for delay in value:
+            if delay < 0:
+                raise ValueError(
+                    f"retry_backoff_seconds entries must be >= 0, got {delay}"
+                )
+        return value
 
     @model_validator(mode="after")
     def _reservation_fits_window(self) -> "EndpointConfig":
@@ -134,6 +161,8 @@ class AgentEndpointOverride(BaseModel):
     extra_body: dict[str, Any] | None = None
     context_window: int | None = None
     output_reservation: int | None = None
+    max_attempts: int | None = None
+    retry_backoff_seconds: list[float] | None = None
 
     @field_validator("api_key")
     @classmethod
@@ -190,10 +219,37 @@ class GenerationConfig(BaseModel):
     emotion_word_threshold: float
     # The named-emotion vocabulary the guard counts. Data, not logic: overridable
     # in config, with a sensible default so a fresh config need not restate it.
+    # Matched whole-word and case-insensitively, so inflections must be listed
+    # explicitly ("fear" does not match "feared").
     emotion_words: list[str] = [
-        "panic", "terror", "horror", "dread", "rage", "fury", "despair",
-        "anguish", "misery", "grief", "guilt", "shame", "spite", "hatred",
-        "anxiety", "fear", "elation", "euphoria",
+        # fear
+        "fear", "feared", "fearful", "afraid", "terror", "terrified",
+        "terrifying", "dread", "dreaded", "panic", "panicked", "horror",
+        "horrified", "alarm", "alarmed", "fright", "frightened", "scared",
+        "nervous", "nervously", "anxiety", "anxious", "apprehension",
+        "uneasy", "unease", "worried", "worry",
+        # anger
+        "rage", "enraged", "fury", "furious", "anger", "angry", "angrily",
+        "irritation", "irritated", "annoyed", "annoyance", "resentment",
+        "resentful", "indignation", "indignant", "hatred", "loathing",
+        "contempt", "spite", "bitterness", "bitterly",
+        # sadness
+        "grief", "grieving", "sorrow", "sorrowful", "despair", "despairing",
+        "misery", "miserable", "anguish", "anguished", "sadness", "sad",
+        "sadly", "melancholy", "heartbreak", "heartbroken", "devastated",
+        "devastation", "loneliness", "lonely", "regret", "remorse",
+        # shame
+        "guilt", "guilty", "shame", "ashamed", "humiliation", "humiliated",
+        "embarrassment", "embarrassed", "mortified",
+        # joy
+        "joy", "joyful", "happiness", "happy", "happily", "elation", "elated",
+        "euphoria", "euphoric", "delight", "delighted", "glee", "gleeful",
+        "excitement", "excited", "excitedly", "relief", "relieved",
+        # other named states
+        "confusion", "confused", "disgust", "disgusted", "jealousy",
+        "jealous", "envy", "envious", "hopeless", "hopelessness", "pride",
+        "proud", "longing", "yearning", "desperation", "desperate",
+        "frustration", "frustrated",
     ]
     # --- Style-tic guard (audit) --------------------------------------------
     # Proportion of a beat's sentences that may lean on a stock gesture or an
@@ -202,13 +258,54 @@ class GenerationConfig(BaseModel):
     tic_phrase_threshold: float = 0.15
     # The stock-phrase vocabulary the guard counts. Multi-word phrases are
     # matched whole. Data, not logic: overridable in config, defaulted to the
-    # tics observed in generated drafts so a fresh config need not restate them.
+    # tics observed in generated drafts plus the stock gestures and abstract
+    # shorthand that editors and AI-prose studies flag most often.
     tic_phrases: list[str] = [
+        # --- observed in this project's own drafts -------------------------
         "trembling", "trembled", "deep breath", "shaky breath",
         "tears welled", "welled with tears", "eyes filled with tears",
         "traced the handwriting", "traced the letters", "traced the words",
         "heavy silence", "silence hung", "the weight of",
         "shared history", "legacy", "closure", "bittersweet",
+        # --- stock cardiac / respiratory tells ------------------------------
+        "heart pounded", "heart pounding", "heart hammered", "heart raced",
+        "heart racing", "heart skipped", "pulse quickened", "breath caught",
+        "breath hitched", "caught her breath", "caught his breath",
+        "let out a breath", "let out a sigh", "released a breath",
+        "exhaled slowly", "breath she didn't know", "breath he didn't know",
+        # --- throat / stomach tells -----------------------------------------
+        "lump in her throat", "lump in his throat", "throat tightened",
+        "throat closed", "stomach lurched", "stomach dropped",
+        "stomach churned", "stomach twisted", "knot in her stomach",
+        "knot in his stomach",
+        # --- stock gestures --------------------------------------------------
+        "clenched her jaw", "clenched his jaw", "jaw tightened",
+        "clenched her fists", "clenched his fists", "furrowed brow",
+        "brow furrowed", "raised an eyebrow", "arched an eyebrow",
+        "quirked an eyebrow", "ran a hand through her hair",
+        "ran a hand through his hair", "raked a hand through",
+        "bit her lip", "bit his lip", "chewed her lip",
+        "rolled her eyes", "rolled his eyes", "shoulders slumped",
+        "shoulders sagged", "squared her shoulders", "squared his shoulders",
+        "swallowed hard", "nodded slowly", "shook her head slowly",
+        "shook his head slowly",
+        # --- eye-contact and chill tells -------------------------------------
+        "eyes widened", "eyes narrowed", "eyes darted", "met her eyes",
+        "met his eyes", "held her gaze", "held his gaze", "locked eyes",
+        "blood ran cold", "blood turned to ice", "chill ran down",
+        "shiver ran down", "shiver down her spine", "shiver down his spine",
+        # --- voice tells ------------------------------------------------------
+        "barely above a whisper", "voice cracked", "voice broke",
+        "voice barely a whisper",
+        # --- abstract shorthand and AI-prose markers --------------------------
+        "a testament to", "tapestry of", "symphony of", "dance of",
+        "echoes of", "a reminder that", "served as a reminder",
+        "palpable", "nestled", "bustling", "in that moment",
+        "in that instant", "little did", "unbeknownst to",
+        "couldn't help but", "couldn't shake the feeling",
+        "something shifted", "something had changed", "air thick with",
+        "the air was thick", "silence stretched", "time seemed to slow",
+        "the world narrowed", "a mix of emotions", "wave of emotion",
     ]
     # --- Intensity arc (beat planner) --------------------------------------
     # How many times the beat planner is re-prompted for a varied emotional arc
@@ -218,6 +315,25 @@ class GenerationConfig(BaseModel):
     intensity_hot_threshold: float
     # Fraction of a chapter's beats that may be hot before the plan is re-prompted.
     intensity_flat_fraction: float
+    # Shortest chapter the arc check applies to. A chapter of one or two beats
+    # has no arc to shape, so flagging it as "flat" would be meaningless.
+    intensity_min_beats: int = 3
+    # --- PAD quantization ----------------------------------------------------
+    # Half-width of the neutral band. An axis reading within ±this of zero
+    # carries no directional signal and quantizes to "neu". 0.33 splits each
+    # axis into three roughly equal thirds of its [-1.0, 1.0] range. Widening it
+    # makes beats read as neutral more often; narrowing it makes them read as
+    # committed to a direction. The 3x3x3 grid (and pad_baselines.json) is
+    # unaffected either way — only where the boundaries fall.
+    pad_band_threshold: float = 0.33
+    # --- Quote budgets --------------------------------------------------------
+    # How much of the offending prose the audit quotes into a failure. This is
+    # what the reviser matches against to locate the span, so too short makes
+    # spans ambiguous and too long wastes the revision prompt.
+    audit_quote_chars: int = 240
+    # Longest reply still treated as a clean critic verdict rather than prose
+    # the parser should reject.
+    critic_verdict_max_chars: int = 240
     # --- Agent tools --------------------------------------------------------
     # Offers `web_search` to every agent when true. Off by default: agents
     # ground themselves in the story's own canon (seed, outline, threads,
@@ -249,6 +365,7 @@ class GenerationConfig(BaseModel):
         "tic_phrase_threshold",
         "intensity_hot_threshold",
         "intensity_flat_fraction",
+        "pad_band_threshold",
     )
     @classmethod
     def _proportion(cls, value: float, info: ValidationInfo) -> float:
@@ -269,7 +386,14 @@ class GenerationConfig(BaseModel):
             raise ValueError(f"{info.field_name} must be >= 0, got {value}")
         return value
 
-    @field_validator("critic_degrade_threshold", "repetition_min_run", "tool_call_cap")
+    @field_validator(
+        "critic_degrade_threshold",
+        "repetition_min_run",
+        "tool_call_cap",
+        "intensity_min_beats",
+        "audit_quote_chars",
+        "critic_verdict_max_chars",
+    )
     @classmethod
     def _positive(cls, value: int, info: ValidationInfo) -> int:
         """A threshold of 0 would degrade before the first failure ever happened."""
@@ -285,6 +409,111 @@ class GenerationConfig(BaseModel):
         return value
 
 
+class RevisionConfig(BaseModel):
+    """How the revision node locates and splices a rewritten span.
+
+    Span mode rewrites only the prose a critic faulted; full mode regenerates
+    the beat. These govern when a span is trusted enough to splice — the
+    difference between a surgical fix and a whole-beat rewrite.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    # Similarity a critic's quoted span must reach against the draft before it
+    # counts as located. Below it the "span" is likelier a paraphrase, and
+    # rewriting the wrong sentence is worse than rewriting the beat. Raising it
+    # sends more beats to full rewrite; lowering it risks mis-splices.
+    fuzzy_threshold: float = 0.8
+    # Shortest quoted span worth locating. Fuzzy-matching a 3-character needle
+    # against a page of prose is noise.
+    min_span_chars: int = 4
+    # A span rewrite the model padded with copies of the surrounding prose
+    # splices in as duplicated paragraphs. A replacement may not exceed this
+    # multiple of the span it replaces...
+    span_growth_limit: float = 3.0
+    # ...or, for a very short span that may legitimately grow more, the span's
+    # length plus this many characters. The larger of the two allowances wins.
+    span_growth_slack_chars: int = 400
+    # A run of this many words from the replacement found verbatim in the prose
+    # around the span means the model echoed its context; the splice is rejected
+    # and the beat falls back to a full rewrite.
+    echo_min_words: int = 8
+
+    @field_validator("fuzzy_threshold")
+    @classmethod
+    def _proportion(cls, value: float, info: ValidationInfo) -> float:
+        if not 0.0 <= value <= 1.0:
+            raise ValueError(f"{info.field_name} is a proportion in 0..1, got {value}")
+        return value
+
+    @field_validator(
+        "min_span_chars", "span_growth_slack_chars", "echo_min_words"
+    )
+    @classmethod
+    def _positive(cls, value: int, info: ValidationInfo) -> int:
+        if value < 1:
+            raise ValueError(f"{info.field_name} must be >= 1, got {value}")
+        return value
+
+    @field_validator("span_growth_limit")
+    @classmethod
+    def _at_least_one(cls, value: float) -> float:
+        """Below 1.0 a replacement could never be longer than what it replaces."""
+        if value < 1.0:
+            raise ValueError(f"span_growth_limit must be >= 1.0, got {value}")
+        return value
+
+
+class ToolsConfig(BaseModel):
+    """Retrieval budgets for the agents' read-only story tools.
+
+    Every one of these trades context spend against how much true story an
+    agent can see. They are the difference between a drafter that remembers a
+    character's voice and one that invents it again.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    # --- get_recent_commits -------------------------------------------------
+    # Words of each prior beat's tail shown as `closing_words`. This is what the
+    # drafter continues from, so it directly sets seam quality between beats.
+    recent_commit_closing_words: int = 40
+    # --- get_character_sheet ------------------------------------------------
+    # Committed lines sampled to show a character's voice, spread across the
+    # manuscript so early and late chapters both contribute.
+    character_dialogue_samples: int = 8
+    # Longest single sampled line before it is truncated.
+    character_sample_chars: int = 200
+    # --- search_manuscript --------------------------------------------------
+    # Characters of matching prose returned per hit.
+    search_snippet_chars: int = 300
+    # Score added when the whole query appears verbatim, so one exact phrase hit
+    # outranks any pile of scattered term hits.
+    search_phrase_bonus: int = 25
+    # --- find_repetition ----------------------------------------------------
+    # Most repetition matches returned, best first.
+    repetition_max_matches: int = 10
+    # Characters of each matched passage quoted back.
+    repetition_snippet_chars: int = 240
+    # At or below this word count the input is treated as a phrase and checked
+    # verbatim; above it, by paragraph similarity. A difflib ratio on a five-word
+    # phrase is noise.
+    repetition_phrase_max_words: int = 12
+    # --- check_draft --------------------------------------------------------
+    # Most offending sentences quoted back by the draft checker.
+    check_draft_max_quotes: int = 5
+    # Characters of each quoted sentence.
+    check_draft_quote_chars: int = 240
+
+    @field_validator("*")
+    @classmethod
+    def _positive(cls, value: int, info: ValidationInfo) -> int:
+        """Every budget here is a count; zero would disable the tool silently."""
+        if value < 1:
+            raise ValueError(f"{info.field_name} must be >= 1, got {value}")
+        return value
+
+
 class AppConfig(BaseModel):
     """Top-level application configuration."""
 
@@ -293,6 +522,10 @@ class AppConfig(BaseModel):
     project_id: str
     endpoint: EndpointConfig
     generation: GenerationConfig
+    # Both default to their documented values, so a config predating these
+    # blocks keeps working and only the keys you want to change need writing.
+    revision: RevisionConfig = RevisionConfig()
+    tools: ToolsConfig = ToolsConfig()
 
     # Sparse per-agent inference overrides, keyed by agent role. An agent with
     # no entry uses ``endpoint`` unchanged, so existing single-endpoint configs

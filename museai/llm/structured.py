@@ -364,8 +364,8 @@ def _validate(data: Any, *, lenient: bool = False) -> list[FailureObject]:
 # that burns every re-prompt and pushes the run toward degraded mode over a
 # draft the critic just said was fine. The reading below is deliberately
 # narrow: any JSON-ish bracket, any schema vocabulary, any hedge, or anything
-# beyond a short sentence still fails and re-prompts.
-_CLEAN_VERDICT_MAX_CHARS = 240
+# beyond a short sentence still fails and re-prompts. The length bound is
+# ``generation.critic_verdict_max_chars``.
 
 _CLEAN_PHRASES = re.compile(
     r"\b(clean|clear|no (?:continuity )?(?:issues?|errors?|problems?)|"
@@ -394,16 +394,25 @@ _HEDGE_MARKERS = re.compile(
 )
 
 
-def is_clean_verdict(text: str) -> bool:
+def is_clean_verdict(text: str, max_chars: int | None = None) -> bool:
     """Whether a prose critic reply unambiguously says the draft is clean.
 
     True only when the text is short, contains no ``[`` or ``{`` at all, none
     of the failure-object vocabulary, no hedging, and affirmatively matches a
     clean-ish phrase. Conservative by construction: a truncated or equivocating
     reply returns False and stays a parse failure.
+
+    ``max_chars`` defaults to ``generation.critic_verdict_max_chars``; the
+    argument exists so a caller (or a test) can pin it explicitly. The import is
+    deferred so this module stays free of an ``fsm`` import at load time.
     """
+    if max_chars is None:
+        from museai.fsm.nodes.deps import get_node_config
+
+        max_chars = get_node_config().generation.critic_verdict_max_chars
+
     stripped = text.strip()
-    if not stripped or len(stripped) > _CLEAN_VERDICT_MAX_CHARS:
+    if not stripped or len(stripped) > max_chars:
         return False
     if "[" in stripped or "{" in stripped:
         return False

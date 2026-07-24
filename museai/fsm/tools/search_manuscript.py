@@ -16,15 +16,9 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from museai.fsm.nodes.deps import get_node_config
 from museai.fsm.tools.project_db import project_connection
 from museai.memory.db import get_committed_beats
-
-# Enough of the matching passage to quote or verify against; more is context
-# spend, and the model can ask for the whole chapter if it needs it.
-_SNIPPET_CHARS = 300
-
-# A verbatim phrase hit outranks any pile of scattered term hits.
-_PHRASE_BONUS = 25
 
 _WORD = re.compile(r"[\w']+")
 
@@ -75,13 +69,16 @@ def _terms(query: str) -> list[str]:
 
 
 def _snippet(prose: str, needle: str) -> str:
-    """~300 chars of ``prose`` around the first occurrence of ``needle``."""
+    """``tools.search_snippet_chars`` of ``prose`` around the first
+    occurrence of ``needle``. More is context spend, and the model can ask
+    for the whole chapter if it needs it."""
+    snippet_chars = get_node_config().tools.search_snippet_chars
     lowered = prose.lower()
     at = lowered.find(needle)
     if at == -1:
         at = 0
-    start = max(0, at - _SNIPPET_CHARS // 3)
-    end = min(len(prose), start + _SNIPPET_CHARS)
+    start = max(0, at - snippet_chars // 3)
+    end = min(len(prose), start + snippet_chars)
     # Snap to word boundaries so the quote never opens or closes mid-word.
     while start > 0 and not prose[start - 1].isspace():
         start -= 1
@@ -128,7 +125,8 @@ def search_manuscript(
         if score == 0:
             continue
         if len(terms) > 1 and phrase in haystack:
-            score += _PHRASE_BONUS
+            # A verbatim phrase hit outranks any pile of scattered term hits.
+            score += get_node_config().tools.search_phrase_bonus
         # The snippet centres on the verbatim phrase when the prose has it,
         # else on the first term that occurs.
         needle = phrase if phrase in prose.lower() else ""

@@ -325,12 +325,19 @@ def _beat_arousal(item: dict) -> float:
         return 0.0
 
 
-def _is_flat_hot(planned: list[dict], *, hot_threshold: float, flat_fraction: float) -> bool:
+def _is_flat_hot(
+    planned: list[dict],
+    *,
+    hot_threshold: float,
+    flat_fraction: float,
+    min_beats: int,
+) -> bool:
     """True when so many beats sit at high arousal that the arc has no valleys.
 
-    A chapter of one or two beats has no arc to shape, so it is never flagged.
+    A chapter shorter than ``min_beats`` has no arc to shape, so it is never
+    flagged.
     """
-    if len(planned) < 3:
+    if len(planned) < min_beats:
         return False
     hot = sum(1 for item in planned if abs(_beat_arousal(item)) >= hot_threshold)
     return hot / len(planned) > flat_fraction
@@ -627,6 +634,7 @@ async def plan_beat(state: OrchestratorState) -> dict:
                     planned,
                     hot_threshold=config.generation.intensity_hot_threshold,
                     flat_fraction=config.generation.intensity_flat_fraction,
+                    min_beats=config.generation.intensity_min_beats,
                 ):
                     break
                 log_node_event(

@@ -8,10 +8,10 @@ and the resulting region is looked up in ``pad_baselines.json``, a static table
 of 27 authored strings — the full 3×3×3 grid. The string is injected verbatim.
 No model is involved, and the same coordinate always yields the same constraint.
 
-The band for an axis value ``v``::
+The band for an axis value ``v``, where ``t`` is ``generation.pad_band_threshold``::
 
-    "neg"  if v < -PAD_BAND_THRESHOLD
-    "pos"  if v >  PAD_BAND_THRESHOLD
+    "neg"  if v < -t
+    "pos"  if v >  t
     "neu"  otherwise
 
 A region key is the three bands joined in axis order, pleasure first:
@@ -25,34 +25,43 @@ from functools import lru_cache
 from itertools import product
 from pathlib import Path
 
+from museai.fsm.nodes.deps import get_node_config
+
 PAD_BASELINES_PATH = Path(__file__).resolve().parent / "pad_baselines.json"
 
 # Axis order of a region key, and of every PAD triple in this codebase.
 PAD_AXES = ("pleasure", "arousal", "dominance")
 
-# The half-width of the neutral band. An axis reading between -0.33 and 0.33
-# carries no directional signal, so it quantizes to "neu" rather than to
-# whichever sign it happens to hold. This splits each axis into three roughly
-# equal thirds of its [-1.0, 1.0] range.
-PAD_BAND_THRESHOLD = 0.33
-
 PAD_BANDS = ("neg", "neu", "pos")
 
 
-def quantize_axis(value: float) -> str:
-    """Quantize one PAD axis reading to its band."""
+def band_threshold() -> float:
+    """The configured half-width of the neutral band."""
+    return get_node_config().generation.pad_band_threshold
+
+
+def quantize_axis(value: float, threshold: float | None = None) -> str:
+    """Quantize one PAD axis reading to its band.
+
+    ``threshold`` defaults to ``generation.pad_band_threshold``; the argument
+    exists so a caller (or a test) can pin it explicitly.
+    """
+    if threshold is None:
+        threshold = band_threshold()
     value = float(value)
-    if value < -PAD_BAND_THRESHOLD:
+    if value < -threshold:
         return "neg"
-    if value > PAD_BAND_THRESHOLD:
+    if value > threshold:
         return "pos"
     return "neu"
 
 
 def pad_key(pleasure: float, arousal: float, dominance: float) -> str:
     """The ``"P_A_D"`` region key of a PAD coordinate."""
+    threshold = band_threshold()
     return "_".join(
-        quantize_axis(value) for value in (pleasure, arousal, dominance)
+        quantize_axis(value, threshold)
+        for value in (pleasure, arousal, dominance)
     )
 
 

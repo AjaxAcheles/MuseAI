@@ -61,6 +61,12 @@ endpoint:
   # remainder after the prompt (at least this value) — so long prose is not
   # capped at the reservation when the window has headroom. Must be < context_window.
   output_reservation: 1024
+  # Retry policy for one call. N attempts means N-1 sleeps. Per-endpoint because
+  # a local server that OOMs under load and a hosted API that rate-limits want
+  # different patience. The last backoff value repeats if there are more retries
+  # than entries, so a one-element list is a flat delay.
+  max_attempts: 3
+  retry_backoff_seconds: [5.0, 15.0]
 
 # Generation shape.
 generation:
@@ -79,8 +85,72 @@ generation:
   planner_intensity_retries: 1   # re-prompts for a varied emotional arc when a plan is all high-arousal
   intensity_hot_threshold: 0.6   # |target arousal| at/above which a beat counts as "hot"
   intensity_flat_fraction: 0.8   # fraction of a chapter's beats that may be hot before re-prompting
+  intensity_min_beats: 3         # shortest chapter the arc check applies to (fewer beats = no arc to shape)
+  pad_band_threshold: 0.33       # half-width of the PAD neutral band; sets the 3x3x3 grid boundaries
+  audit_quote_chars: 240         # offending prose quoted into a failure — what the reviser locates a span with
+  critic_verdict_max_chars: 240  # longest reply still read as a clean critic verdict rather than prose
   research_mode: false           # offer web_search to the agents; off = story-canon tools only
   tool_call_cap: 6               # max calls to any one tool within a single agent loop
   tool_timeout: 30               # seconds allowed for one tool execution
   # repetition_allowlist: []     # optional: phrases allowed to recur verbatim (author-declared)
   # emotion_words: [...]         # optional: override the named-emotion vocabulary the guard counts
+  # tic_phrases: [...]           # optional: override the stock-gesture vocabulary the guard counts
+
+# Per-agent overrides of the shared `endpoint` above. Sparse: only the keys
+# named here differ for that agent, everything else is inherited. A config with
+# no `agents:` section behaves exactly as if this block were absent.
+#
+# Valid roles are exactly: chapter_planner, beat_planner, drafter, reviser,
+# critic. Any other key is fatal at boot.
+#
+# This is the highest-leverage block in the file. One temperature cannot serve
+# all five roles: the planners and the critic emit JSON, where heat buys nothing
+# and costs parse failures, while the drafter's whole job is invention. Any key
+# from `endpoint` may be overridden — including base_url and api_key, so roles
+# can run on different machines or different models entirely.
+agents:
+  chapter_planner:
+    temperature: 0.3
+    output_reservation: 2048
+  beat_planner:
+    temperature: 0.4
+    output_reservation: 2048
+  drafter:
+    temperature: 0.9             # prose — the one role that should run hot
+    output_reservation: 3072
+  reviser:
+    temperature: 0.6
+    output_reservation: 3072
+  critic:
+    temperature: 0.2
+    output_reservation: 1024
+  # Split roles across servers by overriding the connection too:
+  # drafter:
+  #   base_url: "http://192.168.1.50:11434/v1"
+  #   api_key: "${DRAFTER_API_KEY}"
+  #   model_name: "a-bigger-model"
+
+# How the revision node decides a critic's quoted span is trustworthy enough to
+# rewrite surgically instead of regenerating the whole beat. Every key is
+# optional and defaults to the value shown.
+revision:
+  fuzzy_threshold: 0.8           # similarity a quoted span must reach to count as located
+  min_span_chars: 4              # shortest quoted span worth fuzzy-matching at all
+  span_growth_limit: 3.0         # a replacement may not exceed this multiple of the span it replaces...
+  span_growth_slack_chars: 400   # ...or the span's length plus this; the larger allowance wins
+  echo_min_words: 8              # a verbatim run this long from the surrounding prose rejects the splice
+
+# Retrieval budgets for the agents' read-only story tools. Each one trades
+# context spend against how much true story an agent can see. Every key is
+# optional and defaults to the value shown.
+tools:
+  recent_commit_closing_words: 40   # words of each prior beat's tail — sets seam quality between beats
+  character_dialogue_samples: 8     # committed lines sampled to show a character's voice
+  character_sample_chars: 200       # longest single sampled line
+  search_snippet_chars: 300         # characters of matching prose per search hit
+  search_phrase_bonus: 25           # score added when the whole query appears verbatim
+  repetition_max_matches: 10        # most repetition matches returned
+  repetition_snippet_chars: 240     # characters of each matched passage quoted back
+  repetition_phrase_max_words: 12   # at/below this, input is checked verbatim rather than by similarity
+  check_draft_max_quotes: 5         # most offending sentences the draft checker quotes
+  check_draft_quote_chars: 240      # characters of each quoted sentence

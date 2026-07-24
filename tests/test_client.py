@@ -16,8 +16,6 @@ from museai.core.config import EndpointConfig
 from museai.core.logging_setup import get_llm_logger
 from museai.core.stream_bus import bus
 from museai.llm.client import (
-    DEFAULT_BACKOFF_SECONDS,
-    MAX_ATTEMPTS,
     LLMCallError,
     LLMResponse,
     _build_request,
@@ -25,6 +23,10 @@ from museai.llm.client import (
     resolve_inference_url,
 )
 from museai.llm.tokenizer import count_message_tokens
+
+# The retry policy now lives on the endpoint; these mirror its defaults.
+MAX_ATTEMPTS = EndpointConfig.model_fields["max_attempts"].default
+DEFAULT_BACKOFF_SECONDS = EndpointConfig.model_fields["retry_backoff_seconds"].default
 
 NO_BACKOFF = [0.0, 0.0]
 MESSAGES = [{"role": "user", "content": "Write a chapter."}]
@@ -503,9 +505,9 @@ class TestStreaming:
 
 
 class TestRetry:
-    def test_policy_constants(self):
-        assert MAX_ATTEMPTS == 3
-        assert DEFAULT_BACKOFF_SECONDS == (5.0, 15.0)
+    def test_policy_defaults_live_on_the_endpoint(self, endpoint):
+        assert endpoint.max_attempts == 3
+        assert endpoint.retry_backoff_seconds == [5.0, 15.0]
 
     async def test_4xx_raises_immediately_without_retrying(self, endpoint):
         calls = []

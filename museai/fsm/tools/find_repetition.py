@@ -18,11 +18,6 @@ from museai.fsm.tools.project_db import project_connection
 from museai.memory.db import get_committed_beats, get_recent_committed_beats
 
 _SCOPES = ("project", "recent")
-_MAX_MATCHES = 10
-_SNIPPET_CHARS = 240
-# Below this many words the input is a phrase, checked verbatim rather than by
-# paragraph similarity (a difflib ratio on a 5-word phrase is noise).
-_PHRASE_MAX_WORDS = 12
 
 FIND_REPETITION_TOOL_SPEC: dict[str, Any] = {
     "type": "function",
@@ -58,8 +53,8 @@ FIND_REPETITION_TOOL_SPEC: dict[str, Any] = {
 }
 
 
-def _snippet(text: str) -> str:
-    return text[:_SNIPPET_CHARS] + ("…" if len(text) > _SNIPPET_CHARS else "")
+def _snippet(text: str, limit: int) -> str:
+    return text[:limit] + ("…" if len(text) > limit else "")
 
 
 def find_repetition(text_or_query: str, scope: str = "project") -> dict:
@@ -74,6 +69,8 @@ def find_repetition(text_or_query: str, scope: str = "project") -> dict:
 
     config = get_node_config()
     threshold = config.generation.repetition_threshold
+    tools = config.tools
+    snippet_chars = tools.repetition_snippet_chars
 
     with project_connection() as (conn, project_id):
         if wanted_scope == "recent":
@@ -90,7 +87,7 @@ def find_repetition(text_or_query: str, scope: str = "project") -> dict:
         (paragraph, _normalize_for_compare(paragraph))
         for paragraph in split_paragraphs(text) or [text]
     ]
-    is_phrase = len(input_norm.split()) <= _PHRASE_MAX_WORDS
+    is_phrase = len(input_norm.split()) <= tools.repetition_phrase_max_words
 
     matches: list[dict] = []
     for beat_id, chapter_id, prose in beats:
@@ -105,7 +102,7 @@ def find_repetition(text_or_query: str, scope: str = "project") -> dict:
                             "beat_id": beat_id,
                             "chapter_id": chapter_id,
                             "similarity": 1.0,
-                            "committed_text": _snippet(committed),
+                            "committed_text": _snippet(committed, snippet_chars),
                         }
                     )
                 continue
@@ -123,9 +120,9 @@ def find_repetition(text_or_query: str, scope: str = "project") -> dict:
                         "beat_id": beat_id,
                         "chapter_id": chapter_id,
                         "similarity": round(best, 3),
-                        "committed_text": _snippet(committed),
+                        "committed_text": _snippet(committed, snippet_chars),
                     }
                 )
 
     matches.sort(key=lambda m: -m["similarity"])
-    return {"matches": matches[:_MAX_MATCHES]}
+    return {"matches": matches[: tools.repetition_max_matches]}

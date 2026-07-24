@@ -21,7 +21,7 @@ from conftest import patch_planner_llm
 
 
 SEED_PATH = Path(__file__).resolve().parent.parent / "seeds" / "example.json"
-PROJECT_ID = "lantern-keeper"
+PROJECT_ID = "the-borrowed-ladder"
 
 CHAPTERS_JSON = """[
   {"ordering": 1, "description": "Mara catalogs the impossible letters.",
@@ -31,11 +31,11 @@ CHAPTERS_JSON = """[
 BEATS_JSON = """[
   {"ordering": 1, "intent": "The letter arrives in the day's post.",
    "entry_state": "A routine morning.", "exit_state": "Mara holds her own handwriting.",
-   "focal_character_id": "lantern-keeper-char-1",
+   "focal_character_id": "the-borrowed-ladder-nell-ardery",
    "target_pad": {"pleasure": -0.7, "arousal": 0.8, "dominance": -0.5}},
   {"ordering": 2, "intent": "Mara locks the letter away.",
    "entry_state": "Mara holds the letter.", "exit_state": "The letter is hidden.",
-   "focal_character_id": "lantern-keeper-char-1",
+   "focal_character_id": "the-borrowed-ladder-nell-ardery",
    "target_pad": {"pleasure": -0.2, "arousal": -0.3, "dominance": 0.4}}
 ]"""
 

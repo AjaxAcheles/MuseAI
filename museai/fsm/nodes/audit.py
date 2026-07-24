@@ -34,9 +34,6 @@ OVERLAP_ERROR_CODE = "PARAGRAPH_OVERLAP"
 EMOTION_ERROR_CODE = "EMOTION_TELL"
 TIC_ERROR_CODE = "STYLE_TIC"
 
-# The offending sentence quoted back to the reviser. Enough to locate it.
-_QUOTE_CHARS = 240
-
 # Sentence split on terminal punctuation followed by whitespace. Abbreviations
 # ("Dr. Vance") over-split, which costs at most one extra sentence in the
 # denominator — it never invents a passive, so it can only make the check more
@@ -239,6 +236,8 @@ async def audit(state: OrchestratorState) -> dict:
     config = get_node_config()
     generation = config.generation
     threshold = generation.passive_voice_threshold
+    # The offending prose quoted back to the reviser. Enough to locate it.
+    quote_chars = generation.audit_quote_chars
     draft = state["current_draft_text"]
     beat_index = state["fsm_pointer"].beat_index
 
@@ -250,7 +249,7 @@ async def audit(state: OrchestratorState) -> dict:
         failures.append(
             FailureObject(
                 error_code=ERROR_CODE,
-                offending_text=passives[0][:_QUOTE_CHARS],
+                offending_text=passives[0][:quote_chars],
                 suggested_fix=(
                     f"{density:.0%} of sentences in this beat are in the passive "
                     f"voice, over the {threshold:.0%} limit. Rewrite the passive "
@@ -285,7 +284,7 @@ async def audit(state: OrchestratorState) -> dict:
         failures.append(
             FailureObject(
                 error_code=OVERLAP_ERROR_CODE,
-                offending_text=paragraph[:_QUOTE_CHARS],
+                offending_text=paragraph[:quote_chars],
                 suggested_fix=(
                     "This paragraph duplicates prose already committed earlier in "
                     "the manuscript. Do not restate it — write fresh prose that "
@@ -303,7 +302,7 @@ async def audit(state: OrchestratorState) -> dict:
         failures.append(
             FailureObject(
                 error_code=EMOTION_ERROR_CODE,
-                offending_text=emotion_sentences[0][:_QUOTE_CHARS],
+                offending_text=emotion_sentences[0][:quote_chars],
                 suggested_fix=(
                     f"{emotion_density:.0%} of sentences name an emotion outright, "
                     f"over the {generation.emotion_word_threshold:.0%} limit. Cut "
@@ -327,7 +326,7 @@ async def audit(state: OrchestratorState) -> dict:
         failures.append(
             FailureObject(
                 error_code=TIC_ERROR_CODE,
-                offending_text=tic_sentences[0][:_QUOTE_CHARS],
+                offending_text=tic_sentences[0][:quote_chars],
                 suggested_fix=(
                     f"{tic_density:.0%} of sentences lean on a stock gesture or "
                     f"abstract emotional shorthand, over the "

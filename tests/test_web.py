@@ -94,9 +94,9 @@ async def test_seed_page_presents_default_as_short_test_seed(config_factory, tmp
         assert response.status_code == 200
         body = await response.get_data(as_text=True)
         assert "Reset to test seed" in body
-        assert "1,500-word manuscript target" in body
-        assert "word_count_target" in body
-        assert "1500" in body
+        assert "one compact arc" in body
+        assert "rising action, climax, and resolution" in body
+        assert "sets no" in body
     finally:
         await _close_started_app(test_app)
 

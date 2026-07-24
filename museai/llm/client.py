@@ -48,9 +48,8 @@ from museai.llm.tokenizer import count_message_tokens, count_tokens
 # The standard chat-completions path, appended to an endpoint root.
 _CHAT_COMPLETIONS_PATH = "chat/completions"
 
-# Retry policy. Three attempts means two sleeps.
-MAX_ATTEMPTS = 3
-DEFAULT_BACKOFF_SECONDS: tuple[float, ...] = (5.0, 15.0)
+# Retry policy lives on the endpoint: endpoint.max_attempts (N attempts
+# means N-1 sleeps) and endpoint.retry_backoff_seconds.
 
 # Faults that mean "the endpoint was unreachable or gave up", not "the request
 # was wrong". These are worth retrying; a 4xx (other than 408/429) never is.
@@ -809,7 +808,7 @@ async def call_llm(
 
     ``transport`` and ``retry_backoff`` exist so tests can inject a mock
     transport and collapse the backoff sleeps; production callers leave both
-    unset and get real HTTP with the 5s/15s policy.
+    unset and get real HTTP with the endpoint's configured retry policy.
 
     Raises ``LLMCallError`` on a hard 4xx, a malformed response, or once the
     retry budget is exhausted.
@@ -850,7 +849,12 @@ async def call_llm(
         extra_headers=extra_headers,
     )
 
-    backoff = tuple(retry_backoff) if retry_backoff is not None else DEFAULT_BACKOFF_SECONDS
+    max_attempts = endpoint.max_attempts
+    backoff = (
+        tuple(retry_backoff)
+        if retry_backoff is not None
+        else tuple(endpoint.retry_backoff_seconds)
+    )
     # request_timeout governs connect/write/pool; the read timeout — the gap
     # between streamed chunks — is separate, because a reasoning endpoint can
     # legitimately pause between tokens far longer than a connect should take.
@@ -886,7 +890,7 @@ async def call_llm(
         # type(exc).__name__ is load-bearing: str(httpx.ReadTimeout()) is "",
         # which once produced an error message with no error in it.
         description = f"{type(exc).__name__}: {exc}".rstrip(": ")
-        retrying = attempt < MAX_ATTEMPTS
+        retrying = attempt < max_attempts
         _log_error(
             safe_url, endpoint, stream, attempt,
             f"transient: {description}", retrying=retrying,
@@ -909,7 +913,7 @@ async def call_llm(
                     await restart_result
         await asyncio.sleep(backoff[min(attempt - 1, len(backoff) - 1)])
 
-    while attempt < MAX_ATTEMPTS:
+    while attempt < max_attempts:
         attempt += 1
         emitted = [False]
         _log_request(safe_url, endpoint, messages, stream, attempt, max_tokens)
@@ -1001,7 +1005,7 @@ async def call_llm(
         )
 
     summary = (
-        f"{MAX_ATTEMPTS} attempts failed, last error: "
+        f"{max_attempts} attempts failed, last error: "
         f"{type(last_error).__name__}: {last_error}".rstrip(": ")
     )
     _log_error(safe_url, endpoint, stream, attempt, summary)

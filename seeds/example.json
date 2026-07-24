@@ -1,41 +1,41 @@
 {
   "project": {
-    "id": "last-train-signal",
-    "genre": "compact contemporary suspense",
-    "premise": "During a forty-minute signal outage at an isolated mountain station, acting dispatcher Imani Vale must stop the last passenger train from entering a single-track tunnel where a maintenance crew is still working. Her only available radio battery belongs to the porter whose career she once damaged by blaming him for her own mistake.",
-    "setting": "Ridgeway Station during a sleet storm: a locked signal cabinet on the platform, a dispatch office with a wall clock and failing landline, a maintenance access road below the tracks, and one tunnel east of the station. The last train is due at 9:40 p.m.; the crew must clear the tunnel before it arrives."
+    "id": "the-borrowed-ladder",
+    "genre": "quiet contemporary short fiction",
+    "premise": "Nell Ardery borrowed her neighbour's ladder to clear a gutter and cracked one of the rungs stepping down off it. Now she has to carry it back. That is the whole story: one hot Saturday afternoon, one short walk to the house next door, one thing she would rather not say, and whatever Ida says back.",
+    "setting": "Two adjoining back gardens on Wren Row, separated by a low fence with a gate in it that neither household bothers to latch. Nell's side has a blocked gutter, a folding garden chair, and the aluminium ladder lying flat in the grass with a hairline split across the third rung. Ida's side has a shed, a kettle that is always just boiled, and a kitchen door that stands open in warm weather. The whole story takes place between the two gardens across a single afternoon, and neither woman ever goes further than the other's back step."
   },
   "arcs": [
     {
-      "description": "Tell one complete, fast-moving arc over the forty minutes before the 9:40 p.m. train reaches Ridgeway. Open at 9:00 with Imani discovering that the signal has failed and the maintenance crew is still in the east tunnel. In the first quarter, establish the deadline, the failed landline, and Imani's reluctance to ask Porter Daniel Cross for his charged radio because she previously let him take blame for a missed safety call. In the second quarter, force Imani to choose transparency over control: tell Daniel the truth and ask for help, then learn the radio can reach the train only from the exposed platform cabinet. In the third quarter, tighten the physical problem with sleet, a jammed cabinet, and an update that the train is ahead of schedule; Daniel risks missing his own escape route to help Imani restore the manual stop signal. At the climax, Imani must use the radio to warn the train and openly state her prior fault rather than hide behind procedure. Resolve after the train stops short of the tunnel: the crew is safe, Daniel decides whether to accept her apology, and Imani records the incident honestly. Keep each turn causally linked, avoid detours, and let quiet aftermath occupy only the final beat after the deadline has been met."
+      "description": "Tell one small, complete story across a single Saturday afternoon, in four clear movements, and do not let it grow larger than its subject. SETUP: open with Nell in her own garden, the gutter cleared, the ladder already on the grass and already cracked. Establish in the first movement what the ladder is, that it is Ida's, that Nell broke it, and that nobody saw her do it — including the fact that she could simply lean it against Ida's shed and say nothing. RISING ACTION: Nell carries the ladder through the gate and finds Ida home and pleased to see her. Complicate the confession by making Ida easy about it: Ida makes tea, talks about something unrelated and ordinary, and mentions the ladder only in passing and only kindly, so that every friendly thing Ida says makes the truth more expensive to tell. Let Nell try at least once to say it and get a smaller, safer sentence out instead. CLIMAX: at the point where Nell could still leave with it unsaid — the ladder stowed, the tea finished, the gate in reach — have her say the true thing plainly: that she cracked the rung, how, and that she was going to leave without mentioning it. This is the whole turn of the story; do not soften it, do not have Ida discover it first, and do not let anything external interrupt it. RESOLUTION: Ida responds in a way that is specific and slightly unexpected but entirely in character, the two of them settle the small practical question of the rung, and something modest and real has changed between them. End in the gardens, on an ordinary detail, shortly after the confession. Constraints: two characters only; no flashback scenes, no third party, no emergency, no revelation about the past beyond what a neighbourly friendship would already hold. Keep the stakes exactly as small as they are — the story's whole weight rests on whether one person says an awkward true thing to another — and let the prose take that seriously without inflating it."
     }
   ],
   "threads": [
     {
-      "id": "last-train-signal-thread-tunnel",
-      "description": "Can Imani warn the 9:40 p.m. train before it enters the occupied east tunnel? The answer must be resolved in the climax.",
+      "id": "the-borrowed-ladder-thread-confession",
+      "description": "Will Nell admit she cracked the rung, or return the ladder and say nothing? This is the story's central question. It must stay genuinely open through the rising action — Nell must have a real, available option to stay silent — and it must be answered by Nell's own choice at the climax, not by Ida noticing the damage.",
       "priority_score": 1.0,
       "status": "open"
     },
     {
-      "id": "last-train-signal-thread-daniel",
-      "description": "Will Daniel Cross trust Imani after learning she let him carry blame for her earlier missed safety call? This relationship thread must progress through the urgent action and receive a concrete, non-forced resolution after the train stops.",
-      "priority_score": 0.9,
+      "id": "the-borrowed-ladder-thread-neighbours",
+      "description": "What are these two to each other — the easy borrowing kind of neighbours, or something with more actual trust in it? This thread runs underneath the confession and is resolved in the final movement by how Ida answers and how the two of them settle the rung. The change must be modest and concrete, not a declaration of friendship.",
+      "priority_score": 0.8,
       "status": "open"
     }
   ],
   "characters": [
     {
-      "id": "last-train-signal-imani-vale",
-      "name": "Imani Vale",
-      "description": "Ridgeway's acting night dispatcher. Precise, capable, and accustomed to solving problems alone; beneath that control is guilt over a prior safety call she mishandled and allowed Daniel to be blamed for. She begins anxious and defensive, becomes openly accountable under pressure, and ends shaken but steadier because she told the truth before it was safe to do so. She knows the station layout, the train timetable, and the manual signal procedure, but cannot repair the damaged relay by herself.",
-      "pad": {"pleasure": -0.45, "arousal": 0.7, "dominance": 0.15}
+      "id": "the-borrowed-ladder-nell-ardery",
+      "name": "Nell Ardery",
+      "description": "Lives alone at the near end of Wren Row and prefers to handle her own repairs, which is how the gutter and the borrowed ladder happened in the first place. Competent, self-sufficient, and privately mortified by needing anything from anyone; her instinct under embarrassment is to make herself smaller and to manage the other person's reaction in advance. She is not dishonest, but she is very good at the sentence that is technically true and leaves the important part out. Over the afternoon she moves from dreading the conversation, through nearly getting away with not having it, to saying the plain thing without softening it — and is more unsettled by having said it than by having broken the rung.",
+      "pad": {"pleasure": -0.35, "arousal": 0.4, "dominance": -0.4}
     },
     {
-      "id": "last-train-signal-daniel-cross",
-      "name": "Daniel Cross",
-      "description": "The station porter and former signal apprentice. Careful, practical, and guarded around Imani after losing a promotion because of the blame she allowed to stand. He carries the only charged hand radio for his walk home and understands the platform cabinet's manual release. He begins wary and hurt, acts decisively when lives are at stake, and does not forgive Imani instantly; any softening must follow her specific admission and the completed rescue.",
-      "pad": {"pleasure": -0.35, "arousal": 0.45, "dominance": -0.1}
+      "id": "the-borrowed-ladder-ida-fenwick",
+      "name": "Ida Fenwick",
+      "description": "Has lived next door for a long time and lends things out without keeping track of them, which is a habit rather than a generosity she thinks about. Practical, talkative in an unhurried way, and genuinely uninterested in being apologised to; she would rather discuss how a thing gets fixed than how it got broken. She is warm without being soft, and the warmth is what makes Nell's confession difficult. Her response at the resolution should be specific and a little unexpected — the reaction of a particular person with her own view of what a cracked rung is worth — never a generic absolution.",
+      "pad": {"pleasure": 0.4, "arousal": -0.15, "dominance": 0.3}
     }
   ]
 }

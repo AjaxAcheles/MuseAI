@@ -24,10 +24,6 @@ from museai.fsm.nodes.deps import get_node_config
 from museai.fsm.tools.project_db import project_connection
 from museai.memory.db import get_recent_committed_beats
 
-# Enough of an offending sentence to find it in the draft.
-_QUOTE_CHARS = 240
-_MAX_QUOTES = 5
-
 CHECK_DRAFT_TOOL_SPEC: dict[str, Any] = {
     "type": "function",
     "function": {
@@ -54,7 +50,12 @@ CHECK_DRAFT_TOOL_SPEC: dict[str, Any] = {
 
 
 def _quotes(sentences: list[str]) -> list[str]:
-    return [s[:_QUOTE_CHARS] for s in sentences[:_MAX_QUOTES]]
+    """Enough of each offending sentence to find it again in the draft."""
+    tools = get_node_config().tools
+    return [
+        s[: tools.check_draft_quote_chars]
+        for s in sentences[: tools.check_draft_max_quotes]
+    ]
 
 
 def check_draft(text: str) -> dict:

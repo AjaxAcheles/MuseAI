@@ -40,7 +40,7 @@ from museai.seed.loader import load_seed
 from conftest import patch_planner_llm
 
 SEED_PATH = Path(__file__).resolve().parent.parent / "seeds" / "example.json"
-ARC_ID = "lantern-keeper-arc-1"
+ARC_ID = "the-borrowed-ladder-arc-1"
 RETRY_CAP = 2
 
 CHAPTERS_JSON = """```json
@@ -54,7 +54,7 @@ BEATS_JSON = """```json
 [
   {"ordering": 1, "intent": "The letter arrives in the day's post.",
    "entry_state": "A routine morning.", "exit_state": "Mara holds her own handwriting.",
-   "focal_character_id": "lantern-keeper-char-1",
+   "focal_character_id": "the-borrowed-ladder-nell-ardery",
    "target_pad": {"pleasure": -0.7, "arousal": 0.8, "dominance": -0.5}}
 ]
 ```"""
@@ -100,7 +100,7 @@ def apply(state: dict, delta: dict) -> dict:
 
 @pytest.fixture
 def project(config_factory):
-    config = config_factory(project_id="lantern-keeper", revision_retry_cap=RETRY_CAP)
+    config = config_factory(project_id="the-borrowed-ladder", revision_retry_cap=RETRY_CAP)
     init_resources(config)
     load_seed(json.loads(SEED_PATH.read_text(encoding="utf-8")), config)
     set_node_config(config)
@@ -144,7 +144,7 @@ def endpoint(monkeypatch):
 async def drafted_state(project):
     """Walk the plan → draft slice and return the state the audit will see."""
     state = make_initial_state(
-        "lantern-keeper", FSM_Pointer(arc_id=ARC_ID, chapter_id="", beat_index=0)
+        "the-borrowed-ladder", FSM_Pointer(arc_id=ARC_ID, chapter_id="", beat_index=0)
     )
     apply(state, await plan_chapter(state))
     apply(state, await plan_beat(state))

@@ -41,8 +41,9 @@ async def test_workspace_offers_all_three_modes(config_factory, web_app):
 async def test_seed_page_prefills_the_example_seed(config_factory, web_app):
     app = await web_app(config_factory())
     body = await (await app.test_client().get("/setup")).get_data(as_text=True)
-    assert "word_count_target" in body
-    assert "lantern-keeper" in body
+    seed = _example_seed()
+    assert seed["project"]["id"] in body
+    assert seed["characters"][0]["name"] in body
 
 
 async def test_valid_seed_loads_and_flips_status(config_factory, web_app):

@@ -62,7 +62,10 @@ async def test_seeded_records_appear(config_factory, web_app):
 
     characters = await (await client.get("/database/records?type=Characters")).get_json()
     assert characters["total"] == 2
-    assert {record["name"] for record in characters["records"]} == {"Mara Vane", "Tomas Reed"}
+    # Derived from the seed file: a seed rewrite must not break this test.
+    assert {record["name"] for record in characters["records"]} == {
+        character["name"] for character in seed["characters"]
+    }
 
     emotions = await (await client.get("/database/records?type=CharacterEmotions")).get_json()
     assert emotions["total"] == 2
@@ -76,9 +79,11 @@ async def test_record_search_filters_rows(config_factory, web_app):
     load_seed(seed, config)
 
     client = app.test_client()
-    hit = await (await client.get("/database/records?type=Characters&q=tomas")).get_json()
+    wanted = seed["characters"][0]["name"]
+    query = wanted.split()[-1].lower()  # surname: unique to one row
+    hit = await (await client.get(f"/database/records?type=Characters&q={query}")).get_json()
     assert hit["total"] == 1
-    assert hit["records"][0]["name"] == "Tomas Reed"
+    assert hit["records"][0]["name"] == wanted
 
     miss = await (await client.get("/database/records?type=Characters&q=nobody")).get_json()
     assert miss["total"] == 0

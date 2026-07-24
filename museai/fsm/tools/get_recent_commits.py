@@ -11,10 +11,9 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from museai.fsm.nodes.deps import get_node_config
 from museai.fsm.tools.project_db import project_connection
 from museai.memory.db import get_recent_committed_beats
-
-_CLOSING_WORDS = 40
 
 GET_RECENT_COMMITS_TOOL_SPEC: dict[str, Any] = {
     "type": "function",
@@ -60,6 +59,9 @@ def get_recent_commits(limit: int = 5) -> list[dict]:
     with project_connection() as (conn, project_id):
         rows = get_recent_committed_beats(conn, project_id, limit)
 
+    # The tail of each beat is what the drafter continues from.
+    closing_words = get_node_config().tools.recent_commit_closing_words
+
     commits: list[dict] = []
     for row in rows:
         spec = _spec(row["beat_spec"])
@@ -71,7 +73,7 @@ def get_recent_commits(limit: int = 5) -> list[dict]:
                 "intent": str(spec.get("intent") or ""),
                 "exit_state": str(spec.get("exit_state") or ""),
                 "word_count": row["word_count"],
-                "closing_words": " ".join(words[-_CLOSING_WORDS:]),
+                "closing_words": " ".join(words[-closing_words:]),
             }
         )
     return commits

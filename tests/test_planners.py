@@ -14,6 +14,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from museai.core.config import GenerationConfig
 from museai.core.stream_bus import bus
 from museai.fsm.nodes import plan_beat as plan_beat_module
 from museai.fsm.nodes import plan_chapter as plan_chapter_module
@@ -25,7 +26,6 @@ from museai.fsm.nodes.plan_chapter import (
     plan_chapter,
 )
 from museai.fsm.pad import (
-    PAD_BAND_THRESHOLD,
     PAD_BASELINES_PATH,
     load_pad_baselines,
     pad_key,
@@ -49,6 +49,9 @@ from museai.memory.db import (
 )
 
 from conftest import patch_planner_llm
+
+# The PAD band half-width now lives in config; the band tests pin its default.
+PAD_BAND_THRESHOLD = GenerationConfig.model_fields["pad_band_threshold"].default
 
 ARC_ID = "arc-1"
 PROJECT_ID = "test-project"
@@ -769,7 +772,9 @@ def test_resolve_pad_constraint_covers_every_axis_combination():
     ],
 )
 def test_quantize_axis_bands(value, expected):
-    assert quantize_axis(value) == expected
+    # Pinned explicitly: the band boundaries are what is under test, not
+    # whichever threshold config.yaml happens to carry.
+    assert quantize_axis(value, PAD_BAND_THRESHOLD) == expected
 
 
 def test_pad_key_orders_axes_pleasure_arousal_dominance():

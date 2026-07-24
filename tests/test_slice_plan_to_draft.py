@@ -45,11 +45,11 @@ BEATS_JSON = """```json
 [
   {"ordering": 1, "intent": "The letter arrives in the day's post.",
    "entry_state": "A routine morning.", "exit_state": "Mara holds her own handwriting.",
-   "focal_character_id": "lantern-keeper-char-1",
+   "focal_character_id": "the-borrowed-ladder-nell-ardery",
    "target_pad": {"pleasure": -0.7, "arousal": 0.8, "dominance": -0.5}},
   {"ordering": 2, "intent": "Mara files the letter and tells no one.",
    "entry_state": "Mara holds the letter.", "exit_state": "The letter is locked away.",
-   "focal_character_id": "lantern-keeper-char-1",
+   "focal_character_id": "the-borrowed-ladder-nell-ardery",
    "target_pad": {"pleasure": -0.2, "arousal": -0.6, "dominance": 0.5}}
 ]
 ```"""
@@ -68,7 +68,7 @@ class _Response:
 @pytest.fixture
 def project(config_factory):
     """The example seed, loaded into a temp DB, with the nodes pointed at it."""
-    config = config_factory(project_id="lantern-keeper")
+    config = config_factory(project_id="the-borrowed-ladder")
     init_resources(config)
     load_seed(json.loads(SEED_PATH.read_text(encoding="utf-8")), config)
     set_node_config(config)
@@ -93,9 +93,9 @@ async def test_the_plan_to_draft_slice_composes(project, monkeypatch):
     monkeypatch.setattr(draft_prose_module, "run_agent_loop", fake_draft_loop)
 
     # The seed marks its first arc active.
-    arc_id = "lantern-keeper-arc-1"
+    arc_id = "the-borrowed-ladder-arc-1"
     state = make_initial_state(
-        "lantern-keeper", FSM_Pointer(arc_id=arc_id, chapter_id="", beat_index=0)
+        "the-borrowed-ladder", FSM_Pointer(arc_id=arc_id, chapter_id="", beat_index=0)
     )
 
     queue = bus.subscribe()

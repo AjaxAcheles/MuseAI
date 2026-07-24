@@ -12,13 +12,9 @@ import re
 from typing import Any
 
 from museai.fsm.nodes.audit import split_paragraphs
+from museai.fsm.nodes.deps import get_node_config
 from museai.fsm.tools.project_db import project_connection
 from museai.memory.db import get_characters, get_committed_beats
-
-# Enough lines to hear a voice; spread across the book so early and late
-# chapters both contribute.
-_MAX_SAMPLES = 8
-_MAX_SAMPLE_CHARS = 200
 
 # Straight or curly double quotes, non-greedy across one quoted run.
 _QUOTED = re.compile(r"[\"“]([^\"“”]+)[\"”]")
@@ -66,7 +62,14 @@ def _resolve(rows: list, wanted: str):
 
 
 def _dialogue_samples(prose_passages: list[str], name: str) -> list[str]:
-    """Quoted lines from paragraphs that mention ``name``, spread evenly."""
+    """Quoted lines from paragraphs that mention ``name``, spread evenly.
+
+    Enough lines to hear a voice, spread across the book so early and late
+    chapters both contribute.
+    """
+    tools = get_node_config().tools
+    max_samples = tools.character_dialogue_samples
+    max_sample_chars = tools.character_sample_chars
     mention = re.compile(rf"\b{re.escape(name.split()[0])}\b", re.IGNORECASE)
     lines: list[str] = []
     seen: set[str] = set()
@@ -75,14 +78,14 @@ def _dialogue_samples(prose_passages: list[str], name: str) -> list[str]:
             if not mention.search(paragraph):
                 continue
             for quoted in _QUOTED.findall(paragraph):
-                line = quoted.strip()[:_MAX_SAMPLE_CHARS]
+                line = quoted.strip()[:max_sample_chars]
                 if line and line not in seen:
                     seen.add(line)
                     lines.append(line)
-    if len(lines) <= _MAX_SAMPLES:
+    if len(lines) <= max_samples:
         return lines
-    step = len(lines) / _MAX_SAMPLES
-    return [lines[int(i * step)] for i in range(_MAX_SAMPLES)]
+    step = len(lines) / max_samples
+    return [lines[int(i * step)] for i in range(max_samples)]
 
 
 def get_character_sheet(name: str) -> dict:

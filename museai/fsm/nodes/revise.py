@@ -11,7 +11,7 @@ answer them. It works at the smallest scope that can fix the problem:
   pass against the complete failure list.
 
 Locating is three-tier: an exact ``str.find``, then a fuzzy scan over sliding
-windows (difflib ratio ≥ ``FUZZY_THRESHOLD``) to survive a critic that
+windows (difflib ratio ≥ ``revision.fuzzy_threshold``) to survive a critic that
 normalised a quotation mark, then failure. Overlapping spans also fall to full
 mode: splicing two rewrites of the same sentence would produce neither.
 
@@ -42,14 +42,6 @@ from museai.llm.structured import (
 
 PHASE = "Drafting"
 
-# A critic quoting the draft rarely mangles it beyond this. Below the threshold
-# the "span" is likelier a paraphrase, and rewriting the wrong sentence is worse
-# than rewriting the beat.
-FUZZY_THRESHOLD = 0.8
-
-# Fuzzy windows start on word boundaries: an offending span begins at a word.
-_MIN_SPAN_CHARS = 4
-
 
 def _word_starts(text: str) -> list[int]:
     """Offsets of every word start in ``text`` — the candidate span origins."""
@@ -58,13 +50,26 @@ def _word_starts(text: str) -> list[int]:
     return starts
 
 
-def fuzzy_find(draft: str, needle: str, threshold: float = FUZZY_THRESHOLD) -> tuple[int, int] | None:
+def fuzzy_find(
+    draft: str,
+    needle: str,
+    threshold: float | None = None,
+    min_span_chars: int | None = None,
+) -> tuple[int, int] | None:
     """Best near-match for ``needle`` in ``draft``, or ``None``.
 
     Slides a window of the needle's length across the draft's word boundaries and
-    keeps the highest-scoring window at or above ``threshold``.
+    keeps the highest-scoring window at or above ``threshold``. Both bounds
+    default to ``revision.fuzzy_threshold`` and ``revision.min_span_chars``;
+    the arguments exist so a caller (or a test) can pin them explicitly.
     """
-    if len(needle) < _MIN_SPAN_CHARS or not draft:
+    revision = get_node_config().revision
+    if threshold is None:
+        threshold = revision.fuzzy_threshold
+    if min_span_chars is None:
+        min_span_chars = revision.min_span_chars
+
+    if len(needle) < min_span_chars or not draft:
         return None
 
     matcher = SequenceMatcher(autojunk=False)
@@ -75,7 +80,7 @@ def fuzzy_find(draft: str, needle: str, threshold: float = FUZZY_THRESHOLD) -> t
 
     for start in _word_starts(draft):
         window = draft[start : start + len(needle)]
-        if len(window) < _MIN_SPAN_CHARS:
+        if len(window) < min_span_chars:
             break
         matcher.set_seq1(window)
         # quick_ratio is a cheap upper bound; skip windows that cannot win.
@@ -110,22 +115,19 @@ def _overlapping(spans: list[tuple[int, int]]) -> bool:
 # A span rewrite the model padded with copies of the surrounding prose splices
 # in as duplicated paragraphs — artifacts that have reached exported
 # manuscripts. Implausible rewrites are rejected and the beat falls back to a
-# full rewrite instead.
-_SPAN_GROWTH_LIMIT = 3
-_SPAN_GROWTH_SLACK = 400  # chars — a very short span may legitimately grow more
-_ECHO_MIN_WORDS = 8
+# full rewrite instead. The bounds live in ``revision:`` in config.yaml.
 
 
-def _verbatim_echo(replacement: str, surrounding: str) -> str | None:
-    """A run of ``_ECHO_MIN_WORDS`` words from ``replacement`` found verbatim
-    in the prose around the span, or ``None``. Whitespace-normalised on both
-    sides so a reflowed line still matches."""
+def _verbatim_echo(replacement: str, surrounding: str, min_words: int) -> str | None:
+    """A run of ``min_words`` words from ``replacement`` found verbatim in the
+    prose around the span, or ``None``. Whitespace-normalised on both sides so a
+    reflowed line still matches."""
     words = replacement.split()
-    if len(words) < _ECHO_MIN_WORDS:
+    if len(words) < min_words:
         return None
     surrounding_norm = " ".join(surrounding.split())
-    for start in range(len(words) - _ECHO_MIN_WORDS + 1):
-        window = " ".join(words[start : start + _ECHO_MIN_WORDS])
+    for start in range(len(words) - min_words + 1):
+        window = " ".join(words[start : start + min_words])
         if window in surrounding_norm:
             return window
     return None
@@ -133,12 +135,18 @@ def _verbatim_echo(replacement: str, surrounding: str) -> str | None:
 
 def replacement_rejection(draft: str, span: tuple[int, int], replacement: str) -> str | None:
     """Why this span rewrite must not be spliced, or ``None`` when it is safe."""
+    revision = get_node_config().revision
     start, end = span
     span_len = end - start
-    limit = max(_SPAN_GROWTH_LIMIT * span_len, span_len + _SPAN_GROWTH_SLACK)
+    limit = max(
+        revision.span_growth_limit * span_len,
+        span_len + revision.span_growth_slack_chars,
+    )
     if len(replacement) > limit:
         return f"replacement grew a {span_len}-char span to {len(replacement)} chars"
-    echo = _verbatim_echo(replacement, draft[:start] + draft[end:])
+    echo = _verbatim_echo(
+        replacement, draft[:start] + draft[end:], revision.echo_min_words
+    )
     if echo is not None:
         return f"replacement repeats surrounding prose: {echo[:80]!r}"
     return None
