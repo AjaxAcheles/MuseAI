@@ -24,7 +24,7 @@ from museai.fsm.nodes.deps import DraftingError, get_node_config
 from museai.fsm.state import OrchestratorState
 from museai.llm.structured import (
     StructuredOutputError,
-    truncation_remedy,
+    response_truncation_remedy,
     validate_plain_text_response,
 )
 from museai.fsm.tools.loop import run_agent_loop
@@ -105,7 +105,7 @@ async def draft_prose(state: OrchestratorState) -> dict:
     if response.finish_reason == "length":
         raise DraftingError(
             f"the draft for beat {beat_id!r} was cut off (finish_reason='length'): "
-            + truncation_remedy(empty=not response.text.strip())
+            + response_truncation_remedy(response, config.endpoint_for("drafter"))
         )
     try:
         draft = validate_plain_text_response(response.text, what=f"draft for beat {beat_id!r}")

@@ -18,6 +18,8 @@ from museai.llm.structured import (
     is_clean_verdict,
     parse_failure_objects,
     parse_json_array,
+    response_truncation_remedy,
+    truncation_remedy,
     validate_plain_text_response,
 )
 
@@ -27,6 +29,78 @@ VALID_FINDING = (
     '"suggested_fix": "make it blue again", '
     '"critic_source": "continuity_critic"}'
 )
+
+
+class TestTruncationRemedy:
+    """Which knob a cut-off reply actually points at.
+
+    The 2026-07-24 failure: OLLAMA_CONTEXT_LENGTH was unset, so Ollama served a
+    4096-token window against a declared 16384 while ignoring the num_ctx in
+    extra_body. Every role died with generic "shorten the prompt" advice, which
+    was the wrong fix — the prompt was sized correctly for the window the config
+    described, and only the server was wrong.
+    """
+
+    def test_a_partial_reply_points_at_the_output_cap(self):
+        remedy = truncation_remedy(empty=False)
+        assert "max_output_tokens" in remedy
+
+    def test_a_mismatched_window_is_named_with_both_numbers(self):
+        remedy = truncation_remedy(
+            empty=True,
+            context_window=16384,
+            served_prompt_tokens=4090,
+            served_completion_tokens=6,
+            mismatch_fraction=0.9,
+        )
+        assert "4096" in remedy and "16384" in remedy
+        assert "OLLAMA_CONTEXT_LENGTH" in remedy
+        # The distinguishing claim: the server, not the prompt, is the problem.
+        assert "smaller window than the config believes" in remedy
+
+    def test_a_genuinely_full_window_keeps_the_generic_advice(self):
+        # Served tokens reach the declared window, so the config is honest and
+        # the prompt really is too long. Naming a mismatch here would be a lie.
+        remedy = truncation_remedy(
+            empty=True,
+            context_window=16384,
+            served_prompt_tokens=16380,
+            served_completion_tokens=0,
+            mismatch_fraction=0.9,
+        )
+        assert "smaller window than the config believes" not in remedy
+        assert "shorten the prompt" in remedy
+
+    def test_without_served_counts_the_diagnosis_is_not_guessed(self):
+        # No usage block means no evidence about the server's real window, and
+        # an unfounded mismatch claim would send the reader after the wrong fix.
+        remedy = truncation_remedy(
+            empty=True, context_window=16384, served_prompt_tokens=None
+        )
+        assert "smaller window than the config believes" not in remedy
+
+    def test_the_ollama_extra_body_trap_is_called_out(self):
+        # extra_body's options.num_ctx is silently dropped by Ollama's /v1
+        # endpoint, so advice that recommends it sends the reader in a circle.
+        assert "silently" in truncation_remedy(empty=True)
+
+    def test_response_helper_reads_a_response_and_endpoint(self):
+        class _Response:
+            text = ""
+            served_prompt_tokens = 4090
+            served_completion_tokens = 6
+
+        class _Endpoint:
+            context_window = 16384
+
+        remedy = response_truncation_remedy(_Response(), _Endpoint())
+        assert "4096" in remedy and "16384" in remedy
+
+    def test_response_helper_degrades_on_an_unknown_shape(self):
+        # A stub or an older response shape must not raise a second error on top
+        # of the truncation it was called to explain.
+        remedy = response_truncation_remedy(object(), None)
+        assert "shorten the prompt" in remedy
 
 
 class TestElementKeysGuard:

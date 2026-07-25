@@ -44,11 +44,19 @@ endpoint:
   # than MuseAI's planner prompts, so generation gets zero room and every reply
   # comes back truncated (finish_reason "length", zero output). Widen it:
   #   extra_body: { options: { num_ctx: 16384 } }
-  # Note: some Ollama builds ignore `options` on the /v1 endpoint. The reliable
-  # levers are the OLLAMA_CONTEXT_LENGTH env var (e.g. OLLAMA_CONTEXT_LENGTH=16384
-  # ollama serve) or a Modelfile `PARAMETER num_ctx 16384`. Leave null to send
-  # nothing extra.
+  # Note: Ollama's /v1 endpoint ignores `options` — verified against 0.32.1, it
+  # discards the block without a word, so the line above is decoration there. The
+  # reliable levers are the OLLAMA_CONTEXT_LENGTH env var (e.g.
+  # OLLAMA_CONTEXT_LENGTH=16384 ollama serve) or a Modelfile
+  # `PARAMETER num_ctx 16384`. Whichever you use, confirm it took effect with
+  # `ollama ps` — the CONTEXT column is the only honest answer. Leave null to
+  # send nothing extra.
   extra_body: null
+  # Ask a streamed reply for its usage block (`stream_options.include_usage`).
+  # Without it, streamed calls have no server-reported token counts and a window
+  # smaller than `context_window` below cannot be told from an oversized prompt.
+  # Set false only for an endpoint that rejects the key outright.
+  stream_usage: true
   # The model's real context window, in tokens. When set, MuseAI trims assembled
   # prompts (planners and drafting) to leave output_reservation tokens free — so
   # a small window never fills up and leaves zero room to generate, whatever the
@@ -79,6 +87,10 @@ generation:
   critic_parse_retries: 2        # re-prompts when the critic's JSON will not parse
   critic_degrade_threshold: 3    # consecutive unreadable critics before degrading + warning
   planner_parse_retries: 2       # re-prompts when a planner's JSON will not parse
+  # A cut-off reply whose server-reported tokens fall below this fraction of
+  # endpoint.context_window is reported as a server/config mismatch — the server
+  # is serving a smaller window than configured — rather than an overlong prompt.
+  served_window_mismatch_fraction: 0.9
   repetition_threshold: 0.9      # paragraph similarity (0..1) that counts as duplicated prose
   repetition_min_run: 3          # consecutive near-duplicate sentences before a copy is faulted
   emotion_word_threshold: 0.3    # max proportion of sentences that may name an emotion outright

@@ -24,9 +24,19 @@ endpoint:
   # speed than the extra context is worth.
   #
   # This value must match what the server actually serves. Set it there too:
-  #   setx OLLAMA_CONTEXT_LENGTH 16384      (then restart `ollama serve`)
-  # extra_body is belt-and-braces — some Ollama builds ignore `options` on the
-  # /v1 endpoint, which is why the env var above is the load-bearing one.
+  #   setx OLLAMA_CONTEXT_LENGTH 16384
+  # then fully quit and relaunch Ollama (setx only reaches processes started
+  # after it runs), and CONFIRM with `ollama ps` that the CONTEXT column reads
+  # 16384 and PROCESSOR still says 100% GPU.
+  #
+  # Do not treat extra_body as a fallback: verified against Ollama 0.32.1, the
+  # /v1 compatibility endpoint discards the `options` block silently, so num_ctx
+  # below does nothing here. The env var is the only lever. It is left in place
+  # because it is honoured on the native /api/chat endpoint, and it is harmless
+  # where it is not — but on 2026-07-24 it was mistaken for a working safety net
+  # while the server quietly served 4096 against this declared 16384, which
+  # starved every role of output room. `generation.served_window_mismatch_fraction`
+  # now catches that gap and names both numbers.
   context_window: 16384
   extra_body:
     options:
@@ -52,6 +62,12 @@ generation:
   critic_parse_retries: 2
   critic_degrade_threshold: 3
   planner_parse_retries: 2
+  # A cut-off reply whose served token total falls below this fraction of
+  # context_window is reported as a server/config mismatch, naming both numbers.
+  # This is the guard for the 2026-07-24 failure: OLLAMA_CONTEXT_LENGTH was
+  # unset, Ollama served 4096 against a declared 16384, and every role failed
+  # with generic "shorten the prompt" advice that would never have fixed it.
+  served_window_mismatch_fraction: 0.9
   repetition_threshold: 0.9
   repetition_min_run: 3
   repetition_allowlist: []

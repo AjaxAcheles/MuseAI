@@ -90,6 +90,12 @@ class LLMResponse:
     # Chain-of-thought the model exposed, kept apart from `text` so no caller
     # ever mistakes deliberation for prose. Empty for non-reasoning models.
     thinking: str = ""
+    # The server's own counts, None when it reported none. `tokens_in`/`tokens_out`
+    # above fall back to our tokenizer's estimate and so are always populated;
+    # these stay None precisely so a caller can tell measurement from guess. A
+    # truncation diagnosis needs that distinction — see `truncation_remedy`.
+    served_prompt_tokens: int | None = None
+    served_completion_tokens: int | None = None
 
 
 class LLMCallError(Exception):
@@ -206,6 +212,11 @@ def _build_request(
         "temperature": endpoint.temperature if temperature is None else temperature,
         "stream": stream,
     }
+    if stream and endpoint.stream_usage:
+        # A streamed reply carries no usage block unless asked. Without it the
+        # only token counts available are our own tokenizer's estimates, which
+        # cannot contradict a wrong context_window — see _usage_counts.
+        body["stream_options"] = {"include_usage": True}
     if max_tokens is not None:
         body["max_tokens"] = max_tokens
     if tools is not None:
@@ -385,6 +396,61 @@ class _ThinkTagSplitter:
         kind = "thinking" if self._mode == "thinking" else "response"
         self._mode = "response"
         return [(kind, buffered)]
+
+
+def _usage_counts(raw: Mapping[str, Any]) -> tuple[int | None, int | None]:
+    """The server's own ``(prompt_tokens, completion_tokens)``, if it reported them.
+
+    These are the only authoritative token counts in the system. Everything else
+    — ``context_token_budget``, the pruner's drop loop, the ``max_tokens``
+    remainder — is computed from :mod:`museai.llm.tokenizer`, which for
+    ``char_heuristic`` is a length/4 approximation and for ``tiktoken`` is the
+    wrong BPE table whenever the endpoint is not an OpenAI model. Neither can
+    detect that a server is serving a *smaller window than it was configured
+    for*, because both describe the prompt we sent rather than the prompt the
+    server accepted. The usage block does, which is what makes a truncation
+    diagnosable instead of merely reportable.
+
+    Returns ``(None, None)`` when the endpoint omits usage, so callers fall back
+    to the estimate rather than treating a missing count as zero.
+
+    Handles both response shapes: a non-streamed payload carries ``usage`` at the
+    top level, while a streamed one is ``{"stream": True, "chunks": [...]}`` with
+    usage in a trailing chunk that has an empty ``choices`` list.
+    """
+
+    def _read(block: Any) -> tuple[int | None, int | None]:
+        if not isinstance(block, Mapping):
+            return None, None
+        prompt = block.get("prompt_tokens")
+        completion = block.get("completion_tokens")
+        # A non-integer (or bool, which int accepts) count is a broken endpoint,
+        # not something to propagate into a budget calculation.
+        if not isinstance(prompt, int) or isinstance(prompt, bool) or prompt < 0:
+            prompt = None
+        if (
+            not isinstance(completion, int)
+            or isinstance(completion, bool)
+            or completion < 0
+        ):
+            completion = None
+        return prompt, completion
+
+    if raw.get("stream"):
+        # Last writer wins: the usage chunk is emitted once, at the end.
+        prompt_tokens: int | None = None
+        completion_tokens: int | None = None
+        for chunk in raw.get("chunks") or []:
+            if not isinstance(chunk, Mapping):
+                continue
+            found_prompt, found_completion = _read(chunk.get("usage"))
+            if found_prompt is not None:
+                prompt_tokens = found_prompt
+            if found_completion is not None:
+                completion_tokens = found_completion
+        return prompt_tokens, completion_tokens
+
+    return _read(raw.get("usage"))
 
 
 def _parse_response(
@@ -964,10 +1030,24 @@ async def call_llm(
             )
             continue
 
-        tokens_in = count_message_tokens(
-            messages, endpoint.tokenizer_family, endpoint.model_name
+        # Prefer what the server counted over what we estimated. Beyond accuracy,
+        # `tokens_out` from the estimate counts `text` alone, so a reasoning model
+        # that spent its budget thinking reports near-zero output; the server's
+        # completion_tokens includes that deliberation and shows where the budget
+        # actually went.
+        served_prompt_tokens, served_completion_tokens = _usage_counts(raw)
+        tokens_in = (
+            served_prompt_tokens
+            if served_prompt_tokens is not None
+            else count_message_tokens(
+                messages, endpoint.tokenizer_family, endpoint.model_name
+            )
         )
-        tokens_out = count_tokens(text, endpoint.tokenizer_family, endpoint.model_name)
+        tokens_out = (
+            served_completion_tokens
+            if served_completion_tokens is not None
+            else count_tokens(text, endpoint.tokenizer_family, endpoint.model_name)
+        )
         _log_response(
             safe_url,
             endpoint,
@@ -1002,6 +1082,8 @@ async def call_llm(
             tool_calls=tool_calls,
             finish_reason=finish_reason,
             thinking=thinking,
+            served_prompt_tokens=served_prompt_tokens,
+            served_completion_tokens=served_completion_tokens,
         )
 
     summary = (

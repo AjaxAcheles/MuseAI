@@ -39,7 +39,7 @@ from museai.llm.prompts import render_messages
 from museai.llm.structured import (
     StructuredOutputError,
     parse_failure_objects,
-    truncation_remedy,
+    response_truncation_remedy,
 )
 
 PHASE = "Auditing"
@@ -177,7 +177,9 @@ async def adversarial_critics(state: OrchestratorState) -> dict:
             if last_truncated:
                 raise StructuredOutputError(
                     "critic reply was cut off (finish_reason='length'): "
-                    + truncation_remedy(empty=not last_text.strip())
+                    + response_truncation_remedy(
+                        response, config.endpoint_for("critic")
+                    )
                 )
             failures = parse_failure_objects(response.text)
             break

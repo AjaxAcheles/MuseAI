@@ -50,7 +50,7 @@ from museai.llm.structured import (
     StructuredOutputError,
     TruncatedResponseError,
     parse_json_array,
-    truncation_remedy,
+    response_truncation_remedy,
 )
 
 # Carries the validation error verbatim. A model that wrote `("It was stronger")`
@@ -169,6 +169,10 @@ async def call_llm_for_json_array(
     last_text = ""
     last_error = ""
     last_truncated = False
+    # Kept alongside last_text because the final truncation error is raised after
+    # the retry loop, where the response carrying the served token counts is
+    # otherwise out of scope.
+    last_response: Any = None
     reset_done = False
 
     def _parse(text: str, *, repair: bool = False) -> list[dict]:
@@ -186,6 +190,7 @@ async def call_llm_for_json_array(
         working: list = []
         response = await _ask(conversation, working)
         last_text = response.text
+        last_response = response
         last_truncated = getattr(response, "finish_reason", None) == "length"
 
         if last_truncated:
@@ -194,7 +199,7 @@ async def call_llm_for_json_array(
             empty = not last_text.strip()
             last_error = (
                 f"the {what} reply was cut off (finish_reason='length'): "
-                + truncation_remedy(empty=empty)
+                + response_truncation_remedy(response, endpoint)
             )
             log_node_event(
                 node,
@@ -271,7 +276,7 @@ async def call_llm_for_json_array(
         # Repairing half a written array is nonsense; name the actual cause.
         raise TruncatedResponseError(
             f"every {what} reply was cut off (finish_reason='length'): "
-            + truncation_remedy(empty=not last_text.strip())
+            + response_truncation_remedy(last_response, endpoint)
         )
 
     # Last rung: the model will not fix its own quoting, so we do — and say so.

@@ -104,7 +104,14 @@ class AmbiguousStructuredOutputError(StructuredOutputError):
     """More than one complete payload could be read from one model reply."""
 
 
-def truncation_remedy(*, empty: bool) -> str:
+def truncation_remedy(
+    *,
+    empty: bool,
+    context_window: int | None = None,
+    served_prompt_tokens: int | None = None,
+    served_completion_tokens: int | None = None,
+    mismatch_fraction: float | None = None,
+) -> str:
     """Remediation clause for a ``finish_reason == "length"`` failure.
 
     ``empty`` distinguishes the two ways a reply gets cut off, which need
@@ -113,18 +120,78 @@ def truncation_remedy(*, empty: bool) -> str:
     nothing; the window has to grow or the prompt has to shrink. A non-empty
     reply that stopped mid-array is a genuine output-length limit, where
     ``max_output_tokens`` is the right knob.
+
+    The server's own counts, when it reported them, separate those two further.
+    A reply that died with zero output has hit the server's wall, so the tokens
+    it admits to processing approximate the window it is *actually* serving. When
+    that total falls well short of the declared ``context_window``, the prompt is
+    not too long in any absolute sense — the server is smaller than the config
+    believes, and no amount of pruning to a budget derived from the wrong number
+    will help. Saying so with both figures is the difference between a fix and an
+    afternoon. (This is not hypothetical: on 2026-07-24 an unset
+    ``OLLAMA_CONTEXT_LENGTH`` served 4096 against a declared 16384, and the
+    generic advice below sent the reader after the prompt instead of the server.)
+
+    ``mismatch_fraction`` defaults to
+    ``generation.served_window_mismatch_fraction``; the argument exists so a
+    caller (or a test) can pin it explicitly. The import is deferred so this
+    module stays free of an ``fsm`` import at load time.
     """
-    if empty:
+    if not empty:
         return (
-            "the prompt filled the endpoint's context window and left no room to "
-            "generate (zero output tokens). Widen the model's context window "
-            "(for Ollama: set OLLAMA_CONTEXT_LENGTH, a Modelfile 'num_ctx', or "
-            "endpoint.extra_body={'options': {'num_ctx': N}}), shorten the "
-            "prompt, or ask for a shorter answer"
+            "raise endpoint.max_output_tokens (or leave it unset to omit the cap) "
+            "or ask for a shorter answer"
         )
+
+    if context_window is not None and served_prompt_tokens is not None:
+        if mismatch_fraction is None:
+            from museai.fsm.nodes.deps import get_node_config
+
+            mismatch_fraction = (
+                get_node_config().generation.served_window_mismatch_fraction
+            )
+        served_total = served_prompt_tokens + (served_completion_tokens or 0)
+        if served_total < context_window * mismatch_fraction:
+            return (
+                f"the endpoint stopped after {served_total} tokens "
+                f"({served_prompt_tokens} of them prompt), far short of the "
+                f"declared endpoint.context_window of {context_window}. The "
+                f"server is serving a smaller window than the config believes, "
+                f"so every prompt budget derived from {context_window} is too "
+                f"large. Fix the server rather than the prompt: for Ollama set "
+                f"OLLAMA_CONTEXT_LENGTH and restart it, then confirm with "
+                f"'ollama ps' that the CONTEXT column reads {context_window} "
+                f"(note that 'options.num_ctx' in extra_body is silently ignored "
+                f"by Ollama's /v1 endpoint). Otherwise lower "
+                f"endpoint.context_window to what the server really serves"
+            )
+
     return (
-        "raise endpoint.max_output_tokens (or leave it unset to omit the cap) "
-        "or ask for a shorter answer"
+        "the prompt filled the endpoint's context window and left no room to "
+        "generate (zero output tokens). Widen the model's context window "
+        "(for Ollama: set OLLAMA_CONTEXT_LENGTH and restart the server — note "
+        "that endpoint.extra_body={'options': {'num_ctx': N}} is silently "
+        "ignored by Ollama's /v1 endpoint), shorten the prompt, or ask for a "
+        "shorter answer"
+    )
+
+
+def response_truncation_remedy(response: Any, endpoint: Any = None) -> str:
+    """:func:`truncation_remedy` filled in from an ``LLMResponse`` and its endpoint.
+
+    Every caller that inspects ``finish_reason == "length"`` already holds both
+    objects, and each was previously passing ``empty=`` by hand; this keeps the
+    served-token diagnosis from having to be re-derived (or forgotten) at five
+    call sites. Attributes are read defensively, matching how these call sites
+    already reach for ``finish_reason``, so a caller holding a stub or an older
+    response shape degrades to the generic advice instead of raising a second
+    error on top of the truncation it was trying to report.
+    """
+    return truncation_remedy(
+        empty=not (getattr(response, "text", "") or "").strip(),
+        context_window=getattr(endpoint, "context_window", None),
+        served_prompt_tokens=getattr(response, "served_prompt_tokens", None),
+        served_completion_tokens=getattr(response, "served_completion_tokens", None),
     )
 
 

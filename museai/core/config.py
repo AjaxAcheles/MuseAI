@@ -78,7 +78,19 @@ class EndpointConfig(BaseModel):
     # Merged verbatim into every request body. The endpoint-agnostic escape hatch
     # for server-specific knobs the OpenAI shape has no field for — notably
     # Ollama's context window: extra_body={"options": {"num_ctx": 16384}}.
+    #
+    # Be aware that a server is free to ignore what it does not recognise, and
+    # silently: Ollama's /v1 compatibility layer drops `options` entirely (verified
+    # against 0.32.1), so num_ctx there is decoration, not configuration. This is
+    # why served_prompt_tokens is checked against context_window at the call site —
+    # an escape hatch you cannot verify is an escape hatch you cannot trust.
     extra_body: dict[str, Any] | None = None
+    # Ask the endpoint to append a usage block to its stream (the OpenAI-documented
+    # `stream_options.include_usage`). Non-streamed replies carry usage unasked;
+    # streamed ones do not, and without it a streaming-only deployment can never
+    # learn the server's real token counts. Default on because both OpenAI and
+    # Ollama honour it; set false for an endpoint that 400s on the unknown key.
+    stream_usage: bool = True
     # The model's real context window, in tokens. When set, MuseAI trims assembled
     # prompts (planners and drafting) to leave output_reservation tokens free, so
     # a small window never leaves zero room to generate. None = trust the endpoint
@@ -159,6 +171,7 @@ class AgentEndpointOverride(BaseModel):
     temperature: float | None = None
     max_output_tokens: int | None = None
     extra_body: dict[str, Any] | None = None
+    stream_usage: bool | None = None
     context_window: int | None = None
     output_reservation: int | None = None
     max_attempts: int | None = None
@@ -202,6 +215,14 @@ class GenerationConfig(BaseModel):
     # JSON array. A planner cannot degrade the way the critic can — there is no
     # honest empty plan — so this budget, then a quote repair, then the run dies.
     planner_parse_retries: int
+    # When a reply is cut off with zero output, the tokens the server admits to
+    # having processed approximate the window it is actually serving. Below this
+    # fraction of the declared `endpoint.context_window`, the gap is called out as
+    # a server/config mismatch rather than a prompt that is merely too long. A
+    # proportion: 0.9 means the served window must reach 90% of the declared one.
+    # Slack, because a server counts the prompt with its own tokenizer and stops a
+    # little short of the exact boundary.
+    served_window_mismatch_fraction: float
     # --- Repetition guard (audit) ------------------------------------------
     # Similarity at or above which two paragraphs count as "the same" prose.
     # A proportion: 0.9 means 90% of the difflib ratio.

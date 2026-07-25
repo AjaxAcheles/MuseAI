@@ -36,7 +36,7 @@ from museai.llm.prompts import render_messages
 from museai.llm.tokenizer import count_message_tokens
 from museai.llm.structured import (
     StructuredOutputError,
-    truncation_remedy,
+    response_truncation_remedy,
     validate_plain_text_response,
 )
 
@@ -229,7 +229,7 @@ async def _rewrite(config, messages: list[dict], what: str, beat_id: str) -> str
     if response.finish_reason == "length":
         raise DraftingError(
             f"the revision of {what} was cut off (finish_reason='length'): "
-            + truncation_remedy(empty=not response.text.strip())
+            + response_truncation_remedy(response, config.endpoint_for("reviser"))
         )
     try:
         revised = validate_plain_text_response(response.text, what=f"revision of {what}")

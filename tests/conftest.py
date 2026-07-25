@@ -50,6 +50,7 @@ _GENERATION_DEFAULTS = dict(
     critic_parse_retries=2,
     critic_degrade_threshold=3,
     planner_parse_retries=2,
+    served_window_mismatch_fraction=0.9,
     repetition_threshold=0.9,
     repetition_min_run=3,
     emotion_word_threshold=0.3,

@@ -142,6 +142,54 @@ class TestBuildRequest:
         assert body["top_p"] == 0.5
         assert body["stream"] is True
 
+    def test_a_streamed_request_asks_for_the_usage_block(self, endpoint):
+        _, _, body = _build_request(
+            endpoint,
+            MESSAGES,
+            stream=True,
+            temperature=None,
+            max_tokens=None,
+            tools=None,
+            tool_choice=None,
+            response_format=None,
+            extra_body=None,
+            extra_headers=None,
+        )
+        assert body["stream_options"] == {"include_usage": True}
+
+    def test_a_non_streamed_request_does_not(self, endpoint):
+        # Usage arrives unasked on a non-streamed reply; sending the key anyway
+        # is surface area for an endpoint that validates it strictly.
+        _, _, body = _build_request(
+            endpoint,
+            MESSAGES,
+            stream=False,
+            temperature=None,
+            max_tokens=None,
+            tools=None,
+            tool_choice=None,
+            response_format=None,
+            extra_body=None,
+            extra_headers=None,
+        )
+        assert "stream_options" not in body
+
+    def test_stream_usage_false_suppresses_the_key(self, endpoint):
+        # The escape hatch for an endpoint that 400s on stream_options.
+        _, _, body = _build_request(
+            endpoint.model_copy(update={"stream_usage": False}),
+            MESSAGES,
+            stream=True,
+            temperature=None,
+            max_tokens=None,
+            tools=None,
+            tool_choice=None,
+            response_format=None,
+            extra_body=None,
+            extra_headers=None,
+        )
+        assert "stream_options" not in body
+
     def test_authorization_header_carries_the_key(self, endpoint):
         _, headers, _ = _build_request(
             endpoint,
@@ -157,6 +205,89 @@ class TestBuildRequest:
         )
         assert headers["Authorization"] == "Bearer secret-key-do-not-log"
         assert headers["X-Trace"] == "abc"
+
+
+class TestServedUsage:
+    """The server's own token counts, which are the only authoritative ones.
+
+    They are what lets a truncation be diagnosed as "the server is serving a
+    smaller window than configured" rather than "the prompt is too long" — the
+    two need opposite fixes, and the tokenizer's estimate cannot tell them apart
+    because it describes the prompt we sent, not the one the server accepted.
+    """
+
+    async def test_non_streamed_usage_beats_the_estimate(self, endpoint):
+        transport = httpx.MockTransport(
+            lambda r: json_response(
+                completion(
+                    "hello world",
+                    usage={
+                        "prompt_tokens": 4096,
+                        "completion_tokens": 17,
+                        "total_tokens": 4113,
+                    },
+                )
+            )
+        )
+        result = await call_llm(endpoint, MESSAGES, transport=transport)
+
+        assert result.served_prompt_tokens == 4096
+        assert result.served_completion_tokens == 17
+        assert result.tokens_in == 4096
+        # 17, not the char_heuristic's 3 for "hello world".
+        assert result.tokens_out == 17
+
+    async def test_a_streamed_usage_chunk_is_read(self, endpoint):
+        transport = httpx.MockTransport(
+            lambda r: httpx.Response(
+                200,
+                content=sse(
+                    content_chunk("hello", finish_reason=None),
+                    content_chunk("", finish_reason="stop"),
+                    {
+                        "choices": [],
+                        "usage": {
+                            "prompt_tokens": 4090,
+                            "completion_tokens": 6,
+                            "total_tokens": 4096,
+                        },
+                    },
+                ),
+            )
+        )
+        result = await call_llm(endpoint, MESSAGES, stream=True, transport=transport)
+
+        assert result.text == "hello"
+        assert result.served_prompt_tokens == 4090
+        assert result.served_completion_tokens == 6
+
+    async def test_absent_usage_falls_back_to_the_estimate(self, endpoint):
+        transport = httpx.MockTransport(lambda r: json_response(completion("hello world")))
+        result = await call_llm(endpoint, MESSAGES, transport=transport)
+
+        # None, not 0: a caller must be able to tell "unmeasured" from "measured
+        # as nothing", because only the latter justifies a mismatch diagnosis.
+        assert result.served_prompt_tokens is None
+        assert result.served_completion_tokens is None
+        assert result.tokens_out == 3
+        assert result.tokens_in == count_message_tokens(
+            MESSAGES, "char_heuristic", "test-model"
+        )
+
+    async def test_a_malformed_usage_block_is_ignored(self, endpoint):
+        transport = httpx.MockTransport(
+            lambda r: json_response(
+                completion(
+                    "hello world",
+                    usage={"prompt_tokens": "lots", "completion_tokens": -3},
+                )
+            )
+        )
+        result = await call_llm(endpoint, MESSAGES, transport=transport)
+
+        assert result.served_prompt_tokens is None
+        assert result.served_completion_tokens is None
+        assert result.tokens_out == 3
 
 
 class TestNonStreaming:
