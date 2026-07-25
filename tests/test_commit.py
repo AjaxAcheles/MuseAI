@@ -116,6 +116,9 @@ async def test_commit_writes_pending_intent_then_flips_to_committed(config_facto
         "critic_failures": [],
         "best_seen_draft": None,
         "best_seen_failure_count": None,
+        # The revise history belongs to the beat just committed, not the next one.
+        "pre_revise_failure_count": None,
+        "last_cycle_improved": True,
         "current_draft_text": "",
         "streaming_buffer": "",
         "review_requested": False,

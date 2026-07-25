@@ -6,8 +6,9 @@ state and names the next node. First match wins.
 1. An unreadable critic below its degradation threshold → ``retry_critic``.
 2. An unreadable critic at the threshold with no salvageable findings → ``review``.
 3. No outstanding failures → ``commit``.
-4. Failures, and the revision budget is not spent → ``revise``.
-5. Failures, and the budget *is* spent → ``review``.
+4. A revise already ran and did not lower the failure count it was handed → ``review``.
+5. Failures, and the revision budget is not spent → ``revise``.
+6. Failures, and the budget *is* spent → ``review``.
 
 ``review`` is a safe boundary, not a verdict. The router does not discard the
 draft, does not accept it, and does not restore ``best_seen_draft`` — it only
@@ -39,6 +40,15 @@ def mode_selector(state: OrchestratorState) -> str:
     cap = config.generation.revision_retry_cap
     parse_streak = state["critic_parse_failure_streak"]
     degrade_threshold = config.generation.critic_degrade_threshold
+    # A revise already ran and its rewrite did not lower the failure count it
+    # was handed: another revise would spend a full critic pass re-running the
+    # same non-improving cycle (e.g. a beat stuck at an unchanged
+    # passive_density across four retries). `last_cycle_improved` is critics.py's
+    # verdict against `pre_revise_failure_count`, which only revise moves — a
+    # critic re-score of unchanged prose is not a failed cycle. The
+    # `retry_count > 0` guard is redundant with that baseline but says the
+    # precondition out loud.
+    no_progress = retry_count > 0 and not state["last_cycle_improved"]
 
     if 0 < parse_streak < degrade_threshold:
         # A parser failure is not a clean verdict. Retry the critic itself at a
@@ -50,6 +60,8 @@ def mode_selector(state: OrchestratorState) -> str:
         destination = REVIEW
     elif failures == 0:
         destination = COMMIT
+    elif no_progress:
+        destination = REVIEW
     elif retry_count < cap:
         destination = REVISE
     else:
@@ -64,5 +76,7 @@ def mode_selector(state: OrchestratorState) -> str:
         revision_retry_cap=cap,
         critic_parse_failure_streak=parse_streak,
         critic_degrade_threshold=degrade_threshold,
+        last_cycle_improved=state["last_cycle_improved"],
+        no_progress=no_progress,
     )
     return destination

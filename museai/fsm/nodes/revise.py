@@ -337,5 +337,9 @@ async def revise_prose(state: OrchestratorState) -> dict:
         "current_draft_text": revised,
         "streaming_buffer": revised,
         "retry_count": retry_count,
+        # The score this rewrite has to beat. Only revise moves it, so a critic
+        # re-score of unchanged prose (the retry_critic edge) still compares
+        # against the draft that was actually handed here.
+        "pre_revise_failure_count": len(failures),
         "critic_failures": [],
     }

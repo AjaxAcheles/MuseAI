@@ -80,6 +80,32 @@ ONE_FAILURE = """```json
 CLEAN = "[]"
 
 
+def _findings(*quotes: str) -> str:
+    """A critic verdict naming one finding per quote."""
+    elements = ",\n".join(
+        f"""  {{
+    "error_code": "CONTRADICTS_CHARACTER",
+    "offending_text": "{quote}",
+    "suggested_fix": "Rework this.",
+    "critic_source": "continuity_critic"
+  }}"""
+        for quote in quotes
+    )
+    return f"```json\n[\n{elements}\n]\n```"
+
+
+# Findings quoting prose the critic paraphrased rather than copied. `locate`
+# finds none of them, so `revise` takes its full-rewrite path and the scripted
+# replacement draft is exactly what the next cycle audits.
+THREE_FAILURES = _findings("She dated the letter.", "He waited.", "The clerk left.")
+TWO_FAILURES = _findings("She dated the letter.", "He waited.")
+
+# Three sentences each, so every draft stays under `passive_min_sentences` and
+# the programmatic audit contributes nothing to the counts under test.
+REWRITE_ONE = "Rain crossed the roof. Mara set the letter down. She waited."
+REWRITE_TWO = "The lamp guttered. Mara folded the letter twice. She stood up."
+
+
 class _Response:
     def __init__(self, text: str) -> None:
         self.text = text
@@ -111,8 +137,11 @@ def project(config_factory):
 def endpoint(monkeypatch):
     """Fake the four call sites; the critic's responses are scripted per test."""
 
-    def _install(critic_responses: list[str]):
+    def _install(critic_responses: list[str], revise_responses: list[str] | None = None):
         scripted = list(critic_responses)
+        # Left unscripted, every rewrite returns the same repaired sentence; a
+        # test walking several cycles scripts a distinct draft per cycle instead.
+        revisions = list(revise_responses or [])
 
         async def fake_chapter_llm(endpoint, messages, **kwargs):
             return _Response(CHAPTERS_JSON)
@@ -131,7 +160,7 @@ def endpoint(monkeypatch):
             return _Response(scripted.pop(0))
 
         async def fake_revise_loop(endpoint, messages, tools, tool_impls, max_iterations, **kwargs):
-            return _Response(REPAIRED)
+            return _Response(revisions.pop(0) if revisions else REPAIRED)
 
         patch_planner_llm(monkeypatch, chapter=fake_chapter_llm, beat=fake_beat_llm)
         monkeypatch.setattr(draft_prose_module, "run_agent_loop", fake_draft_loop)
@@ -194,20 +223,24 @@ async def test_a_failure_that_survives_the_cap_reaches_review(project, endpoint)
 
     state = await drafted_state(project)
 
-    for expected_retry in range(RETRY_CAP):
-        apply(state, await audit(state))
-        apply(state, await adversarial_critics(state))
-        assert len(state["critic_failures"]) == 1
-        assert mode_selector(state) == "revise"
-
-        apply(state, await revise_prose(state))
-        assert state["retry_count"] == expected_retry + 1
-
-    # The budget is spent and the failure is still there.
+    # First cycle: nothing to compare against yet, so the router revises.
     apply(state, await audit(state))
     apply(state, await adversarial_critics(state))
-    assert state["retry_count"] == RETRY_CAP
     assert len(state["critic_failures"]) == 1
+    assert mode_selector(state) == "revise"
+
+    apply(state, await revise_prose(state))
+    assert state["retry_count"] == 1
+
+    # Second cycle: the same failure count as the first, so the retry made no
+    # progress. The no-progress rule routes straight to review rather than
+    # spending the rest of `revision_retry_cap` on cycles that will not help
+    # (see mode_selector's `last_cycle_improved` check) — it need not exhaust
+    # the cap to prove the point.
+    apply(state, await audit(state))
+    apply(state, await adversarial_critics(state))
+    assert len(state["critic_failures"]) == 1
+    assert state["last_cycle_improved"] is False
 
     assert mode_selector(state) == REVIEW
 
@@ -217,3 +250,36 @@ async def test_a_failure_that_survives_the_cap_reaches_review(project, endpoint)
     assert state["best_seen_draft"] is not None
     assert state["best_seen_failure_count"] == 1
     assert state["review_requested"] is False
+
+
+async def test_a_beat_that_keeps_improving_spends_its_whole_retry_budget(
+    project, endpoint
+):
+    """The no-progress rule must not shorten a beat that *is* getting better.
+    Nothing else drives more than one revise cycle end to end, so without this
+    `revision_retry_cap > 1` is untested against real nodes."""
+    # Three findings, then two, then one: every cycle lowers the count.
+    endpoint(
+        [THREE_FAILURES, TWO_FAILURES, ONE_FAILURE],
+        revise_responses=[REWRITE_ONE, REWRITE_TWO],
+    )
+
+    state = await drafted_state(project)
+
+    for cycle, expected in enumerate((3, 2, 1)):
+        apply(state, await audit(state))
+        apply(state, await adversarial_critics(state))
+        assert len(state["critic_failures"]) == expected
+        assert state["last_cycle_improved"] is True
+
+        if cycle < RETRY_CAP:
+            assert mode_selector(state) == "revise"
+            apply(state, await revise_prose(state))
+            assert state["retry_count"] == cycle + 1
+            # The count this rewrite has to beat, carried for the next cycle.
+            assert state["pre_revise_failure_count"] == expected
+
+    # The budget is spent with a failure still outstanding, so the beat parks at
+    # the human boundary — reached by exhausting the cap, not by no-progress.
+    assert state["retry_count"] == RETRY_CAP
+    assert mode_selector(state) == REVIEW

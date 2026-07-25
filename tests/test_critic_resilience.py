@@ -16,11 +16,14 @@ import logging
 
 import pytest
 
+from museai.core.config import EndpointConfig
 from museai.core.stream_bus import bus
 from museai.fsm.nodes import critics as critics_module
 from museai.fsm.nodes.critics import adversarial_critics
 from museai.fsm.nodes.deps import set_node_config
 from museai.fsm.state import FSM_Pointer, make_initial_state
+from museai.fsm.tools.loop import AgentLoopError
+from museai.llm.client import LLMCallError
 from museai.llm.structured import StructuredOutputError, parse_failure_objects
 
 # The reply that killed the run, recovered verbatim from logs/llm_io.log.
@@ -269,6 +272,151 @@ async def test_a_clean_critic_never_retries(configure, scripted_loop):
 # ---------------------------------------------------------------- the streak
 
 
+async def test_a_call_failure_does_not_kill_the_run(configure, monkeypatch):
+    """`run_agent_loop` raising `LLMCallError` (an exhausted empty-completion
+    retry budget) must be survived exactly like an unreadable verdict, not
+    propagate and end a multi-hour generation."""
+    configure(critic_parse_retries=2, critic_degrade_threshold=3)
+
+    async def always_fails(*args, **kwargs):
+        raise LLMCallError("endpoint returned empty completions repeatedly")
+
+    monkeypatch.setattr(critics_module, "run_agent_loop", always_fails)
+
+    delta = await adversarial_critics(state_with())  # must not raise
+
+    assert delta["critic_parse_failure_streak"] == 1
+    assert "critic_failures" not in delta
+
+
+async def test_a_call_failure_is_retried_then_can_still_succeed(configure, monkeypatch):
+    configure(critic_parse_retries=1, critic_degrade_threshold=3)
+    attempts = 0
+
+    async def fails_once(*args, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise LLMCallError("transient empty completion")
+        return _Response(CLEAN)
+
+    monkeypatch.setattr(critics_module, "run_agent_loop", fails_once)
+
+    delta = await adversarial_critics(state_with())
+
+    assert attempts == 2
+    assert delta["critic_parse_failure_streak"] == 0
+    assert "critic_failures" not in delta
+
+
+async def test_a_stuck_tool_loop_does_not_kill_the_run(configure, monkeypatch):
+    """`run_agent_loop` raises `AgentLoopError` when an endpoint keeps emitting
+    tool calls after the schemas were withheld — the stuck-local-model case the
+    strike-out reaches sooner than the iteration cap did. It must degrade like
+    any other unreadable verdict, not end the generation."""
+    configure(critic_parse_retries=0, critic_degrade_threshold=3)
+
+    async def always_stuck(*args, **kwargs):
+        raise AgentLoopError(
+            "endpoint returned tool calls after tools were withheld at the loop limit"
+        )
+
+    monkeypatch.setattr(critics_module, "run_agent_loop", always_stuck)
+
+    delta = await adversarial_critics(state_with())  # must not raise
+
+    assert delta["critic_parse_failure_streak"] == 1
+    assert "critic_failures" not in delta
+
+
+async def test_a_retry_that_would_overflow_the_window_drops_the_carried_context(
+    configure, monkeypatch, config_factory
+):
+    """Carrying tool results forward is an optimisation, not a contract. When the
+    accumulated conversation no longer leaves the output reservation free, the
+    retry restarts from the trimmed prompt rather than sending a request that
+    will come back truncated."""
+    # A window barely wider than the prompt: one carried tool result overflows it.
+    set_node_config(
+        config_factory(
+            critic_parse_retries=1,
+            critic_degrade_threshold=3,
+            endpoint=EndpointConfig(
+                base_url="http://127.0.0.1:1234/v1",
+                api_key="test-key",
+                model_name="test-model",
+                tokenizer_family="char_heuristic",
+                context_window=2048,
+                output_reservation=512,
+            ),
+        )
+    )
+    calls: list[list[dict]] = []
+
+    async def fake_loop(endpoint, messages, tools, tool_impls, max_iterations,
+                        on_event=None, conversation_out=None, **kwargs):
+        calls.append(list(messages))
+        if len(calls) == 1 and conversation_out is not None:
+            conversation_out[:] = [
+                *messages,
+                {"role": "assistant", "content": "", "tool_calls": [
+                    {"id": "c1", "type": "function",
+                     "function": {"name": "web_search", "arguments": "{}"}},
+                ]},
+                {"role": "tool", "tool_call_id": "c1", "name": "web_search",
+                 "content": "x" * 4000},
+            ]
+        return _Response(PRODUCTION_FAILURE if len(calls) == 1 else CLEAN)
+
+    monkeypatch.setattr(critics_module, "run_agent_loop", fake_loop)
+
+    await adversarial_critics(state_with())
+
+    assert len(calls) == 2
+    assert not any("x" * 4000 == m.get("content") for m in calls[1])
+    # The correction itself is never dropped — that is the whole point of the retry.
+    assert calls[1][-1]["role"] == "user"
+    assert "Do not return the example values" in calls[1][-1]["content"]
+
+
+async def test_a_retry_carries_forward_the_prior_tool_results(configure, monkeypatch):
+    """A parse retry must not discard tool results the failed attempt already
+    paid for: it should build on `conversation_out`, not restart from the
+    original 2-message prompt."""
+    configure(critic_parse_retries=1, critic_degrade_threshold=3)
+    calls: list[list[dict]] = []
+
+    async def fake_loop(endpoint, messages, tools, tool_impls, max_iterations,
+                         on_event=None, conversation_out=None, **kwargs):
+        calls.append(list(messages))
+        if len(calls) == 1:
+            if conversation_out is not None:
+                conversation_out[:] = [
+                    *messages,
+                    {"role": "assistant", "content": "", "tool_calls": [
+                        {"id": "c1", "type": "function",
+                         "function": {"name": "web_search", "arguments": "{}"}},
+                    ]},
+                    {"role": "tool", "tool_call_id": "c1", "name": "web_search",
+                     "content": "search result payload"},
+                ]
+            return _Response(PRODUCTION_FAILURE)
+        return _Response(CLEAN)
+
+    monkeypatch.setattr(critics_module, "run_agent_loop", fake_loop)
+
+    await adversarial_critics(state_with())
+
+    assert len(calls) == 2
+    # The retry's prompt carries the tool result from the first attempt.
+    assert any(m.get("content") == "search result payload" for m in calls[1])
+    # ...and still ends with the model's bad reply plus the correction, on top
+    # of that carried-forward conversation rather than the original messages.
+    assert calls[1][-2]["role"] == "assistant"
+    assert calls[1][-2]["content"] == PRODUCTION_FAILURE
+    assert calls[1][-1]["role"] == "user"
+
+
 async def test_the_streak_accumulates_across_beats(configure, scripted_loop, health_events):
     """The streak spans beats: one bad beat is noise, three is a broken critic."""
     configure(critic_parse_retries=0, critic_degrade_threshold=3)
@@ -366,6 +514,87 @@ async def test_unparseable_prose_is_not_rescued_by_degrading(configure, scripted
     assert health_events[-1]["degraded"] is True
     assert health_events[-1]["lenient_used"] is False
     assert "critic_failures" not in delta
+
+
+# ------------------------------------------------------- the no-progress baseline
+
+
+async def test_progress_is_measured_against_the_draft_revise_was_handed(
+    configure, scripted_loop
+):
+    """`last_cycle_improved` answers "did the last revise help", so its baseline
+    is the count revise was handed — not `best_seen_failure_count`, which this
+    same pass updates."""
+    configure(critic_parse_retries=0, critic_degrade_threshold=3)
+    scripted_loop(CORRECTED)  # one finding
+
+    delta = await adversarial_critics(
+        state_with(retry_count=1, pre_revise_failure_count=3, best_seen_failure_count=3)
+    )
+
+    assert delta["last_cycle_improved"] is True
+    assert delta["best_seen_failure_count"] == 1
+
+
+async def test_rescoring_the_same_draft_is_not_a_failed_revise_cycle(
+    configure, monkeypatch
+):
+    """`retry_critic` routes back into this node with no revise in between. A
+    baseline that moved on every pass would read the second reading of unchanged
+    prose as a regression and send the beat to review with its whole revision
+    budget untouched."""
+    configure(critic_parse_retries=0, critic_degrade_threshold=3)
+    replies = iter([PRODUCTION_FAILURE, CORRECTED])
+
+    async def fake_loop(*args, **kwargs):
+        return _Response(next(replies))
+
+    monkeypatch.setattr(critics_module, "run_agent_loop", fake_loop)
+
+    # The revise that produced this draft was handed 5 failures.
+    state = state_with(retry_count=1, pre_revise_failure_count=5)
+
+    # Pass A is unreadable: no findings recovered, so it scores 0 and takes over
+    # `best_seen_failure_count`.
+    first = await adversarial_critics(state)
+    assert first["best_seen_failure_count"] == 0
+    assert first["last_cycle_improved"] is True
+
+    # Pass B re-reads the *same* draft, this time successfully, and finds one
+    # real problem. Against `best_seen_failure_count` (now 0) that looks like a
+    # regression; against the 5 the revise was handed it is plain progress.
+    second = await adversarial_critics(
+        state_with(
+            retry_count=1,
+            pre_revise_failure_count=5,
+            best_seen_failure_count=first["best_seen_failure_count"],
+            critic_parse_failure_streak=first["critic_parse_failure_streak"],
+        )
+    )
+    assert len(second["critic_failures"]) == 1
+    assert second["last_cycle_improved"] is True
+
+
+async def test_a_revise_that_did_not_lower_the_count_reports_no_progress(
+    configure, scripted_loop
+):
+    configure(critic_parse_retries=0, critic_degrade_threshold=3)
+    scripted_loop(CORRECTED)  # one finding, same as before the revise
+
+    delta = await adversarial_critics(
+        state_with(retry_count=1, pre_revise_failure_count=1)
+    )
+
+    assert delta["last_cycle_improved"] is False
+
+
+async def test_the_first_cycle_has_no_baseline_to_fail_against(configure, scripted_loop):
+    configure(critic_parse_retries=0, critic_degrade_threshold=3)
+    scripted_loop(CORRECTED)
+
+    delta = await adversarial_critics(state_with())
+
+    assert delta["last_cycle_improved"] is True
 
 
 # ------------------------------------------------------------ audit interaction

@@ -72,6 +72,12 @@ generation:
   repetition_min_run: 3
   repetition_allowlist: []
 
+  # Below this many sentences, density-based gates (passive voice, emotion
+  # words, tic phrases) are skipped entirely: a 3-sentence beat can't support
+  # a 25% proportion without quantizing to 0/33/67/100, which makes the
+  # threshold effectively unreachable in either direction.
+  passive_min_sentences: 6
+
   # Proportion of a beat's sentences that may name an emotion outright.
   # Matched whole-word and case-insensitively, so inflections need listing
   # ("fear" does not match "feared"). Loosened from 0.30 to offset a
@@ -348,6 +354,12 @@ generation:
   # ambiguous and too long wastes the revision prompt.
   audit_quote_chars: 240
   critic_verdict_max_chars: 240
+  # Separate budget for the full offender list a density failure appends to its
+  # suggested_fix. That list is instruction prose, not a span to match, and it
+  # carries every offending sentence — sizing it at audit_quote_chars (one
+  # quote) would show the reviser two of five and let it "fix" the finding
+  # without moving the proportion.
+  audit_offender_list_chars: 1200
 
   research_mode: false
   # Was 6, equal to max_agent_iterations — one tool could consume the entire
@@ -406,7 +418,14 @@ agents:
     output_reservation: 3072
   critic:
     temperature: 0.2          # judgement, emitted as JSON: heat is pure downside
-    output_reservation: 1024
+    # A [] verdict needs ~10 tokens; observed useful replies land under 1600.
+    # Without the cap, a stuck critic burns its whole grant on <think> tokens
+    # and returns finish_reason='length' with zero text (llm_io.log:82,
+    # 2026-07-24). The reservation must be at least the cap: setting
+    # max_output_tokens skips the client's room calculation entirely, so the
+    # reservation is the only space the prompt trimmer actually guarantees.
+    output_reservation: 2048
+    max_output_tokens: 2048
 
 log_level: INFO
 host: 127.0.0.1

@@ -221,6 +221,47 @@ def emotion_word_density(text: str, pattern: re.Pattern[str] | None) -> tuple[fl
     return len(offenders) / len(sentences), offenders
 
 
+def _list_offenders(sentences: list[str], budget: int) -> str:
+    """Render every offending sentence for the revision prompt, not the draft.
+
+    A density finding is about the whole beat, not one sentence — pointing the
+    reviser at only the first offender lets it fix that single span while the
+    proportion barely moves. This goes into ``suggested_fix``, which is
+    instruction prose the reviser reads, never text matched against the draft
+    — unlike ``offending_text``, which must stay a single sentence so
+    ``revise.locate`` can find it as one contiguous span and keep this failure
+    in span mode instead of dragging every co-occurring failure into a
+    full-beat rewrite.
+
+    Whole sentences are dropped rather than the joined string sliced: a quote
+    cut mid-word is not locatable prose, and a reviser told "all offending
+    sentences" and then shown two-and-a-half of them fixes what it can see and
+    leaves the proportion where it was. What does not fit is counted out loud.
+    """
+    kept: list[str] = []
+    used = 0
+    for index, sentence in enumerate(sentences):
+        quoted = f'"{sentence}"'
+        # "; " between entries, and room for the "(+N more)" tail if any
+        # sentence after this one will have to be dropped.
+        separator = 2 if kept else 0
+        remaining = len(sentences) - index - 1
+        tail = len(f" (+{remaining} more)") if remaining else 0
+        if used + separator + len(quoted) + tail > budget:
+            break
+        kept.append(quoted)
+        used += separator + len(quoted)
+
+    if not kept:
+        # A single sentence longer than the whole budget: one truncated quote
+        # still beats saying nothing about a breach the reviser has to fix.
+        return f'"{sentences[0][:budget]}"' if sentences else ""
+
+    listed = "; ".join(kept)
+    dropped = len(sentences) - len(kept)
+    return f"{listed} (+{dropped} more)" if dropped else listed
+
+
 async def audit(state: OrchestratorState) -> dict:
     """Run the programmatic checks over ``current_draft_text``.
 
@@ -238,11 +279,16 @@ async def audit(state: OrchestratorState) -> dict:
     threshold = generation.passive_voice_threshold
     # The offending prose quoted back to the reviser. Enough to locate it.
     quote_chars = generation.audit_quote_chars
+    # Wider, and for prose the reviser only reads: the full offender list a
+    # density failure appends to its suggested_fix. See `_list_offenders`.
+    offender_list_chars = generation.audit_offender_list_chars
     draft = state["current_draft_text"]
     beat_index = state["fsm_pointer"].beat_index
 
+    min_sentences = generation.passive_min_sentences
+    all_sentences = split_sentences(draft)
     density, passives = passive_voice_density(draft)
-    breached = density > threshold
+    breached = len(all_sentences) >= min_sentences and density > threshold
 
     failures: list[FailureObject] = []
     if breached:
@@ -253,7 +299,8 @@ async def audit(state: OrchestratorState) -> dict:
                 suggested_fix=(
                     f"{density:.0%} of sentences in this beat are in the passive "
                     f"voice, over the {threshold:.0%} limit. Rewrite the passive "
-                    f"clauses so the actor performs the verb."
+                    f"clauses so the actor performs the verb. All offending "
+                    f"sentences: {_list_offenders(passives, offender_list_chars)}"
                 ),
                 critic_source=CRITIC_SOURCE,
             )
@@ -297,7 +344,10 @@ async def audit(state: OrchestratorState) -> dict:
     # --- emotion-tell guard -------------------------------------------------
     emotion_pattern = _emotion_pattern(generation.emotion_words)
     emotion_density, emotion_sentences = emotion_word_density(draft, emotion_pattern)
-    emotion_breached = emotion_density > generation.emotion_word_threshold
+    emotion_breached = (
+        len(all_sentences) >= min_sentences
+        and emotion_density > generation.emotion_word_threshold
+    )
     if emotion_breached:
         failures.append(
             FailureObject(
@@ -308,7 +358,8 @@ async def audit(state: OrchestratorState) -> dict:
                     f"over the {generation.emotion_word_threshold:.0%} limit. Cut "
                     f"or understate the named emotions — let the beat's events and "
                     f"the character's choices imply the feeling. Do not add new "
-                    f"emotional description to compensate."
+                    f"emotional description to compensate. All offending "
+                    f"sentences: {_list_offenders(emotion_sentences, offender_list_chars)}"
                 ),
                 critic_source=CRITIC_SOURCE,
             )
@@ -321,7 +372,10 @@ async def audit(state: OrchestratorState) -> dict:
     # reach for instead of a specific action or image.
     tic_pattern = _emotion_pattern(generation.tic_phrases)
     tic_density, tic_sentences = emotion_word_density(draft, tic_pattern)
-    tic_breached = tic_density > generation.tic_phrase_threshold
+    tic_breached = (
+        len(all_sentences) >= min_sentences
+        and tic_density > generation.tic_phrase_threshold
+    )
     if tic_breached:
         failures.append(
             FailureObject(
@@ -333,7 +387,8 @@ async def audit(state: OrchestratorState) -> dict:
                     f"{generation.tic_phrase_threshold:.0%} limit. Replace them "
                     f"with actions and images specific to this character, this "
                     f"place, and this moment — do not swap one stock phrase for "
-                    f"another."
+                    f"another. All offending sentences: "
+                    f"{_list_offenders(tic_sentences, offender_list_chars)}"
                 ),
                 critic_source=CRITIC_SOURCE,
             )

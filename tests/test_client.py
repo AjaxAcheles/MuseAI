@@ -11,6 +11,7 @@ import logging
 
 import httpx
 import pytest
+from pydantic import ValidationError
 
 from museai.core.config import EndpointConfig
 from museai.core.logging_setup import get_llm_logger
@@ -1066,8 +1067,8 @@ class TestTimeoutsAndOutputCap:
             model_name="m",
             tokenizer_family="char_heuristic",
             context_window=8192,
-            output_reservation=512,
-            max_output_tokens=2048,
+            output_reservation=2048,
+            max_output_tokens=1024,
         )
         seen: list[dict] = []
 
@@ -1076,7 +1077,35 @@ class TestTimeoutsAndOutputCap:
             return json_response(completion())
 
         await call_llm(endpoint, MESSAGES, transport=httpx.MockTransport(handler))
-        assert seen[0]["max_tokens"] == 2048
+        # Neither the reservation nor the window's remaining room: the cap wins.
+        assert seen[0]["max_tokens"] == 1024
+
+    def test_an_output_cap_wider_than_the_reservation_is_rejected(self):
+        """Setting the cap skips the room calculation, so the reservation is the
+        only space the prompt trimmer keeps free. A wider cap can overrun the
+        window and get truncated — the failure the cap was set to prevent."""
+        with pytest.raises(ValidationError, match="must be <= output_reservation"):
+            EndpointConfig(
+                base_url="https://example.invalid/v1",
+                api_key="k",
+                model_name="m",
+                tokenizer_family="char_heuristic",
+                context_window=8192,
+                output_reservation=512,
+                max_output_tokens=2048,
+            )
+
+    def test_an_output_cap_without_a_window_is_unconstrained(self):
+        """No declared window means no trimming, so there is nothing to overrun."""
+        endpoint = EndpointConfig(
+            base_url="https://example.invalid/v1",
+            api_key="k",
+            model_name="m",
+            tokenizer_family="char_heuristic",
+            output_reservation=512,
+            max_output_tokens=32000,
+        )
+        assert endpoint.max_output_tokens == 32000
 
     def test_a_reservation_wider_than_the_window_is_rejected_at_boot(self):
         # No prompt tokens would fit; fail loudly with the numbers rather than

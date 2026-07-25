@@ -213,6 +213,9 @@ async def test_resolve_review_regenerate_reenters_drafting_with_retry_reset(
     await manager.resolve_review("regenerate")
     assert manager.state is not None
     assert manager.state["retry_count"] == 0
+    # The discarded draft's revise history describes prose that no longer exists.
+    assert manager.state["pre_revise_failure_count"] is None
+    assert manager.state["last_cycle_improved"] is True
     assert await manager.wait() == "done"
 
     conn = db.connect_db(config.db_path)
@@ -220,3 +223,33 @@ async def test_resolve_review_regenerate_reenters_drafting_with_retry_reset(
     assert beat["status"] == "completed"
     assert beat["prose"] == "clean regenerated draft"
     conn.close()
+
+
+async def test_accepting_a_review_clears_the_revise_baseline_for_the_next_beat(
+    config_factory, monkeypatch
+):
+    """The `accept` branch resets nothing itself — it hands off to the commit
+    node, whose delta carries the reset. If that ever stops being true, the next
+    beat measures its first retry against this beat's baseline and parks at
+    review with its budget untouched."""
+    config = config_factory(project_id=PROJECT_ID, revision_retry_cap=1)
+    _seed(config)
+    _patch_review_endpoint(
+        monkeypatch,
+        critic_responses=[FAILURE_JSON, FAILURE_JSON],
+        drafts=["draft needing review"],
+    )
+
+    manager = GenerationManager(config)
+    await manager.start(PROJECT_ID)
+    assert await manager.wait() == "review"
+    assert manager.state is not None
+    # A revise ran before the beat parked, so the baseline is set going in.
+    assert manager.state["pre_revise_failure_count"] is not None
+
+    await manager.resolve_review("accept")
+    assert await manager.wait() == "done"
+
+    assert manager.state["retry_count"] == 0
+    assert manager.state["pre_revise_failure_count"] is None
+    assert manager.state["last_cycle_improved"] is True

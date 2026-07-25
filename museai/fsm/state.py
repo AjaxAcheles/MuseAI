@@ -70,6 +70,18 @@ class OrchestratorState(TypedDict):
     retry_count: int
     best_seen_draft: str | None
     best_seen_failure_count: int | None
+    # The total failure count the last `revise` was handed, for this beat. Only
+    # `revise` writes it, which is the point: the `retry_critic` edge routes
+    # back into `critics` with no revise in between, and a baseline that moved
+    # on every critic pass would read that re-score of unchanged prose as a
+    # regression. None until a revise has run.
+    pre_revise_failure_count: int | None
+    # Whether the most recent critics cycle beat `pre_revise_failure_count` —
+    # i.e. whether the last revise actually helped. `best_seen_failure_count`
+    # cannot answer this: it is a running minimum, already updated to include
+    # this cycle by the time mode_selector runs. This field is what
+    # mode_selector's no-progress rule reads. True until a revise has run.
+    last_cycle_improved: bool
     # Consecutive beats whose critic output stayed unparseable after every retry.
     # Spans beats within a run; a single readable critic resets it to 0.
     critic_parse_failure_streak: int
@@ -98,6 +110,8 @@ def make_initial_state(
         "retry_count": 0,
         "best_seen_draft": None,
         "best_seen_failure_count": None,
+        "pre_revise_failure_count": None,
+        "last_cycle_improved": True,
         "critic_parse_failure_streak": 0,
         "review_requested": False,
         "pause_requested": False,

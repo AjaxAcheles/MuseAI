@@ -124,6 +124,10 @@ class GenerationManager:
                 {
                     "retry_count": 0,
                     "critic_failures": [],
+                    # Regenerating throws the draft away, so the revise history
+                    # that produced it no longer describes anything.
+                    "pre_revise_failure_count": None,
+                    "last_cycle_improved": True,
                     "review_requested": False,
                     "pause_requested": False,
                     "hard_stop_asserted": False,

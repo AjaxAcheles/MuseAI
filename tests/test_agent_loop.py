@@ -196,7 +196,7 @@ class TestToolFaults:
 
         assert result.text == "I will use another approach."
         content = fake.calls[1]["messages"][2]["content"]
-        assert "unknown tool 'delete_everything'" in content
+        assert "no tool named 'delete_everything'" in content
         assert "web_search" in content
 
     async def test_a_raising_tool_returns_an_error_result(self, patched):
@@ -580,6 +580,111 @@ class TestConversationOut:
         assert [m["role"] for m in conversation] == [
             "user", "assistant", "tool", "assistant", "tool",
         ]
+
+
+class TestStrikeOut:
+    """A name that keeps failing the same way stops the loop early rather than
+    burning every remaining iteration on repeats the model was already told
+    about."""
+
+    async def test_a_repeated_unknown_tool_name_stops_the_loop_early(self, patched):
+        fake = patched(
+            *[
+                response(tool_calls=[tool_call("check_draft_continuity", "{}")])
+                for _ in range(2)
+            ],
+            response(text="Forced to answer."),
+        )
+
+        result = await run_agent_loop(
+            ENDPOINT,
+            MESSAGES,
+            TOOLS,
+            {"web_search": lambda **k: []},
+            max_iterations=8,
+        )
+
+        assert result.text == "Forced to answer."
+        # Two tool-enabled turns hit the unknown name, then the loop stops
+        # early and forces a tool-free call — it never reaches 8 iterations.
+        assert len(fake.calls) == 3
+        assert fake.tools_per_call == [TOOLS, TOOLS, None]
+
+    async def test_a_tool_repeatedly_called_past_its_cap_stops_the_loop_early(
+        self, patched
+    ):
+        fake = patched(
+            *[response(tool_calls=[tool_call("web_search", "{}")]) for _ in range(3)],
+            response(text="Forced to answer."),
+        )
+        runs: list[int] = []
+
+        result = await run_agent_loop(
+            ENDPOINT,
+            MESSAGES,
+            TOOLS,
+            {"web_search": lambda **k: runs.append(1)},
+            max_iterations=8,
+            tool_call_cap=1,
+        )
+
+        assert result.text == "Forced to answer."
+        assert len(runs) == 1
+        # 1 turn actually runs the tool, then 2 more turns hit call_cap_exceeded
+        # (2 strikes) before the loop stops early.
+        assert len(fake.calls) == 4
+        assert fake.tools_per_call == [TOOLS, TOOLS, TOOLS, None]
+
+    async def test_parallel_calls_to_one_bad_name_are_a_single_strike(self, patched):
+        """The premise is "it was already told and asked anyway". A turn emitting
+        the same unknown name twice at once has not been told yet, so charging it
+        twice would strike the model out before it ever saw the error."""
+        fake = patched(
+            response(
+                tool_calls=[
+                    tool_call("check_draft_continuity", "{}", call_id="a"),
+                    tool_call("check_draft_continuity", "{}", call_id="b"),
+                ]
+            ),
+            response(text="Corrected itself."),
+        )
+
+        result = await run_agent_loop(
+            ENDPOINT,
+            MESSAGES,
+            TOOLS,
+            {"web_search": lambda **k: []},
+            max_iterations=8,
+        )
+
+        # One strike, so the loop keeps its schemas and the model gets a chance
+        # to answer with them still on the table.
+        assert result.text == "Corrected itself."
+        assert fake.tools_per_call == [TOOLS, TOOLS]
+
+    async def test_the_same_bad_name_on_a_later_turn_still_strikes_out(self, patched):
+        """Per-turn deduplication must not disarm the mechanism across turns."""
+        fake = patched(
+            response(
+                tool_calls=[
+                    tool_call("check_draft_continuity", "{}", call_id="a"),
+                    tool_call("check_draft_continuity", "{}", call_id="b"),
+                ]
+            ),
+            response(tool_calls=[tool_call("check_draft_continuity", "{}")]),
+            response(text="Forced to answer."),
+        )
+
+        result = await run_agent_loop(
+            ENDPOINT,
+            MESSAGES,
+            TOOLS,
+            {"web_search": lambda **k: []},
+            max_iterations=8,
+        )
+
+        assert result.text == "Forced to answer."
+        assert fake.tools_per_call == [TOOLS, TOOLS, None]
 
 
 class TestRetryOnEmptyOptIn:

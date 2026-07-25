@@ -139,6 +139,9 @@ async def _invoke_tool(
     return _stringify(result)
 
 
+_STRIKE_LIMIT = 2
+
+
 async def _run_tool_calls(
     tool_calls: Sequence[Mapping[str, Any]],
     tool_impls: Mapping[str, Callable[..., Any]],
@@ -146,14 +149,37 @@ async def _run_tool_calls(
     call_counts: dict[str, int],
     call_cap: int | None,
     tool_timeout: float | None,
-) -> list[dict[str, Any]]:
+    strike_counts: dict[str, int],
+) -> tuple[list[dict[str, Any]], bool]:
     """Execute every tool call in one model turn, in order, into tool messages.
 
     ``call_counts`` persists across the whole loop; a tool at ``call_cap`` gets
     a ``call_cap_exceeded`` error instead of another execution.
+
+    ``strike_counts`` tracks repeat offenses per name — an unknown tool name or
+    a name still being called past ``call_cap`` after the model was already
+    told to stop. Once a name crosses ``_STRIKE_LIMIT`` strikes, the second
+    return value is ``True``, telling the caller to end the loop early rather
+    than let the model keep re-asking for something it cannot have.
+
+    A strike is per *turn*, not per call: the mechanism's whole premise is that
+    the model was already told and asked anyway, and a turn emitting the same
+    bad name twice in parallel has not been told yet. Charging it twice would
+    strike a model out on its first offense, before it ever saw the error.
     """
     messages: list[dict[str, Any]] = []
     logger = get_fsm_logger()
+    should_stop = False
+    struck_this_turn: set[str] = set()
+
+    def _strike(name: str) -> None:
+        nonlocal should_stop
+        if name in struck_this_turn:
+            return
+        struck_this_turn.add(name)
+        strike_counts[name] = strike_counts.get(name, 0) + 1
+        if strike_counts[name] >= _STRIKE_LIMIT:
+            should_stop = True
 
     for call in tool_calls:
         if not isinstance(call, Mapping):
@@ -181,10 +207,16 @@ async def _run_tool_calls(
             content = _error_payload(name, "bad_arguments", error)
         elif name not in tool_impls:
             known = ", ".join(sorted(tool_impls)) or "none"
+            _strike(name)
             content = _error_payload(
-                name, "unknown_tool", f"unknown tool {name!r}; available tools: {known}"
+                name,
+                "unknown_tool",
+                f"there is no tool named {name!r}; it does not exist and never "
+                f"will. Available tools: {known}. Do not call it again — answer "
+                f"from the context and tool results you already have.",
             )
         elif call_cap is not None and call_counts.get(name, 0) >= call_cap:
+            _strike(name)
             content = _error_payload(
                 name,
                 "call_cap_exceeded",
@@ -217,7 +249,7 @@ async def _run_tool_calls(
                 "content": content,
             }
         )
-    return messages
+    return messages, should_stop
 
 
 async def run_agent_loop(
@@ -263,6 +295,8 @@ async def run_agent_loop(
 
     working: list[dict[str, Any]] = [dict(m) for m in messages]
     call_counts: dict[str, int] = {}
+    strike_counts: dict[str, int] = {}
+    stopped_early = False
 
     def _export_conversation() -> None:
         if conversation_out is not None:
@@ -289,22 +323,29 @@ async def run_agent_loop(
                 "tool_calls": [dict(call) for call in response.tool_calls],
             }
         )
-        working.extend(
-            await _run_tool_calls(
-                response.tool_calls,
-                tool_impls,
-                on_event,
-                call_counts,
-                tool_call_cap,
-                tool_timeout,
-            )
+        tool_messages, should_stop = await _run_tool_calls(
+            response.tool_calls,
+            tool_impls,
+            on_event,
+            call_counts,
+            tool_call_cap,
+            tool_timeout,
+            strike_counts,
         )
+        working.extend(tool_messages)
+        if should_stop:
+            stopped_early = True
+            break
 
-    # The budget is spent and the model is still reaching for tools. Withholding
-    # the schemas leaves it nothing to answer with but prose.
+    # The budget is spent — either the iteration cap was reached, or a name
+    # repeatedly failed (unknown tool / over cap) past the strike limit and
+    # the model kept re-asking anyway. Withholding the schemas leaves it
+    # nothing to answer with but prose.
     get_fsm_logger().info(
-        "agent_loop max_iterations=%d reached; forcing a tool-free answer",
+        "agent_loop max_iterations=%d reached (stopped_early=%s); forcing a "
+        "tool-free answer",
         max_iterations,
+        stopped_early,
     )
     response = await call_llm(
         endpoint, working, agent=agent, stream=True, on_token=on_token, retry_on_empty=True

@@ -159,9 +159,13 @@ class TestAuditNode:
         assert await audit(state_with(PASSIVE_HEAVY)) == {"critic_failures": []}
 
     async def test_exactly_at_the_threshold_does_not_breach(self, config_factory):
-        # Four sentences, one passive: density 0.25, equal to the gate.
+        # Eight sentences, two passive: density 0.25, equal to the gate. Sized
+        # above `passive_min_sentences` so the threshold is what clears it.
         set_node_config(config_factory(passive_voice_threshold=0.25))
-        draft = "The seal was broken. She stood. She read it. She left."
+        draft = (
+            "The seal was broken. The letter was sorted. She stood. She read it. "
+            "She left. She locked the door. She walked home. She slept."
+        )
         assert await audit(state_with(draft)) == {"critic_failures": []}
 
     async def test_an_empty_draft_yields_no_failures(self):
@@ -170,6 +174,114 @@ class TestAuditNode:
     async def test_no_drift_or_stylometric_metric_is_reported(self):
         delta = await audit(state_with(PASSIVE_HEAVY))
         assert set(delta) == {"critic_failures"}
+
+
+class TestOffenderList:
+    """A density finding is about the whole beat. `offending_text` stays one
+    locatable span for `revise.locate`; the full list of offenders rides in
+    `suggested_fix`, which the reviser reads but never matches."""
+
+    async def test_every_offending_sentence_reaches_the_reviser(self):
+        delta = await audit(state_with(PASSIVE_HEAVY))
+        fix = delta["critic_failures"][0].suggested_fix
+        for sentence in passive_voice_density(PASSIVE_HEAVY)[1]:
+            assert sentence in fix
+        assert "more)" not in fix
+
+    async def test_the_located_span_stays_a_single_sentence(self):
+        """`revise.locate` matches `offending_text` against the draft verbatim; a
+        joined list of every offender would never be found, and the failure would
+        drag the whole beat into a full rewrite."""
+        delta = await audit(state_with(PASSIVE_HEAVY))
+        offending = delta["critic_failures"][0].offending_text
+        assert offending == "The door was opened by Mara."
+        assert offending in PASSIVE_HEAVY
+
+    async def test_an_over_budget_list_drops_whole_sentences_and_counts_them(
+        self, config_factory
+    ):
+        """Slicing the joined string leaves a quote cut mid-word, which is not
+        locatable prose. Drop whole sentences and say how many were withheld."""
+        set_node_config(
+            config_factory(passive_voice_threshold=0.25, audit_offender_list_chars=80)
+        )
+        delta = await audit(state_with(PASSIVE_HEAVY))
+        fix = delta["critic_failures"][0].suggested_fix
+
+        passives = passive_voice_density(PASSIVE_HEAVY)[1]
+        shown = [s for s in passives if s in fix]
+        assert 0 < len(shown) < len(passives)
+        assert f"(+{len(passives) - len(shown)} more)" in fix
+
+    async def test_the_list_budget_is_wider_than_the_span_budget(self, config_factory):
+        """Sizing the list at `audit_quote_chars` — one quote's width — would show
+        the reviser a fraction of what it has to fix."""
+        config = config_factory()
+        assert (
+            config.generation.audit_offender_list_chars
+            > config.generation.audit_quote_chars
+        )
+
+
+class TestSentenceFloor:
+    """Below `passive_min_sentences`, a proportional threshold quantizes to a
+    handful of values and stops being a meaningful signal, so density gates
+    are skipped entirely rather than firing (or clearing) on too few sentences."""
+
+    async def test_a_short_passive_heavy_beat_is_not_flagged(self, config_factory):
+        # 3 sentences, all passive: density 1.0, but under the floor of 6.
+        set_node_config(
+            config_factory(passive_voice_threshold=0.25, passive_min_sentences=6)
+        )
+        draft = "The door was opened. The letter was sealed. The truth was hidden."
+        assert await audit(state_with(draft)) == {"critic_failures": []}
+
+    async def test_at_or_above_the_floor_the_gate_still_fires(self, config_factory):
+        set_node_config(
+            config_factory(passive_voice_threshold=0.25, passive_min_sentences=6)
+        )
+        # PASSIVE_HEAVY has exactly 6 sentences, meeting the floor.
+        delta = await audit(state_with(PASSIVE_HEAVY))
+        assert len(delta["critic_failures"]) == 1
+
+    async def test_the_floor_also_guards_the_emotion_gate(self, config_factory):
+        set_node_config(
+            config_factory(emotion_word_threshold=0.3, passive_min_sentences=6)
+        )
+        # 3 sentences, all naming an emotion: density 1.0, but under the floor.
+        draft = "Pure panic seized her. Absolute horror filled the room. Dread coiled."
+        delta = await audit(state_with(draft))
+        assert [f for f in delta["critic_failures"] if f.error_code == EMOTION_ERROR_CODE] == []
+
+    async def test_the_floor_also_guards_the_tic_gate(self, config_factory):
+        set_node_config(
+            config_factory(tic_phrase_threshold=0.3, passive_min_sentences=6)
+        )
+        # 3 sentences, all leaning on a stock phrase: density 1.0, under the floor.
+        draft = (
+            "She took a deep breath. "
+            "Her hands were trembling. "
+            "The weight of it pressed down."
+        )
+        delta = await audit(state_with(draft))
+        assert [f for f in delta["critic_failures"] if f.error_code == TIC_ERROR_CODE] == []
+
+    async def test_the_emotion_gate_fires_at_the_floor(self, config_factory):
+        """The floor's counterpart: the same vocabulary at six sentences breaches.
+        Without this, a floor set too high would look identical to a working gate."""
+        set_node_config(
+            config_factory(emotion_word_threshold=0.3, passive_min_sentences=6)
+        )
+        delta = await audit(state_with(EMOTION_HEAVY))
+        tells = [f for f in delta["critic_failures"] if f.error_code == EMOTION_ERROR_CODE]
+        assert len(tells) == 1
+
+    async def test_the_tic_gate_fires_at_the_floor(self, config_factory):
+        set_node_config(
+            config_factory(tic_phrase_threshold=0.3, passive_min_sentences=6)
+        )
+        delta = await audit(state_with(TIC_HEAVY))
+        assert len([f for f in delta["critic_failures"] if f.error_code == TIC_ERROR_CODE]) == 1
 
 
 # --------------------------------------------------------------- repetition guard
@@ -300,17 +412,23 @@ class TestRepetitionAuditNode:
 
 # --------------------------------------------------------------- emotion-tell guard
 
+# Six sentences — the shipped `passive_min_sentences` floor — three of them
+# naming an emotion outright. Density 0.5, over any sane gate.
 EMOTION_HEAVY = (
     "Pure panic seized her. "
     "Absolute horror filled the room. "
     "He crossed to the desk and picked up the wrench. "
-    "Visceral dread coiled in her chest."
+    "Visceral dread coiled in her chest. "
+    "She counted the screws in the latch plate. "
+    "The clerk stamped the ledger and slid it back."
 )
 EMOTION_SHOWN = (
     "Her hands shook as she reached for the seal. "
     "She crossed to the desk and picked up the wrench. "
     "Her jaw tightened until it ached. "
-    "She did not look at the door."
+    "She did not look at the door. "
+    "The floorboard by the sill gave under her heel. "
+    "She set the wrench down without a sound."
 )
 
 
@@ -318,7 +436,7 @@ class TestEmotionDensity:
     def test_named_emotions_are_counted(self):
         pattern = _emotion_pattern(["panic", "horror", "dread"])
         density, offenders = emotion_word_density(EMOTION_HEAVY, pattern)
-        assert density == pytest.approx(3 / 4)
+        assert density == pytest.approx(3 / 6)
         assert len(offenders) == 3
 
     def test_shown_emotion_scores_zero(self):
@@ -355,20 +473,25 @@ class TestEmotionAuditNode:
 
 # --------------------------------------------------------------- style-tic guard
 
-# Four sentences, three leaning on stock gestures or abstract shorthand from
-# the default vocabulary: "deep breath", "trembling", "the weight of".
+# Six sentences — the shipped `passive_min_sentences` floor — three leaning on
+# stock gestures or abstract shorthand from the default vocabulary: "deep
+# breath", "trembling", "the weight of".
 TIC_HEAVY = (
     "She took a deep breath and steadied herself. "
     "Her hands were trembling as she reached for the latch. "
     "He crossed to the desk and picked up the wrench. "
-    "The weight of it all pressed down on her shoulders."
+    "The weight of it all pressed down on her shoulders. "
+    "The clerk stamped the ledger and slid it back. "
+    "She counted the screws in the latch plate."
 )
 # The same dramatic work carried by specific actions and images instead.
 TIC_FREE = (
     "She counted the latch screws twice before touching them. "
     "Her thumbnail found the old groove in the brass and stopped there. "
     "He crossed to the desk and picked up the wrench. "
-    "She reread the last line until the words stopped meaning anything."
+    "She reread the last line until the words stopped meaning anything. "
+    "The clerk stamped the ledger and slid it back. "
+    "Rain moved across the skylight in one long pass."
 )
 
 
@@ -376,7 +499,7 @@ class TestTicDensity:
     def test_multi_word_phrases_are_matched_whole(self):
         pattern = _emotion_pattern(["deep breath", "the weight of"])
         density, offenders = emotion_word_density(TIC_HEAVY, pattern)
-        assert density == pytest.approx(2 / 4)
+        assert density == pytest.approx(2 / 6)
         assert len(offenders) == 2
 
     def test_a_phrase_does_not_fire_inside_a_longer_word(self):

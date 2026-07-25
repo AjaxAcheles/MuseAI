@@ -53,6 +53,10 @@ _GENERATION_DEFAULTS = dict(
     served_window_mismatch_fraction=0.9,
     repetition_threshold=0.9,
     repetition_min_run=3,
+    # Matches config.yaml. A lower test-only floor would green-light density
+    # gates that the shipped config skips on the same prose.
+    passive_min_sentences=6,
+    audit_offender_list_chars=1200,
     emotion_word_threshold=0.3,
     tic_phrase_threshold=0.15,
     planner_intensity_retries=1,

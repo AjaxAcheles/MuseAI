@@ -149,6 +149,22 @@ class EndpointConfig(BaseModel):
                 f"than context_window ({self.context_window}); otherwise no prompt "
                 f"tokens fit"
             )
+        # Setting max_output_tokens skips the client's room calculation, so
+        # output_reservation becomes the *only* space the prompt trimmer keeps
+        # free. A cap wider than the reservation can therefore overrun the
+        # window on a prompt trimmed to the floor, and the server truncates the
+        # reply — the finish_reason='length' the cap was set to prevent.
+        if (
+            self.context_window is not None
+            and self.max_output_tokens is not None
+            and self.max_output_tokens > self.output_reservation
+        ):
+            raise ValueError(
+                f"max_output_tokens ({self.max_output_tokens}) must be <= "
+                f"output_reservation ({self.output_reservation}) when "
+                f"context_window is set; the prompt is only trimmed to leave "
+                f"output_reservation free"
+            )
         return self
 
 
@@ -234,6 +250,12 @@ class GenerationConfig(BaseModel):
     # Phrases the author has declared may recur verbatim. The beat planner may
     # also register a refrain per beat (`intended_refrain`); both are exempt.
     repetition_allowlist: list[str] = []
+    # --- Density-gate floor (audit) -----------------------------------------
+    # Below this many sentences, the passive/emotion/tic density gates are
+    # skipped entirely: a beat with e.g. 3 sentences can only ever quantize to
+    # 0%, 33%, 67%, or 100%, so a proportional threshold is either unreachable
+    # or automatic — never a meaningful signal.
+    passive_min_sentences: int = 6
     # --- Emotion-tell guard (audit) ----------------------------------------
     # Proportion of a beat's sentences that may name an emotion outright before
     # the audit faults the draft for telling rather than showing.
@@ -355,6 +377,12 @@ class GenerationConfig(BaseModel):
     # Longest reply still treated as a clean critic verdict rather than prose
     # the parser should reject.
     critic_verdict_max_chars: int = 240
+    # Budget for the full list of offending sentences a density failure appends
+    # to its suggested_fix. Deliberately wider than audit_quote_chars, which
+    # sizes a single locatable span: this list is instruction prose covering
+    # every offender, and truncating it to one quote's width shows the reviser
+    # a fraction of what it has to fix.
+    audit_offender_list_chars: int = 1200
     # --- Agent tools --------------------------------------------------------
     # Offers `web_search` to every agent when true. Off by default: agents
     # ground themselves in the story's own canon (seed, outline, threads,
@@ -413,7 +441,13 @@ class GenerationConfig(BaseModel):
         "tool_call_cap",
         "intensity_min_beats",
         "audit_quote_chars",
+        "audit_offender_list_chars",
         "critic_verdict_max_chars",
+        "passive_min_sentences",
+        # The agent loop raises AgentLoopError on a non-positive budget, and
+        # critics now survives that exception rather than propagating it — so a
+        # typo'd 0 would silently degrade every beat instead of failing at boot.
+        "max_agent_iterations",
     )
     @classmethod
     def _positive(cls, value: int, info: ValidationInfo) -> int:

@@ -29,7 +29,9 @@ def failure(code: str = "CONTRADICTS_CHARACTER") -> FailureObject:
     )
 
 
-def state_with(failures, retry_count: int, *, parse_streak: int = 0):
+def state_with(
+    failures, retry_count: int, *, parse_streak: int = 0, last_cycle_improved: bool = True
+):
     return make_initial_state(
         "test-project",
         FSM_Pointer(arc_id="arc-1", chapter_id="arc-1-c01", beat_index=0),
@@ -37,6 +39,7 @@ def state_with(failures, retry_count: int, *, parse_streak: int = 0):
         critic_failures=failures,
         retry_count=retry_count,
         critic_parse_failure_streak=parse_streak,
+        last_cycle_improved=last_cycle_improved,
     )
 
 
@@ -78,6 +81,58 @@ class TestRouting:
     def test_persistently_unreadable_critic_reply_goes_to_review(self, config_factory):
         set_node_config(config_factory(critic_degrade_threshold=2))
         assert mode_selector(state_with([], 0, parse_streak=2)) == REVIEW
+
+
+class TestNoProgress:
+    """A revise cycle that already ran and did not improve stops early rather
+    than spending another full critic pass on the same non-improving cycle."""
+
+    def test_a_non_improving_retry_under_the_cap_goes_to_review(self):
+        state = state_with([failure()], retry_count=1, last_cycle_improved=False)
+        assert mode_selector(state) == REVIEW
+
+    def test_an_improving_retry_under_the_cap_still_revises(self):
+        state = state_with([failure()], retry_count=1, last_cycle_improved=True)
+        assert mode_selector(state) == REVISE
+
+    def test_the_first_cycle_is_never_no_progress(self):
+        # retry_count == 0: no prior cycle to have failed to improve on, so
+        # `last_cycle_improved` (its default, True) cannot route to REVIEW here.
+        state = state_with([failure()], retry_count=0, last_cycle_improved=False)
+        assert mode_selector(state) == REVISE
+
+    def test_a_clean_draft_commits_even_after_a_non_improving_retry(self):
+        # No outstanding failures wins over no-progress: first match wins.
+        state = state_with([], retry_count=1, last_cycle_improved=False)
+        assert mode_selector(state) == COMMIT
+
+    def test_an_unreadable_critic_below_the_threshold_outranks_no_progress(self):
+        """The re-score has not happened yet, so there is no verdict to act on.
+        Retrying the critic first is what keeps a parser fault from being read as
+        a failed revise cycle."""
+        state = state_with([failure()], retry_count=1, parse_streak=1,
+                           last_cycle_improved=False)
+        assert mode_selector(state) == RETRY_CRITIC
+
+    def test_a_degraded_critic_with_salvaged_findings_still_routes_to_review(
+        self, config_factory
+    ):
+        """Both conditions are true at once and both send the beat to the human
+        boundary. The log carries `critic_parse_failure_streak` alongside
+        `no_progress`, so the operator can tell which one drove it."""
+        set_node_config(config_factory(revision_retry_cap=RETRY_CAP,
+                                       critic_degrade_threshold=2))
+        state = state_with([failure()], retry_count=1, parse_streak=2,
+                           last_cycle_improved=False)
+        assert mode_selector(state) == REVIEW
+
+    def test_a_degraded_critic_that_found_progress_still_revises(self, config_factory):
+        """Degrading loosens validation; it does not spend the revision budget."""
+        set_node_config(config_factory(revision_retry_cap=RETRY_CAP,
+                                       critic_degrade_threshold=2))
+        state = state_with([failure()], retry_count=1, parse_streak=2,
+                           last_cycle_improved=True)
+        assert mode_selector(state) == REVISE
 
 
 class TestPurity:

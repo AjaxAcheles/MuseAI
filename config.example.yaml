@@ -99,7 +99,9 @@ generation:
   intensity_flat_fraction: 0.8   # fraction of a chapter's beats that may be hot before re-prompting
   intensity_min_beats: 3         # shortest chapter the arc check applies to (fewer beats = no arc to shape)
   pad_band_threshold: 0.33       # half-width of the PAD neutral band; sets the 3x3x3 grid boundaries
+  passive_min_sentences: 6       # below this many sentences the density gates are skipped — a proportion quantizes too coarsely to mean anything
   audit_quote_chars: 240         # offending prose quoted into a failure — what the reviser locates a span with
+  audit_offender_list_chars: 1200 # separate, wider budget for the full offender list a density failure puts in its suggested_fix
   critic_verdict_max_chars: 240  # longest reply still read as a clean critic verdict rather than prose
   research_mode: false           # offer web_search to the agents; off = story-canon tools only
   tool_call_cap: 6               # max calls to any one tool within a single agent loop
@@ -136,6 +138,11 @@ agents:
   critic:
     temperature: 0.2
     output_reservation: 1024
+    # Optional: cap a critic that burns its whole grant on reasoning tokens and
+    # returns finish_reason='length' with no verdict. Setting this skips the
+    # client's remaining-room calculation, so with a context_window set it must
+    # be <= output_reservation — that is the only room the trimmer keeps free.
+    # max_output_tokens: 1024
   # Split roles across servers by overriding the connection too:
   # drafter:
   #   base_url: "http://192.168.1.50:11434/v1"
