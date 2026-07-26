@@ -59,6 +59,20 @@ _CORRECTION_TEMPLATE = (
     "real offending text from the draft. If the draft is clean, return []."
 )
 
+# What the model is told after a truncation (finish_reason == "length" with no
+# usable text). Unlike a schema failure, the model did nothing here it can read
+# back and fix — it spent its whole reply budget on reasoning and never reached
+# an answer. Showing it an empty assistant turn plus operator-facing advice
+# about context windows or endpoint configuration (see `response_truncation_
+# remedy`) only grows the prompt for a model that has nothing to correct. This
+# retry asks for less, not more: no operator diagnosis, no echoed empty reply.
+_TRUNCATION_RETRY_MESSAGE = (
+    "Your previous reply was cut off before it produced any JSON — the whole "
+    "reply went to reasoning, with nothing left for the answer. Skip the "
+    "reasoning this time: respond with only the fenced JSON array described in "
+    "the output format, or [] if the draft is clean."
+)
+
 
 def _fits_window(conversation: list[dict], endpoint) -> bool:
     """Whether a retry prompt still leaves the endpoint's output reservation free.
@@ -183,14 +197,21 @@ async def adversarial_critics(state: OrchestratorState) -> dict:
     # original 2-message prompt.
     conversation: list[dict] = list(messages)
 
+    # Set once a truncation forces the *next* attempt to be a short, tool-free
+    # ask instead of the normal agent loop: withholding the tool schemas means
+    # the retry cannot burn its budget on another tool round-trip on top of
+    # reasoning, and starting the model has nothing left to investigate anyway
+    # since `conversation` was just rebuilt from the original prompt.
+    retry_bare = False
+
     for attempt in range(generation.critic_parse_retries + 1):
         loop_conversation: list[dict] = []
         try:
             response = await run_agent_loop(
                 endpoint,
                 conversation,
-                tool_specs_for("critic"),
-                tool_impls_for("critic"),
+                [] if retry_bare else tool_specs_for("critic"),
+                {} if retry_bare else tool_impls_for("critic"),
                 generation.max_agent_iterations,
                 on_event=on_tool_call,
                 agent="critic",
@@ -227,6 +248,27 @@ async def adversarial_critics(state: OrchestratorState) -> dict:
             {"beat_id": beat_id, "critic": CRITIC_NAME, "text": response.text},
         )
 
+        # A reasoning model can spend its entire output grant on a <think>
+        # block and hand back empty text with finish_reason == "length" — the
+        # exact failure mode B1 in the 2026-07-25 postmortem quantified at 42%
+        # of post-fix critic wall clock, and which used to be indistinguishable
+        # from a context-window overrun (see `response_truncation_remedy`).
+        # Logged as its own event, greppable as `event=empty_reply`, so the
+        # rate is visible directly rather than re-derived from token arithmetic
+        # the way it had to be for that report.
+        if last_truncated and not last_text.strip():
+            log_node_event(
+                "critics",
+                level=logging.WARNING,
+                event="empty_reply",
+                beat_id=beat_id,
+                attempt=attempt + 1,
+                thinking_chars=len(getattr(response, "thinking", "") or ""),
+                served_completion_tokens=getattr(
+                    response, "served_completion_tokens", None
+                ),
+            )
+
         try:
             if last_truncated:
                 raise StructuredOutputError(
@@ -247,29 +289,45 @@ async def adversarial_critics(state: OrchestratorState) -> dict:
                 attempt=attempt + 1,
                 retries=generation.critic_parse_retries,
                 error=last_error[:200],
+                truncated=last_truncated,
             )
             if attempt == generation.critic_parse_retries:
                 break
-            # Show the model its own reply and exactly what was wrong with it.
-            correction = [
-                {"role": "assistant", "content": response.text},
-                {"role": "user", "content": _CORRECTION_TEMPLATE.format(error=last_error)},
-            ]
-            conversation = [*conversation, *correction]
-            if not _fits_window(conversation, endpoint):
-                # All-or-nothing: dropping individual tool turns would orphan an
-                # assistant message's tool_calls from its results, which some
-                # endpoints reject outright. Losing this attempt's tool reuse
-                # costs a re-search; overflowing the window costs the verdict.
-                conversation = [*messages, *correction]
-                log_node_event(
-                    "critics",
-                    level=logging.WARNING,
-                    event="retry_context_dropped",
-                    beat_id=beat_id,
-                    attempt=attempt + 1,
-                    budget=window_budget(endpoint),
-                )
+            if last_truncated:
+                # The model did nothing here it can read back and fix. Rebuilt
+                # from the original prompt rather than appended to the growing
+                # one, so this attempt is shorter than the last, not longer —
+                # and free of the operator-facing diagnosis from
+                # `response_truncation_remedy`, which names config knobs, not
+                # anything a continuity critic should be reasoning about.
+                conversation = [
+                    *messages,
+                    {"role": "user", "content": _TRUNCATION_RETRY_MESSAGE},
+                ]
+                retry_bare = True
+            else:
+                retry_bare = False
+                # Show the model its own reply and exactly what was wrong with it.
+                correction = [
+                    {"role": "assistant", "content": response.text},
+                    {"role": "user", "content": _CORRECTION_TEMPLATE.format(error=last_error)},
+                ]
+                conversation = [*conversation, *correction]
+                if not _fits_window(conversation, endpoint):
+                    # All-or-nothing: dropping individual tool turns would orphan
+                    # an assistant message's tool_calls from its results, which
+                    # some endpoints reject outright. Losing this attempt's tool
+                    # reuse costs a re-search; overflowing the window costs the
+                    # verdict.
+                    conversation = [*messages, *correction]
+                    log_node_event(
+                        "critics",
+                        level=logging.WARNING,
+                        event="retry_context_dropped",
+                        beat_id=beat_id,
+                        attempt=attempt + 1,
+                        budget=window_budget(endpoint),
+                    )
 
     lenient_used = False
     unreadable = failures is None
@@ -334,6 +392,7 @@ async def adversarial_critics(state: OrchestratorState) -> dict:
         event="critiqued",
         beat_id=beat_id,
         critic_failures=len(failures),
+        error_codes=[f.error_code for f in failures],
         total_failures=total,
         best_seen_failure_count=delta["best_seen_failure_count"],
         improved=improved,

@@ -23,7 +23,7 @@ def _manuscript_path() -> Path | None:
     project_id = _active_project_id()
     if project_id is None:
         return None
-    return Path("data/output") / f"{project_id}.md"
+    return Path(get_config().output_dir) / f"{project_id}.md"
 
 
 @bp.get("/exports")

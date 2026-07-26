@@ -96,6 +96,12 @@ class LLMResponse:
     # truncation diagnosis needs that distinction — see `truncation_remedy`.
     served_prompt_tokens: int | None = None
     served_completion_tokens: int | None = None
+    # The output-token cap this call actually ran under — `endpoint.max_output_tokens`
+    # when set, otherwise the room-derived cap `call_llm` computes when only
+    # `context_window` is set. A truncation diagnosis needs the cap that was
+    # actually in force, not just the one the config named explicitly, or a role
+    # relying on the derived cap gets misdiagnosed as a context-window overrun.
+    effective_max_tokens: int | None = None
 
 
 class LLMCallError(Exception):
@@ -1058,6 +1064,9 @@ async def call_llm(
             tokens_out=tokens_out,
             tool_calls=len(tool_calls),
             finish_reason=finish_reason,
+            thinking_chars=len(thinking),
+            served_completion_tokens=served_completion_tokens,
+            max_tokens=max_tokens,
         )
         await _chat_end(
             call_id,
@@ -1084,6 +1093,7 @@ async def call_llm(
             thinking=thinking,
             served_prompt_tokens=served_prompt_tokens,
             served_completion_tokens=served_completion_tokens,
+            effective_max_tokens=max_tokens,
         )
 
     summary = (
@@ -1146,11 +1156,21 @@ def _log_response(
     tokens_out: int,
     tool_calls: int,
     finish_reason: str | None,
+    thinking_chars: int = 0,
+    served_completion_tokens: int | None = None,
+    max_tokens: int | None = None,
 ) -> None:
     """Record one completed response.
 
     Exactly one record per returned message. A streamed call logs here once, on
     the assembled text — never per token, which would drown the log in fragments.
+
+    ``thinking_chars``, ``served_completion_tokens``, and ``max_tokens`` exist so
+    a reasoning model burning its whole output grant on deliberation (``text``
+    empty, ``finish_reason == "length"``) is readable straight from this log
+    instead of inferred from ``tokens_out`` happening to equal the configured
+    cap. Before this field existed that inference was the only way to confirm it
+    (see the 2026-07-25 postmortem's evidence caveat).
     """
     _emit(
         {
@@ -1163,6 +1183,9 @@ def _log_response(
             "tokens_out": tokens_out,
             "tool_calls": tool_calls,
             "finish_reason": finish_reason,
+            "thinking_chars": thinking_chars,
+            "served_completion_tokens": served_completion_tokens,
+            "max_tokens": max_tokens,
             "text": _truncate(text),
         }
     )

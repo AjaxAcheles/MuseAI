@@ -48,7 +48,7 @@ def _chapter_epigraph(description: str) -> str:
 
 
 def export_manuscript(config: AppConfig, project_id: str | None = None) -> Path:
-    """Write the committed manuscript to ``data/output/<project_id>.md``.
+    """Write the committed manuscript to ``config.output_dir/<project_id>.md``.
 
     Completed beats are read in narrative order: arc ordering, then chapter
     ordering, then beat ordering. Chapters with no committed prose are omitted.
@@ -60,7 +60,7 @@ def export_manuscript(config: AppConfig, project_id: str | None = None) -> Path:
     :func:`committed_word_count` for why callers should pass the run's own.
     """
     project = project_id or config.project_id
-    output_dir = Path("data/output")
+    output_dir = Path(config.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     path = output_dir / f"{project}.md"
 

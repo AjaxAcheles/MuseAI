@@ -102,6 +102,61 @@ class TestTruncationRemedy:
         remedy = response_truncation_remedy(object(), None)
         assert "shorten the prompt" in remedy
 
+    def test_a_reasoning_model_burning_its_cap_is_not_blamed_on_the_server(self):
+        # 2026-07-24/25 live session: 28 of 30 critic truncations had
+        # served_completion_tokens == max_output_tokens exactly, with a
+        # declared context_window nowhere near full. The old code still
+        # blamed OLLAMA_CONTEXT_LENGTH in all 28 cases.
+        remedy = truncation_remedy(
+            empty=True,
+            context_window=16384,
+            served_prompt_tokens=6362,
+            served_completion_tokens=2048,
+            max_output_tokens=2048,
+            mismatch_fraction=0.9,
+        )
+        assert "OLLAMA_CONTEXT_LENGTH" not in remedy
+        assert "max_output_tokens" in remedy
+        assert "2048" in remedy
+
+    def test_the_cap_diagnosis_names_reasoning_when_thinking_is_present(self):
+        remedy = truncation_remedy(
+            empty=True,
+            served_completion_tokens=2048,
+            max_output_tokens=2048,
+            thinking="the door was red earlier so this scene contradicts...",
+        )
+        assert "reasoning" in remedy.lower()
+
+    def test_the_4096_vs_16384_case_still_produces_todays_message(self):
+        # Run 2, 2026-07-24 18:11:36: a genuine served-window mismatch, no cap
+        # involved. The new branch must not swallow this case.
+        remedy = truncation_remedy(
+            empty=True,
+            context_window=16384,
+            served_prompt_tokens=2792,
+            served_completion_tokens=1304,
+            max_output_tokens=None,
+            mismatch_fraction=0.9,
+        )
+        assert "4096" in remedy and "16384" in remedy
+        assert "OLLAMA_CONTEXT_LENGTH" in remedy
+
+    def test_response_helper_threads_cap_and_thinking_through(self):
+        class _Response:
+            text = ""
+            thinking = "reasoning about the contradiction at length"
+            served_prompt_tokens = 6362
+            served_completion_tokens = 2048
+
+        class _Endpoint:
+            context_window = 16384
+            max_output_tokens = 2048
+
+        remedy = response_truncation_remedy(_Response(), _Endpoint())
+        assert "OLLAMA_CONTEXT_LENGTH" not in remedy
+        assert "2048" in remedy
+
 
 class TestElementKeysGuard:
     # A beat reply cut off at the token limit: the outer array never closes,
@@ -254,6 +309,32 @@ class TestRegressionShapes:
     def test_a_valid_findings_array_round_trips(self):
         findings = parse_failure_objects(f"[{VALID_FINDING}]")
         assert isinstance(findings[0], FailureObject)
+
+    def test_critic_source_is_optional_not_required(self):
+        # state.py's FailureObject already defaults critic_source, and v1 has
+        # exactly one critic — omitting the field is not a schema deviation.
+        # A model that leaves it out must not be re-prompted for a value the
+        # parser was always going to supply itself.
+        three_key_finding = (
+            '{"error_code": "CONTRADICTS_PRIOR_PROSE", '
+            '"offending_text": "the red door", '
+            '"suggested_fix": "make it blue again"}'
+        )
+        findings = parse_failure_objects(f"[{three_key_finding}]")
+        assert len(findings) == 1
+        assert findings[0].critic_source == "continuity_critic"
+
+    def test_an_invalid_critic_source_is_still_rejected(self):
+        # Optional, not unchecked: a model naming some other source is a real
+        # schema deviation, distinct from simply leaving the key out.
+        bad_source = (
+            '{"error_code": "CONTRADICTS_PRIOR_PROSE", '
+            '"offending_text": "the red door", '
+            '"suggested_fix": "make it blue again", '
+            '"critic_source": "some_other_critic"}'
+        )
+        with pytest.raises(StructuredOutputError, match="invalid critic_source"):
+            parse_failure_objects(f"[{bad_source}]")
 
     def test_planner_array_in_a_fence_with_prose(self):
         text = 'Sure!\n```json\n[{"description": "ch1"}, {"description": "ch2"}]\n```\nDone.'

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 from museai.core import logging_setup
 from museai.web.routes.logs import redact
@@ -113,9 +114,8 @@ async def test_export_rejects_when_nothing_is_committed(config_factory, web_app)
     assert "No committed story to export yet." in (await response.get_json())["error"]
 
 
-async def test_export_writes_committed_prose(config_factory, web_app, tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)  # export_manuscript writes to ./data/output
-    config = config_factory()
+async def test_export_writes_committed_prose(config_factory, web_app):
+    config = config_factory()  # config.output_dir already points at a tmp_path
     app = await web_app(config)
     seed_project(config)
     add_beat(config, beat_id="beat-1", ordering=0, status="completed", prose="The lamp held.", word_count=3)
@@ -126,12 +126,11 @@ async def test_export_writes_committed_prose(config_factory, web_app, tmp_path, 
     assert body["ok"] is True
     assert body["word_count"] == 3
 
-    written = (tmp_path / "data" / "output" / f"{config.project_id}.md").read_text(encoding="utf-8")
+    written = (Path(config.output_dir) / f"{config.project_id}.md").read_text(encoding="utf-8")
     assert "The lamp held." in written
 
 
-async def test_export_excludes_uncommitted_drafts(config_factory, web_app, tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
+async def test_export_excludes_uncommitted_drafts(config_factory, web_app):
     config = config_factory()
     app = await web_app(config)
     seed_project(config)
@@ -139,19 +138,18 @@ async def test_export_excludes_uncommitted_drafts(config_factory, web_app, tmp_p
     add_beat(config, beat_id="beat-2", ordering=1, status="planned", prose="Draft line.", word_count=2)
 
     await app.test_client().post("/exports/manuscript")
-    written = (tmp_path / "data" / "output" / f"{config.project_id}.md").read_text(encoding="utf-8")
+    written = (Path(config.output_dir) / f"{config.project_id}.md").read_text(encoding="utf-8")
     assert "Committed line." in written
     assert "Draft line." not in written
 
 
 async def test_export_follows_the_seeded_project_not_a_stale_config(
-    config_factory, web_app, tmp_path, monkeypatch
+    config_factory, web_app
 ):
     """A config.yaml pointing at a project the DB no longer has must not
     produce an empty manuscript under the stale name."""
     from museai.memory.db import connect_db, upsert_arc, upsert_project
 
-    monkeypatch.chdir(tmp_path)
     config = config_factory(project_id="stale-ghost")
     app = await web_app(config)
 
@@ -174,20 +172,17 @@ async def test_export_follows_the_seeded_project_not_a_stale_config(
     assert body["word_count"] == 3
     assert body["path"].endswith("real-project.md")
 
-    written = (tmp_path / "data" / "output" / "real-project.md").read_text(encoding="utf-8")
+    written = (Path(config.output_dir) / "real-project.md").read_text(encoding="utf-8")
     assert "The real prose." in written
-    assert not (tmp_path / "data" / "output" / "stale-ghost.md").exists()
+    assert not (Path(config.output_dir) / "stale-ghost.md").exists()
 
 
-def test_export_numbers_chapters_across_arcs_with_epigraphs(
-    config_factory, tmp_path, monkeypatch
-):
+def test_export_numbers_chapters_across_arcs_with_epigraphs(config_factory):
     """Two arcs: arc headings, continuous chapter numbers, italic epigraphs."""
     from museai.core.runtime import init_resources
     from museai.fsm.export import export_manuscript
     from museai.memory.db import connect_db, upsert_arc, upsert_beat, upsert_chapter
 
-    monkeypatch.chdir(tmp_path)
     config = config_factory()
     init_resources(config)
     seed_project(config)
@@ -220,8 +215,7 @@ def test_export_numbers_chapters_across_arcs_with_epigraphs(
     assert text.index("# Arc 1") < text.index("## Chapter 1") < text.index("# Arc 2") < text.index("## Chapter 2")
 
 
-async def test_download_404s_before_an_export(config_factory, web_app, tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
+async def test_download_404s_before_an_export(config_factory, web_app):
     app = await web_app(config_factory())
     response = await app.test_client().get("/exports/download")
     assert response.status_code == 404

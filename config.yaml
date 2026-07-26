@@ -84,7 +84,7 @@ generation:
   # vocabulary that grew 18 -> 115: the additions are mostly precision
   # (catching "feared" where "fear" missed), but a few are common enough in
   # dialogue to fault honest prose.
-  emotion_word_threshold: 0.35
+  emotion_word_threshold: 0.40
   emotion_words:
   # fear
   - fear
@@ -212,7 +212,7 @@ generation:
   # abstract shorthand. Raised from 0.15, which was calibrated against 17
   # phrases and is far tighter against 113. If legitimate prose still gets
   # faulted, raise this further rather than gutting the vocabulary.
-  tic_phrase_threshold: 0.25
+  tic_phrase_threshold: 0.40
   tic_phrases:
   # observed in this project's own drafts
   - trembling
@@ -405,27 +405,51 @@ tools:
 # until they are referenced from this block.
 agents:
   chapter_planner:
-    temperature: 0.3          # structural JSON: obligations and chapter shape
+    temperature: 0.4          # structural JSON: obligations and chapter shape
     output_reservation: 2048
   beat_planner:
-    temperature: 0.4          # JSON, but the intents need some invention
+    temperature: 0.5          # JSON, but the intents need some invention
     output_reservation: 2048
   drafter:
     temperature: 0.9          # prose — the one role that should run hot
     output_reservation: 3072
   reviser:
-    temperature: 0.6          # prose, but constrained by the failures it answers
+    temperature: 0.7          # prose, but constrained by the failures it answers
     output_reservation: 3072
   critic:
-    temperature: 0.2          # judgement, emitted as JSON: heat is pure downside
+    temperature: 0.3          # judgement, emitted as JSON: heat is pure downside
     # A [] verdict needs ~10 tokens; observed useful replies land under 1600.
-    # Without the cap, a stuck critic burns its whole grant on <think> tokens
-    # and returns finish_reason='length' with zero text (llm_io.log:82,
-    # 2026-07-24). The reservation must be at least the cap: setting
-    # max_output_tokens skips the client's room calculation entirely, so the
-    # reservation is the only space the prompt trimmer actually guarantees.
-    output_reservation: 2048
-    max_output_tokens: 2048
+    # Without a cap, a stuck critic burns its whole grant on <think> tokens and
+    # returns finish_reason='length' with zero text (llm_io.log:82, 2026-07-24).
+    # The reservation must be at least the cap: setting max_output_tokens skips
+    # the client's room calculation entirely, so the reservation is the only
+    # space the prompt trimmer actually guarantees.
+    #
+    # This was 2048/2048 in v0.2.3; raised to 4096 on 2026-07-25 after the live
+    # run showed a 2048 cap alone was not enough headroom — 42% of post-fix
+    # critic wall clock was spent hitting it with zero answer text (empty_reply
+    # in fsm.log). The obvious fix, disabling reasoning outright, was tried
+    # first and does not survive the wire: `chat_template_kwargs:
+    # {enable_thinking: false}` in extra_body — like `options.num_ctx` above —
+    # is silently ignored by Ollama's /v1 compatibility endpoint (confirmed live
+    # against 0.32.1: reasoning still ran, replies still hit the cap). Only the
+    # native /api/chat endpoint's `think: false` actually suppresses it, and
+    # MuseAI does not speak that endpoint. So the cap is widened instead: a
+    # 4096-token deliberation that answers beats a 2048-token one that doesn't
+    # — a mitigation sized against one live sample, not a demonstrated fix.
+    # Watch `empty_reply` in fsm.log to see whether 4096 is still not enough on
+    # real (~6.4k-token) critic prompts, not the toy prompt this was tried on.
+    #
+    # Side effect: window_budget(critic endpoint) = context_window -
+    # output_reservation drops from 14336 to 12288 tokens — the room
+    # `_fits_window` (critics.py) allows a parse-retry prompt to occupy before
+    # dropping carried tool turns. Coincidentally close to but independent of
+    # generation.context_token_budget (12000, drafting/revise only — the critic
+    # doesn't read that key). 12288 still comfortably covers observed critic
+    # prompts (~6.4k tokens), but a beat with heavier tool use than any seen so
+    # far could now hit `retry_context_dropped` where it never has.
+    output_reservation: 4096
+    max_output_tokens: 4096
 
 log_level: INFO
 host: 127.0.0.1

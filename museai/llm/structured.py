@@ -110,6 +110,8 @@ def truncation_remedy(
     context_window: int | None = None,
     served_prompt_tokens: int | None = None,
     served_completion_tokens: int | None = None,
+    max_output_tokens: int | None = None,
+    thinking: str | None = None,
     mismatch_fraction: float | None = None,
 ) -> str:
     """Remediation clause for a ``finish_reason == "length"`` failure.
@@ -121,16 +123,29 @@ def truncation_remedy(
     reply that stopped mid-array is a genuine output-length limit, where
     ``max_output_tokens`` is the right knob.
 
-    The server's own counts, when it reported them, separate those two further.
-    A reply that died with zero output has hit the server's wall, so the tokens
-    it admits to processing approximate the window it is *actually* serving. When
-    that total falls well short of the declared ``context_window``, the prompt is
-    not too long in any absolute sense — the server is smaller than the config
-    believes, and no amount of pruning to a budget derived from the wrong number
-    will help. Saying so with both figures is the difference between a fix and an
-    afternoon. (This is not hypothetical: on 2026-07-24 an unset
-    ``OLLAMA_CONTEXT_LENGTH`` served 4096 against a declared 16384, and the
-    generic advice below sent the reader after the prompt instead of the server.)
+    A reasoning model breaks that dichotomy: it can spend its *entire* output
+    grant on a ``<think>`` block and hand back ``text == ""`` with
+    ``finish_reason == "length"``, which looks exactly like "the window left no
+    room to generate" even though the window had room to spare — the model
+    filled the *output* budget, not the *context* one. Checked first, before the
+    served-window branch below: if ``served_completion_tokens`` reached
+    ``max_output_tokens``, the cap is what bound, not the window. (Confirmed live
+    2026-07-24/25: 28 of 30 critic truncations that session had
+    ``served_completion_tokens == max_output_tokens`` exactly, and the served-window
+    branch below blamed ``OLLAMA_CONTEXT_LENGTH`` for all 28 — a real server
+    misconfiguration elsewhere in the same log, wrongly generalized.)
+
+    The server's own counts, when it reported them, separate the *other* two
+    further. A reply that died with zero output and did **not** hit its own cap
+    has hit the server's wall, so the tokens it admits to processing approximate
+    the window it is *actually* serving. When that total falls well short of the
+    declared ``context_window``, the prompt is not too long in any absolute sense
+    — the server is smaller than the config believes, and no amount of pruning to
+    a budget derived from the wrong number will help. Saying so with both figures
+    is the difference between a fix and an afternoon. (This is not hypothetical:
+    on 2026-07-24 an unset ``OLLAMA_CONTEXT_LENGTH`` served 4096 against a
+    declared 16384, and the generic advice below sent the reader after the prompt
+    instead of the server.)
 
     ``mismatch_fraction`` defaults to
     ``generation.served_window_mismatch_fraction``; the argument exists so a
@@ -141,6 +156,26 @@ def truncation_remedy(
         return (
             "raise endpoint.max_output_tokens (or leave it unset to omit the cap) "
             "or ask for a shorter answer"
+        )
+
+    if (
+        max_output_tokens is not None
+        and served_completion_tokens is not None
+        and served_completion_tokens >= max_output_tokens
+    ):
+        reasoning_note = (
+            " The model spent the whole grant on internal reasoning (a non-empty "
+            "<think> block was returned as `thinking`) and never got to an answer."
+            if thinking and thinking.strip()
+            else ""
+        )
+        return (
+            f"the reply used its full output budget ({served_completion_tokens} "
+            f"completion tokens against endpoint.max_output_tokens="
+            f"{max_output_tokens}) before producing any answer text."
+            f"{reasoning_note} This is a completion-length cap, not a context-"
+            f"window problem: raise endpoint.max_output_tokens (and "
+            f"output_reservation to match) or ask for a shorter answer"
         )
 
     if context_window is not None and served_prompt_tokens is not None:
@@ -186,12 +221,26 @@ def response_truncation_remedy(response: Any, endpoint: Any = None) -> str:
     already reach for ``finish_reason``, so a caller holding a stub or an older
     response shape degrades to the generic advice instead of raising a second
     error on top of the truncation it was trying to report.
+
+    The cap checked is ``response.effective_max_tokens`` — the cap the call
+    actually ran under, whether it came from an explicit
+    ``endpoint.max_output_tokens`` or was derived from ``context_window`` and the
+    prompt size (see ``call_llm``) — falling back to
+    ``endpoint.max_output_tokens`` for a response shape that predates that field.
+    ``response.thinking`` is threaded through the same way. Without either, a
+    truncation with an empty ``text`` looked identical to a context-window
+    overrun regardless of which cap actually bound.
     """
+    max_output_tokens = getattr(response, "effective_max_tokens", None)
+    if max_output_tokens is None:
+        max_output_tokens = getattr(endpoint, "max_output_tokens", None)
     return truncation_remedy(
         empty=not (getattr(response, "text", "") or "").strip(),
         context_window=getattr(endpoint, "context_window", None),
         served_prompt_tokens=getattr(response, "served_prompt_tokens", None),
         served_completion_tokens=getattr(response, "served_completion_tokens", None),
+        max_output_tokens=max_output_tokens,
+        thinking=getattr(response, "thinking", None),
     )
 
 
@@ -373,12 +422,16 @@ def _validate(data: Any, *, lenient: bool = False) -> list[FailureObject]:
             )
             continue
         if not lenient:
-            expected = {
-                "error_code", "offending_text", "suggested_fix", "critic_source"
-            }
+            # `critic_source` is optional, not required: the parser below
+            # defaults it to "continuity_critic" itself (v1 has exactly one
+            # critic), so a model that omits it has done nothing wrong. It is
+            # still validated below when present — a model naming some other
+            # source is a real schema deviation, not an omission.
+            required = {"error_code", "offending_text", "suggested_fix"}
+            allowed = required | {"critic_source"}
             actual = set(element)
-            missing = expected - actual
-            unexpected = actual - expected
+            missing = required - actual
+            unexpected = actual - allowed
             if missing or unexpected:
                 deviations: list[str] = []
                 if missing:

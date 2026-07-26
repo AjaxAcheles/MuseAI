@@ -592,6 +592,16 @@ class AppConfig(BaseModel):
     port: int = 8000
     db_path: str = "data/museai.db"
     event_log_path: str = "data/events.jsonl"
+    # Where `export_manuscript` writes the committed manuscript, and where the
+    # manager salvages a best-seen draft on a dead run. Config keys, like
+    # `db_path` above, rather than the `Path("data/output")` /
+    # `Path("data/drafts")` literals these replaced — a hardcoded, CWD-relative
+    # path is invisible to test isolation: on 2026-07-25 a pytest run wrote its
+    # own fixture output into the real `data/output/`, silently replacing a
+    # 5,657-word manuscript with 25 words from a test fixture, because nothing
+    # about the path said "this is configurable, point it elsewhere for tests."
+    output_dir: str = "data/output"
+    draft_dir: str = "data/drafts"
     # Dev-only reset route guard. Production deployments should set this false.
     allow_reset: bool = True
     # Seconds the agents' web_search tool waits on a search engine.

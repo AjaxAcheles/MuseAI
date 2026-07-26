@@ -285,7 +285,7 @@ class GenerationManager:
         return draft_path
 
     def _persist_draft(self) -> str | None:
-        """Write the best draft this run produced to ``data/drafts/``.
+        """Write the best draft this run produced to ``config.draft_dir``.
 
         Deliberately a file, not ``Beats.prose``: `/committed`, `get_committed_beats`
         and `export_manuscript` all select on ``status='completed' AND prose IS NOT
@@ -303,7 +303,7 @@ class GenerationManager:
         beat_id = beat.get("id") or "unknown-beat"
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
-        directory = Path("data/drafts")
+        directory = Path(self.config.draft_dir)
         directory.mkdir(parents=True, exist_ok=True)
         path = directory / f"{beat_id}-{stamp}.md"
         path.write_text(draft, encoding="utf-8")

@@ -443,12 +443,16 @@ class TestParseFailureObjects:
         with pytest.raises(StructuredOutputError, match="empty response"):
             parse_failure_objects("   ")
 
-    def test_critic_source_is_required(self):
+    def test_critic_source_is_optional_and_defaults(self):
+        # B4, 2026-07-25 postmortem: FailureObject already defaults critic_source
+        # (v1 has exactly one critic), so requiring the model to echo it back cost
+        # a whole re-prompt whenever it forgot, for a field the parser supplies
+        # itself. Omitting it must not be a schema deviation.
         raw = json.dumps(
             [{"error_code": "CONTRADICTS_THREAD", "offending_text": "y", "suggested_fix": "z"}]
         )
-        with pytest.raises(StructuredOutputError, match="critic_source"):
-            parse_failure_objects(raw)
+        findings = parse_failure_objects(raw)
+        assert findings[0].critic_source == "continuity_critic"
 
     def test_the_error_carries_the_validation_detail(self):
         """The message is fed back to the model verbatim, so it must name the field."""

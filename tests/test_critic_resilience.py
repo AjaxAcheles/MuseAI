@@ -13,6 +13,7 @@ exists so it can never take a run down again.
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 import pytest
 
@@ -209,6 +210,44 @@ async def test_the_retry_shows_the_model_its_reply_and_the_validation_error(conf
     assert correction[-1]["role"] == "user"
     assert "offending_text" in correction[-1]["content"]  # the actual pydantic error
     assert "Do not return the example values" in correction[-1]["content"]
+
+
+async def test_a_truncation_retry_gets_a_short_ask_not_operator_advice(
+    configure, monkeypatch
+):
+    """B3 in the 2026-07-25 postmortem: a truncated reply (the model spent its
+    whole grant on reasoning and produced no text) used to be re-prompted with
+    an empty assistant turn plus the server-administration paragraph from
+    `response_truncation_remedy` — advice about OLLAMA_CONTEXT_LENGTH aimed at
+    an operator, not a continuity critic. The retry must instead be short,
+    rebuilt from the original prompt rather than grown, and tool-free so it
+    can't burn its budget on another tool round-trip."""
+    configure(critic_parse_retries=1, critic_degrade_threshold=3)
+
+    calls: list[dict] = []
+
+    async def fake_loop(
+        endpoint, messages, tools, tool_impls, max_iterations, on_event=None, **kwargs
+    ):
+        calls.append({"messages": list(messages), "tools": tools, "tool_impls": tool_impls})
+        if len(calls) == 1:
+            return _Response("", finish_reason="length")
+        return _Response(CORRECTED)
+
+    monkeypatch.setattr(critics_module, "run_agent_loop", fake_loop)
+
+    delta = await adversarial_critics(state_with())
+
+    assert len(calls) == 2
+    retry = calls[1]
+    assert retry["tools"] == []
+    assert retry["tool_impls"] == {}
+    assert not any(
+        m["role"] == "assistant" and m["content"] == "" for m in retry["messages"]
+    )
+    joined = " ".join(str(m.get("content", "")) for m in retry["messages"])
+    assert "OLLAMA_CONTEXT_LENGTH" not in joined
+    assert len(delta["critic_failures"]) == 1
 
 
 async def test_a_prose_clean_verdict_is_read_as_clean_without_retries(
@@ -675,14 +714,13 @@ def test_reset_active_beats_is_idempotent(config_factory):
 # --------------------------------------------------- crash salvage (manager side)
 
 
-def test_a_failed_run_writes_its_draft_and_frees_the_beat(config_factory, tmp_path, monkeypatch):
+def test_a_failed_run_writes_its_draft_and_frees_the_beat(config_factory):
     from museai.fsm.manager import GenerationManager
     from museai.memory.db import connect_db, init_db
 
     from conftest import add_beat, seed_project
 
-    monkeypatch.chdir(tmp_path)  # drafts are written to ./data/drafts
-    config = config_factory()
+    config = config_factory()  # config.draft_dir already points at a tmp_path
     init_db(config.db_path)
     seed_project(config)
     add_beat(config, beat_id="arc-1-c01-b01", ordering=1, status="active", prose=None)
@@ -698,7 +736,7 @@ def test_a_failed_run_writes_its_draft_and_frees_the_beat(config_factory, tmp_pa
     draft_path = manager._salvage_failed_run()
 
     assert draft_path is not None
-    written = (tmp_path / draft_path).read_text(encoding="utf-8")
+    written = Path(draft_path).read_text(encoding="utf-8")
     assert written == "The lamp held against the fog."
 
     conn = connect_db(config.db_path)
@@ -709,13 +747,12 @@ def test_a_failed_run_writes_its_draft_and_frees_the_beat(config_factory, tmp_pa
     assert status == "planned"
 
 
-def test_salvage_prefers_the_best_seen_draft(config_factory, tmp_path, monkeypatch):
+def test_salvage_prefers_the_best_seen_draft(config_factory):
     from museai.fsm.manager import GenerationManager
     from museai.memory.db import init_db
 
     from conftest import seed_project
 
-    monkeypatch.chdir(tmp_path)
     config = config_factory()
     init_db(config.db_path)
     seed_project(config)
@@ -730,16 +767,15 @@ def test_salvage_prefers_the_best_seen_draft(config_factory, tmp_path, monkeypat
     )
 
     draft_path = manager._salvage_failed_run()
-    assert (tmp_path / draft_path).read_text(encoding="utf-8") == "The best draft seen."
+    assert Path(draft_path).read_text(encoding="utf-8") == "The best draft seen."
 
 
-def test_salvage_writes_nothing_when_there_is_no_draft(config_factory, tmp_path, monkeypatch):
+def test_salvage_writes_nothing_when_there_is_no_draft(config_factory):
     from museai.fsm.manager import GenerationManager
     from museai.memory.db import init_db
 
     from conftest import seed_project
 
-    monkeypatch.chdir(tmp_path)
     config = config_factory()
     init_db(config.db_path)
     seed_project(config)
@@ -752,10 +788,10 @@ def test_salvage_writes_nothing_when_there_is_no_draft(config_factory, tmp_path,
     )
 
     assert manager._salvage_failed_run() is None
-    assert not (tmp_path / "data" / "drafts").exists()
+    assert not Path(config.draft_dir).exists()
 
 
-def test_salvage_never_masks_the_original_failure(config_factory, tmp_path, monkeypatch):
+def test_salvage_never_masks_the_original_failure(config_factory, monkeypatch):
     """A fault inside the handler must not replace the real exception's diagnosis."""
     from museai.fsm import manager as manager_module
     from museai.fsm.manager import GenerationManager
@@ -763,7 +799,6 @@ def test_salvage_never_masks_the_original_failure(config_factory, tmp_path, monk
 
     from conftest import seed_project
 
-    monkeypatch.chdir(tmp_path)
     config = config_factory()
     init_db(config.db_path)
     seed_project(config)
@@ -782,7 +817,7 @@ def test_salvage_never_masks_the_original_failure(config_factory, tmp_path, monk
     )
 
     draft_path = manager._salvage_failed_run()  # must not raise
-    assert (tmp_path / draft_path).read_text(encoding="utf-8") == "Salvage me."
+    assert Path(draft_path).read_text(encoding="utf-8") == "Salvage me."
 
 
 async def test_a_healthy_critic_does_not_warn(configure, scripted_loop, caplog):

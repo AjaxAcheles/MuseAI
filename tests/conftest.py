@@ -93,6 +93,14 @@ def config_factory(tmp_path):
             generation=GenerationConfig(**generation),
             db_path=str(tmp_path / "museai.db"),
             event_log_path=str(tmp_path / "events.jsonl"),
+            # Isolation is structural, not a rule each test must remember: before
+            # `output_dir`/`draft_dir` existed as config keys, `export_manuscript`
+            # and the manager's draft-salvage path wrote to the hardcoded, real
+            # `data/output/` and `data/drafts/` — a pytest run once overwrote a
+            # live 5,657-word manuscript with 25 words of fixture output because
+            # of it (2026-07-25 postmortem, B5).
+            output_dir=str(tmp_path / "output"),
+            draft_dir=str(tmp_path / "drafts"),
             allow_reset=True,
         )
         base.update(overrides)
