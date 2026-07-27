@@ -141,6 +141,18 @@ async def _invoke_tool(
 
 _STRIKE_LIMIT = 2
 
+# Strikes for an invented tool name are pooled under one key rather than counted
+# per name. A model that answers the "there is no tool named X" error by asking
+# for a *differently* invented Y was, under per-name counting, starting from zero
+# every time — four distinct fabricated names in one live run each drew their own
+# free turn and the mechanism never engaged. What the strike is really counting
+# is "the model was told its tool does not exist and reached for a nonexistent
+# tool anyway", and that is one offense whichever spelling it wears.
+#
+# Over-cap strikes stay per name: those *are* about one specific tool, and a
+# second tool going over its own cap is a genuinely new event.
+_UNKNOWN_TOOL_STRIKE_KEY = "\x00unknown_tool"
+
 
 async def _run_tool_calls(
     tool_calls: Sequence[Mapping[str, Any]],
@@ -156,29 +168,33 @@ async def _run_tool_calls(
     ``call_counts`` persists across the whole loop; a tool at ``call_cap`` gets
     a ``call_cap_exceeded`` error instead of another execution.
 
-    ``strike_counts`` tracks repeat offenses per name — an unknown tool name or
-    a name still being called past ``call_cap`` after the model was already
-    told to stop. Once a name crosses ``_STRIKE_LIMIT`` strikes, the second
+    ``strike_counts`` tracks repeat offenses — a name still being called past
+    ``call_cap`` after the model was already told to stop (counted per name), or
+    a call to a tool that does not exist (counted in aggregate under
+    ``_UNKNOWN_TOOL_STRIKE_KEY``, so rotating through invented names does not
+    reset the count). Once a counter crosses ``_STRIKE_LIMIT``, the second
     return value is ``True``, telling the caller to end the loop early rather
     than let the model keep re-asking for something it cannot have.
 
     A strike is per *turn*, not per call: the mechanism's whole premise is that
     the model was already told and asked anyway, and a turn emitting the same
     bad name twice in parallel has not been told yet. Charging it twice would
-    strike a model out on its first offense, before it ever saw the error.
+    strike a model out on its first offense, before it ever saw the error. The
+    same holds across the pooled key: one turn naming two different invented
+    tools is still a single strike, because it has not been told yet either.
     """
     messages: list[dict[str, Any]] = []
     logger = get_fsm_logger()
     should_stop = False
     struck_this_turn: set[str] = set()
 
-    def _strike(name: str) -> None:
+    def _strike(key: str) -> None:
         nonlocal should_stop
-        if name in struck_this_turn:
+        if key in struck_this_turn:
             return
-        struck_this_turn.add(name)
-        strike_counts[name] = strike_counts.get(name, 0) + 1
-        if strike_counts[name] >= _STRIKE_LIMIT:
+        struck_this_turn.add(key)
+        strike_counts[key] = strike_counts.get(key, 0) + 1
+        if strike_counts[key] >= _STRIKE_LIMIT:
             should_stop = True
 
     for call in tool_calls:
@@ -207,7 +223,7 @@ async def _run_tool_calls(
             content = _error_payload(name, "bad_arguments", error)
         elif name not in tool_impls:
             known = ", ".join(sorted(tool_impls)) or "none"
-            _strike(name)
+            _strike(_UNKNOWN_TOOL_STRIKE_KEY)
             content = _error_payload(
                 name,
                 "unknown_tool",

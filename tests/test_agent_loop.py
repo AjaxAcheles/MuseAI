@@ -662,6 +662,86 @@ class TestStrikeOut:
         assert result.text == "Corrected itself."
         assert fake.tools_per_call == [TOOLS, TOOLS]
 
+    async def test_rotating_through_invented_names_still_strikes_out(self, patched):
+        """Strikes for a nonexistent tool are pooled, not counted per name.
+
+        Counted per name, a model that answered "there is no tool named X" by
+        asking for a differently-invented Y started from zero every time and the
+        mechanism never engaged — the 2026-07-25 live run fabricated four
+        distinct names and never struck out once. What is being counted is
+        "reached for a tool that does not exist after being told", and that is
+        one offense whichever spelling it wears.
+        """
+        fake = patched(
+            response(tool_calls=[tool_call("check_draft_against_context", "{}")]),
+            response(tool_calls=[tool_call("check_draft_for_continuity", "{}")]),
+            response(text="Forced to answer."),
+        )
+
+        result = await run_agent_loop(
+            ENDPOINT,
+            MESSAGES,
+            TOOLS,
+            {"web_search": lambda **k: []},
+            max_iterations=8,
+        )
+
+        assert result.text == "Forced to answer."
+        assert len(fake.calls) == 3
+        assert fake.tools_per_call == [TOOLS, TOOLS, None]
+
+    async def test_two_invented_names_in_one_turn_are_a_single_strike(self, patched):
+        """Per-turn deduplication spans the pooled key too: a turn naming two
+        different fabrications has not been told anything yet either, so it must
+        still get its chance to answer with the schemas on the table."""
+        fake = patched(
+            response(
+                tool_calls=[
+                    tool_call("check_continuity", "{}", call_id="a"),
+                    tool_call("check_draft_against_context", "{}", call_id="b"),
+                ]
+            ),
+            response(text="Corrected itself."),
+        )
+
+        result = await run_agent_loop(
+            ENDPOINT,
+            MESSAGES,
+            TOOLS,
+            {"web_search": lambda **k: []},
+            max_iterations=8,
+        )
+
+        assert result.text == "Corrected itself."
+        assert fake.tools_per_call == [TOOLS, TOOLS]
+
+    async def test_an_over_cap_tool_does_not_share_the_unknown_name_pool(self, patched):
+        """The pooling is specific to names that do not exist. A real tool going
+        over its own cap is a different event and keeps its own per-name count,
+        so one fabricated name plus one over-cap tool is not a strike-out."""
+        fake = patched(
+            response(tool_calls=[tool_call("web_search", "{}")]),
+            response(tool_calls=[tool_call("check_continuity", "{}")]),
+            response(tool_calls=[tool_call("web_search", "{}")]),
+            response(text="Forced to answer."),
+        )
+        runs: list[int] = []
+
+        result = await run_agent_loop(
+            ENDPOINT,
+            MESSAGES,
+            TOOLS,
+            {"web_search": lambda **k: runs.append(1)},
+            max_iterations=8,
+            tool_call_cap=1,
+        )
+
+        assert result.text == "Forced to answer."
+        assert len(runs) == 1
+        # One unknown strike and one over-cap strike: neither counter reached
+        # the limit, so the loop ran to a fourth turn rather than stopping early.
+        assert fake.tools_per_call == [TOOLS, TOOLS, TOOLS, TOOLS]
+
     async def test_the_same_bad_name_on_a_later_turn_still_strikes_out(self, patched):
         """Per-turn deduplication must not disarm the mechanism across turns."""
         fake = patched(

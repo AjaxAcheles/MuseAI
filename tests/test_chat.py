@@ -8,6 +8,7 @@ fixture.
 from __future__ import annotations
 
 import json
+from unittest import mock
 
 import httpx
 import pytest
@@ -334,6 +335,71 @@ def test_replay_returns_only_the_last_limit(tmp_path):
 
 def test_replay_of_a_missing_file_is_empty(tmp_path):
     assert chat_log.replay(tmp_path / "nope.jsonl", 10) == []
+
+
+def _write_transcript(path, count, padding):
+    lines = [
+        json.dumps({"event": "chat_start", "id": str(i), "thinking": "x" * padding})
+        for i in range(count)
+    ]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def test_replay_reads_past_a_single_tail_block(tmp_path):
+    """The transcript grows for the whole run and a record can carry an entire
+    reasoning trace, so the last N records routinely sit further back than one
+    block. The tail read has to keep widening until it has them."""
+    path = tmp_path / "chat.jsonl"
+    _write_transcript(path, 200, chat_log._TAIL_BLOCK_BYTES // 4)
+
+    records = chat_log.replay(path, 50)
+
+    assert [r["id"] for r in records] == [str(i) for i in range(150, 200)]
+
+
+def test_replay_is_not_confused_by_a_record_split_across_the_window(tmp_path):
+    """The window opens wherever the arithmetic lands — almost never on a record
+    boundary. The leading fragment is where we started reading, not a torn line,
+    and must not be reported as one or counted as a record."""
+    path = tmp_path / "chat.jsonl"
+    _write_transcript(path, 40, chat_log._TAIL_BLOCK_BYTES // 8)
+
+    records = chat_log.replay(path, 3)
+
+    assert [r["id"] for r in records] == ["37", "38", "39"]
+    assert all(r["event"] == "chat_start" for r in records)
+
+
+def test_replay_reads_only_the_tail_it_needs(tmp_path):
+    """The point of the change: a page load must not cost the whole file. The
+    old implementation parsed every record and threw nearly all of them away,
+    on the same event loop the FSM runs on."""
+    path = tmp_path / "chat.jsonl"
+    _write_transcript(path, 400, 2_000)
+    read_bytes = 0
+    real_open = open
+
+    def counting_open(file, mode="r", *args, **kwargs):
+        handle = real_open(file, mode, *args, **kwargs)
+        if "b" in mode:
+            original = handle.read
+
+            def read(*a, **k):
+                nonlocal read_bytes
+                data = original(*a, **k)
+                read_bytes += len(data)
+                return data
+
+            handle.read = read
+        return handle
+
+    with mock.patch("museai.core.chat_log.open", counting_open):
+        records = chat_log.replay(path, 5)
+
+    assert [r["id"] for r in records] == ["395", "396", "397", "398", "399"]
+    assert read_bytes < path.stat().st_size / 2, (
+        f"read {read_bytes} of {path.stat().st_size} bytes to fetch 5 records"
+    )
 
 
 # --------------------------------------------------------------------- routes

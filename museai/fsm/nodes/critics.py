@@ -27,6 +27,8 @@ until the degradation threshold, then routes to the explicit review boundary.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 
 from museai.core.logging_setup import log_node_event
@@ -72,6 +74,38 @@ _TRUNCATION_RETRY_MESSAGE = (
     "reasoning this time: respond with only the fenced JSON array described in "
     "the output format, or [] if the draft is clean."
 )
+
+# The second truncation in a row. The message above is rebuilt from the same
+# two constants every time, so re-sending it would put a byte-identical request
+# on the wire — measured six times in a row on one live beat, ~62 s each, every
+# one of them returning zero characters. The retry is still worth taking (a
+# fresh sample answered roughly a third of the time), so this escalates the ask
+# instead of repeating it: same demand, stated more narrowly, and explicitly
+# permitting a partial answer so the model has somewhere to stop short of a
+# complete audit.
+#
+# It does not offer "[]" as an escape from deliberating. An unreadable verdict
+# is never laundered into a clean pass — that is the streak's job, and inviting
+# a shortcut to "[]" here would fake exactly the signal the streak exists to
+# report.
+_TRUNCATION_FINAL_MESSAGE = (
+    "Your reply was cut off before producing any JSON again. Do not deliberate "
+    "at all this time. Write the fenced JSON array immediately, as your very "
+    "first output. If you have only found one problem so far, report just that "
+    "one — a partial array is far better than another cut-off reply."
+)
+
+
+def _fingerprint(value: object) -> str:
+    """A stable identity for a prompt, used to spot a retry that repeats one."""
+    return hashlib.sha256(
+        json.dumps(value, sort_keys=True, default=str).encode("utf-8")
+    ).hexdigest()
+
+
+def _tool_turns(conversation: list[dict]) -> int:
+    """How many tool results a conversation carries — its evidence, in short."""
+    return sum(1 for message in conversation if message.get("role") == "tool")
 
 
 def _fits_window(conversation: list[dict], endpoint) -> bool:
@@ -197,6 +231,44 @@ async def adversarial_critics(state: OrchestratorState) -> dict:
     # original 2-message prompt.
     conversation: list[dict] = list(messages)
 
+    # ...and the same courtesy across *node* invocations. `retry_critic` routes
+    # back here with the draft untouched, so whatever the last pass looked up is
+    # still true. The fingerprint is taken against the draft, so a revise makes
+    # the carry stale and this falls back to the bare prompt; `_fits_window`
+    # refuses a carry that would no longer leave room to answer.
+    draft_fingerprint = _fingerprint(draft)
+    carried = state["critic_evidence"] or {}
+    reused_evidence = False
+    if (
+        carried.get("draft_fingerprint") == draft_fingerprint
+        and carried.get("conversation")
+        and _fits_window(carried["conversation"], endpoint)
+    ):
+        conversation = [dict(message) for message in carried["conversation"]]
+        reused_evidence = True
+        log_node_event(
+            "critics",
+            event="evidence_reused",
+            beat_id=beat_id,
+            tool_results=_tool_turns(conversation),
+        )
+
+    # The richest tool-bearing conversation this pass produced, saved for the
+    # next one if the verdict turns out unreadable.
+    evidence: list[dict] = conversation if reused_evidence else []
+
+    # Every prompt the endpoint has already *answered* this pass. A retry that
+    # would reproduce one exactly is a call whose outcome is already known.
+    #
+    # Answered, not merely sent: a call that died in transport produced no reply
+    # to learn anything from, and re-sending the same prompt after one is the
+    # entire point of the transient-retry path below.
+    answered: set[str] = set()
+
+    # How many truncations have already been answered with a re-ask, so the
+    # second one escalates the wording instead of repeating it verbatim.
+    truncation_asks = 0
+
     # Set once a truncation forces the *next* attempt to be a short, tool-free
     # ask instead of the normal agent loop: withholding the tool schemas means
     # the retry cannot burn its budget on another tool round-trip on top of
@@ -205,6 +277,22 @@ async def adversarial_critics(state: OrchestratorState) -> dict:
     retry_bare = False
 
     for attempt in range(generation.critic_parse_retries + 1):
+        prompt_fingerprint = _fingerprint(conversation)
+        if prompt_fingerprint in answered:
+            # Every way of re-asking has been tried and the wording has nowhere
+            # left to go. Sending this again would be a paid call with a known
+            # answer; stop and let the streak report the pass as unreadable,
+            # exactly as an exhausted retry budget does.
+            log_node_event(
+                "critics",
+                level=logging.WARNING,
+                event="retry_skipped_identical",
+                beat_id=beat_id,
+                attempt=attempt + 1,
+                retries=generation.critic_parse_retries,
+            )
+            break
+
         loop_conversation: list[dict] = []
         try:
             response = await run_agent_loop(
@@ -240,7 +328,13 @@ async def adversarial_critics(state: OrchestratorState) -> dict:
                 break
             continue
 
+        answered.add(prompt_fingerprint)
         conversation = loop_conversation or conversation
+        # Keep whichever pass looked up the most, not merely the most recent —
+        # the truncation branch below rebuilds from the bare prompt, so the last
+        # conversation is routinely the emptiest one.
+        if _tool_turns(conversation) > _tool_turns(evidence):
+            evidence = [dict(message) for message in conversation]
         last_text = response.text
         last_truncated = getattr(response, "finish_reason", None) == "length"
         await bus.publish(
@@ -300,10 +394,19 @@ async def adversarial_critics(state: OrchestratorState) -> dict:
                 # and free of the operator-facing diagnosis from
                 # `response_truncation_remedy`, which names config knobs, not
                 # anything a continuity critic should be reasoning about.
-                conversation = [
-                    *messages,
-                    {"role": "user", "content": _TRUNCATION_RETRY_MESSAGE},
-                ]
+                #
+                # The wording escalates with each truncation. Rebuilding from
+                # two fixed constants meant the second re-ask reproduced the
+                # first one byte for byte, so the endpoint was asked a question
+                # it had already answered — at full price, and always with the
+                # same non-answer.
+                ask = (
+                    _TRUNCATION_RETRY_MESSAGE
+                    if truncation_asks == 0
+                    else _TRUNCATION_FINAL_MESSAGE
+                )
+                truncation_asks += 1
+                conversation = [*messages, {"role": "user", "content": ask}]
                 retry_bare = True
             else:
                 retry_bare = False
@@ -379,6 +482,15 @@ async def adversarial_critics(state: OrchestratorState) -> dict:
         "best_seen_failure_count": total if improved else best_count,
         "last_cycle_improved": progressed,
         "critic_parse_failure_streak": streak,
+        # Only an unreadable pass has a successor to hand this to: `retry_critic`
+        # is the one edge that comes back to this node with the same draft. A
+        # readable verdict routes on to commit, revise, or review, so holding the
+        # evidence would just carry a stale transcript through the rest of the run.
+        "critic_evidence": (
+            {"draft_fingerprint": draft_fingerprint, "conversation": evidence}
+            if unreadable and evidence
+            else None
+        ),
     }
     if failures:
         delta["critic_failures"] = failures

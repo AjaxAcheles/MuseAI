@@ -85,6 +85,21 @@ class OrchestratorState(TypedDict):
     # Consecutive beats whose critic output stayed unparseable after every retry.
     # Spans beats within a run; a single readable critic resets it to 0.
     critic_parse_failure_streak: int
+    # What the critic's last unreadable pass already looked up, so the pass the
+    # `retry_critic` edge is about to start does not pay for it twice.
+    #
+    # `{"draft_fingerprint": str, "conversation": [...]}` — the loop's working
+    # messages (assistant tool-call turns and their tool results, never a final
+    # reply). `retry_critic` re-enters `critics` with the draft *unchanged*, and
+    # the node used to rebuild from the bare two-message prompt, so the model
+    # re-derived the same continuity facts from scratch every time; one live beat
+    # searched the same kettle/door prose across four separate passes.
+    #
+    # The fingerprint is the safety catch: it is taken against the draft the
+    # evidence was gathered from, so any revise makes it stale automatically and
+    # the next pass starts clean. Cleared whenever the verdict was readable —
+    # nothing is coming back to reuse it.
+    critic_evidence: dict | None
     # set when the revision cap is exhausted; parks at the interactive review state
     review_requested: bool
     pause_requested: bool
@@ -113,6 +128,7 @@ def make_initial_state(
         "pre_revise_failure_count": None,
         "last_cycle_improved": True,
         "critic_parse_failure_streak": 0,
+        "critic_evidence": None,
         "review_requested": False,
         "pause_requested": False,
         "hard_stop_asserted": False,

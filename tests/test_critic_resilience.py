@@ -456,6 +456,197 @@ async def test_a_retry_carries_forward_the_prior_tool_results(configure, monkeyp
     assert calls[1][-1]["role"] == "user"
 
 
+# ------------------------------------------- no attempt repeats a known answer
+
+
+async def _truncating_loop(monkeypatch, *, answers_on=None):
+    """Install a loop that truncates every attempt, recording each prompt.
+
+    ``answers_on`` optionally names a 1-based attempt that answers cleanly
+    instead, so a test can show a retry still being *taken*.
+    """
+    calls: list[list[dict]] = []
+
+    async def fake_loop(endpoint, messages, tools, tool_impls, max_iterations,
+                        on_event=None, conversation_out=None, **kwargs):
+        calls.append([dict(m) for m in messages])
+        if answers_on is not None and len(calls) == answers_on:
+            return _Response(CLEAN)
+        return _Response("", finish_reason="length")
+
+    monkeypatch.setattr(critics_module, "run_agent_loop", fake_loop)
+    return calls
+
+
+async def test_no_two_critic_attempts_send_the_same_prompt(configure, monkeypatch):
+    """The regression that motivated all of this.
+
+    Every truncation rebuilt `conversation` from the same two constants, so the
+    second re-ask reproduced the first byte for byte. In the 2026-07-25 live run
+    one prompt went out six times in a row, ~62 s each, and returned zero
+    characters every time. Counting attempts never caught it — only comparing
+    their content does."""
+    configure(critic_parse_retries=2, critic_degrade_threshold=99)
+    calls = await _truncating_loop(monkeypatch)
+
+    await adversarial_critics(state_with())
+
+    assert len(calls) == 3, "one attempt plus two retries"
+    rendered = [
+        tuple((m["role"], m.get("content")) for m in call) for call in calls
+    ]
+    assert len(set(rendered)) == len(rendered), "an attempt repeated a prompt verbatim"
+
+
+async def test_the_second_truncation_escalates_the_ask(configure, monkeypatch):
+    """Distinct is not enough on its own — the retry has to be asking for
+    something, and each truncation should narrow the demand rather than restate
+    it. It must still never offer "[]" as a way out of deliberating: laundering
+    an unreadable verdict into a clean pass is what the streak exists to stop."""
+    configure(critic_parse_retries=2, critic_degrade_threshold=99)
+    calls = await _truncating_loop(monkeypatch)
+
+    await adversarial_critics(state_with())
+
+    first, second = calls[1][-1]["content"], calls[2][-1]["content"]
+    assert first != second
+    assert "Skip the reasoning" in first
+    assert "Do not deliberate at all" in second
+    assert "partial array" in second
+
+
+async def test_a_retry_is_still_taken_after_a_truncation(configure, monkeypatch):
+    """The guard must not turn into "never retry a truncation". A fresh sample
+    answered roughly a third of the time in the live run; the point is to stop
+    re-asking an *identical* question, not to stop asking."""
+    configure(critic_parse_retries=2, critic_degrade_threshold=99)
+    calls = await _truncating_loop(monkeypatch, answers_on=2)
+
+    delta = await adversarial_critics(state_with())
+
+    assert len(calls) == 2
+    assert delta["critic_parse_failure_streak"] == 0
+
+
+async def test_an_exhausted_wording_budget_stops_instead_of_repeating(
+    configure, monkeypatch, caplog
+):
+    """With more retries configured than there are ways to phrase the re-ask,
+    the wording runs out. Rather than put a question the endpoint has already
+    answered back on the wire, the pass stops and reports itself unreadable —
+    exactly as an exhausted retry budget does."""
+    configure(critic_parse_retries=5, critic_degrade_threshold=99)
+    calls = await _truncating_loop(monkeypatch)
+
+    with caplog.at_level(logging.WARNING, logger="museai.fsm"):
+        delta = await adversarial_critics(state_with())
+
+    assert len(calls) == 3, "stopped once the wording had nowhere left to go"
+    assert any("retry_skipped_identical" in r.getMessage() for r in caplog.records)
+    # Stopping early is not a clean verdict: the streak still climbs.
+    assert delta["critic_parse_failure_streak"] == 1
+
+
+# ------------------------------------------- evidence carried across passes
+
+
+def _evidence_conversation(messages):
+    return [
+        *messages,
+        {"role": "assistant", "content": "", "tool_calls": [
+            {"id": "c1", "type": "function",
+             "function": {"name": "find_repetition", "arguments": "{}"}},
+        ]},
+        {"role": "tool", "tool_call_id": "c1", "name": "find_repetition",
+         "content": "no repetition found for the kettle passage"},
+    ]
+
+
+async def test_an_unreadable_pass_hands_its_tool_results_to_the_next_one(
+    configure, monkeypatch
+):
+    """`retry_critic` routes back into this node with the draft untouched, so
+    everything the failed pass looked up is still true. It used to be thrown
+    away: one live beat re-searched the same kettle/door prose across four
+    passes because each one restarted from the bare two-message prompt."""
+    configure(critic_parse_retries=0, critic_degrade_threshold=99)
+
+    async def fake_loop(endpoint, messages, tools, tool_impls, max_iterations,
+                        on_event=None, conversation_out=None, **kwargs):
+        if conversation_out is not None:
+            conversation_out[:] = _evidence_conversation(messages)
+        return _Response("", finish_reason="length")
+
+    monkeypatch.setattr(critics_module, "run_agent_loop", fake_loop)
+
+    delta = await adversarial_critics(state_with())
+
+    carried = delta["critic_evidence"]
+    assert carried is not None
+    assert any(m.get("role") == "tool" for m in carried["conversation"])
+
+
+async def test_the_next_pass_starts_from_the_carried_evidence(configure, monkeypatch):
+    configure(critic_parse_retries=0, critic_degrade_threshold=99)
+    calls: list[list[dict]] = []
+
+    async def fake_loop(endpoint, messages, tools, tool_impls, max_iterations,
+                        on_event=None, conversation_out=None, **kwargs):
+        calls.append([dict(m) for m in messages])
+        return _Response(CLEAN)
+
+    monkeypatch.setattr(critics_module, "run_agent_loop", fake_loop)
+
+    prior = {
+        "draft_fingerprint": critics_module._fingerprint(DRAFT),
+        "conversation": _evidence_conversation([{"role": "user", "content": "seed"}]),
+    }
+    await adversarial_critics(state_with(critic_evidence=prior))
+
+    assert any(
+        m.get("content") == "no repetition found for the kettle passage"
+        for m in calls[0]
+    ), "the pass re-derived what the last one had already looked up"
+
+
+async def test_a_revised_draft_invalidates_the_carried_evidence(configure, monkeypatch):
+    """The fingerprint is the safety catch. Evidence gathered against the draft
+    revise just replaced describes prose that no longer exists, and reusing it
+    would have the critic judging the new draft on the old one's lookups."""
+    configure(critic_parse_retries=0, critic_degrade_threshold=99)
+    calls: list[list[dict]] = []
+
+    async def fake_loop(endpoint, messages, tools, tool_impls, max_iterations,
+                        on_event=None, conversation_out=None, **kwargs):
+        calls.append([dict(m) for m in messages])
+        return _Response(CLEAN)
+
+    monkeypatch.setattr(critics_module, "run_agent_loop", fake_loop)
+
+    stale = {
+        "draft_fingerprint": critics_module._fingerprint("a completely different draft"),
+        "conversation": _evidence_conversation([{"role": "user", "content": "seed"}]),
+    }
+    await adversarial_critics(state_with(critic_evidence=stale))
+
+    assert not any(
+        m.get("content") == "no repetition found for the kettle passage"
+        for m in calls[0]
+    ), "stale evidence survived a draft change"
+
+
+async def test_a_readable_verdict_carries_no_evidence_forward(configure, scripted_loop):
+    """Only `retry_critic` comes back to this node with the same draft. A
+    readable verdict routes on to commit, revise, or review, so holding the
+    transcript would drag it through the rest of the run for nothing."""
+    configure(critic_parse_retries=2, critic_degrade_threshold=3)
+    scripted_loop(CLEAN)
+
+    delta = await adversarial_critics(state_with())
+
+    assert delta["critic_evidence"] is None
+
+
 async def test_the_streak_accumulates_across_beats(configure, scripted_loop, health_events):
     """The streak spans beats: one bad beat is noise, three is a broken critic."""
     configure(critic_parse_retries=0, critic_degrade_threshold=3)

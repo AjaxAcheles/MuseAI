@@ -1549,3 +1549,51 @@ be persisted and handed to beat planning as story obligations.
   bundled-seed/UI expectation mismatches (`lantern-keeper`/Mara/Tomas/1500
   expected while the current example seed supplies `last-train-signal`/Imani/
   Daniel/no target); none exercise the changed validation boundary.
+
+## Post-v1.17 maintenance — critic latency: futile retries, discarded evidence
+
+`reports/2026-07-25-critic-latency-investigation.md` measured the 2026-07-25 live
+run: the critic was 86.9% of LLM wall clock (51.1 of 60.3 min) and only 13 of its
+81 calls produced any answer text. This lands the four contained fixes from that
+report. The wall-clock ceiling (F-B) was deliberately **not** taken — it adds
+human-review parking, and the goal is an unattended run — and reasoning
+suppression (F-C, a second `/api/chat` wire adapter) is still deferred.
+
+**Fixes / changes**
+
+- **No attempt repeats a question already answered** (`fsm/nodes/critics.py`).
+  A truncation rebuilt `conversation` from two module constants, so the second
+  re-ask reproduced the first byte for byte; one live prompt went out six times
+  in a row, ~62 s each, returning zero characters every time. Each truncation now
+  escalates the ask, and a fingerprint of every *answered* prompt stops a retry
+  that would repeat one. Answered, not sent: a transport failure must still be
+  retried on the same prompt, which the existing suite caught immediately.
+- **Tool results survive a `retry_critic` hop** (`fsm/nodes/critics.py`,
+  `fsm/state.py`). New `critic_evidence` state field carries the richest
+  tool-bearing conversation to the next pass, keyed by a fingerprint of the draft
+  it was gathered against, so a revise invalidates it and a readable verdict
+  clears it. One live beat re-searched the same kettle/door prose across four
+  passes because each restarted from the bare two-message prompt.
+- **Invented tool names strike out** (`fsm/tools/loop.py`). Strikes for a
+  nonexistent tool are pooled under one key instead of counted per name: the run
+  fabricated four distinct names and never struck out once. The limit stays at 2
+  and over-cap strikes stay per name, so a model that hallucinates once still gets
+  its chance to answer with the schemas on the table.
+- **The chat transcript is read from its tail** (`core/chat_log.py`).
+  `replay` parsed the whole (3.32 MB, growing) file on the FSM's own event loop to
+  return the last 200 records. Window sized from observed bytes-per-record, since
+  a fixed block plus blind doubling was 2.4x *slower* than the full parse at the
+  default limit. Byte-identical output verified against the real transcript.
+- **The critic prompt's deliberation surface is now measured**
+  (`tests/test_critic_prompt_deliberation.py`). The prompt trim itself was not
+  taken; this file pins the prompt's shape and prices candidate cuts against the
+  real template. Its finding: the suspect sections are only 181 and 326 tokens
+  (7.3% / 13.2%), so a trim cannot pay off on prompt size — only on reasoning
+  length, which needs a live run to measure.
+
+**Done-check**
+
+- `./.venv/bin/python -m pytest -q` -> **818 passed** in 12.12s (was 797).
+- The three F-A regressions verified to fail against the pre-fix code, which
+  reproduced the six-identical-attempt sequence from the live log.
+- `git diff --check` -> clean.
