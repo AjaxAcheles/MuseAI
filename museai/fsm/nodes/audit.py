@@ -421,4 +421,4 @@ async def audit(state: OrchestratorState) -> dict:
         },
     )
 
-    return {"critic_failures": failures}
+    return {"critic_failures": failures, "repetition_overlap_count": len(overlaps)}

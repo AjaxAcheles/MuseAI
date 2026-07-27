@@ -140,7 +140,7 @@ def patched_loop(monkeypatch):
 
 class TestPrompt:
     def test_the_draft_and_context_reach_the_prompt(self):
-        messages = critic_messages(DRAFT, PACKAGE)
+        messages = critic_messages(DRAFT, PACKAGE, 0)
         assert [m["role"] for m in messages] == ["system", "user"]
         body = messages[1]["content"]
         assert DRAFT in body
@@ -150,7 +150,7 @@ class TestPrompt:
 
     def test_the_beat_goal_reaches_the_prompt(self):
         """The critic can only enforce an exit state it has been shown."""
-        body = critic_messages(DRAFT, PACKAGE)[1]["content"]
+        body = critic_messages(DRAFT, PACKAGE, 0)[1]["content"]
         assert "<beat_goal>" in body
         assert "Mara finds the letter." in body
         assert "Mara is holding her own handwriting." in body
@@ -158,7 +158,7 @@ class TestPrompt:
 
     def test_the_story_world_reaches_the_prompt(self):
         """The critic can only defend a premise and setting it has been shown."""
-        body = critic_messages(DRAFT, PACKAGE)[1]["content"]
+        body = critic_messages(DRAFT, PACKAGE, 0)[1]["content"]
         assert "<story_world>" in body
         assert "Letters in Mara's own hand keep arriving." in body
         assert "A shrinking harbour town with one post office." in body
@@ -167,7 +167,7 @@ class TestPrompt:
         """Old context packages predate the story-world block; the prompt must
         render without it rather than crash mid-run."""
         package = {k: v for k, v in PACKAGE.items() if k != "project"}
-        body = critic_messages(DRAFT, package)[1]["content"]
+        body = critic_messages(DRAFT, package, 0)[1]["content"]
         assert "<beat_goal>" in body
 
 
@@ -204,11 +204,74 @@ class TestCleanPass:
             "search_manuscript", "get_full_outline", "get_thread_status",
             "get_thread_history", "get_canonical_state",
             "get_current_pointer_context", "get_recent_commits",
-            "find_repetition",
         ]
         assert "web_search" not in offered  # research_mode is off by default
         assert set(call["tool_impls"]) == set(offered)
         assert call["max_iterations"] == 6
+
+
+class TestRepetitionCheck:
+    """audit's own repetition guard replaces find_repetition in the prompt.
+
+    See museai/fsm/nodes/critics.py:critic_messages and CRITIC_ERROR_CODES in
+    museai/llm/structured.py — the critic's error-code list never had a
+    repetition category, so a find_repetition hit had nowhere to be reported.
+    """
+
+    def test_a_clean_repetition_check_says_so(self):
+        body = critic_messages(DRAFT, PACKAGE, 0)[1]["content"]
+        assert '<repetition_check status="clean"/>' in body
+        assert "find_repetition" not in body
+
+    def test_an_overlap_is_reported_with_an_instruction_not_to_repeat_it(self):
+        """The one guard against double-counting: `total` in `adversarial_
+        critics` sums `state["critic_failures"]` (which already carries
+        audit's PARAGRAPH_OVERLAP entries) with whatever the critic reports.
+        There is no code-level dedup, so this sentence surviving in the
+        rendered prompt is what stops the critic from filing its own finding
+        for the same paragraph and inflating the count."""
+        body = critic_messages(DRAFT, PACKAGE, 3)[1]["content"]
+        assert 'status="overlap_found"' in body
+        assert 'count="3"' in body
+        assert "do not report" in body.lower()
+
+    async def test_an_audit_overlap_and_a_critic_finding_are_not_deduplicated(
+        self, patched_loop
+    ):
+        """Documents present behavior honestly: the prompt asks the critic not
+        to re-report a repetition audit already found, but nothing enforces
+        it. If the critic restates the same paragraph anyway, its finding is
+        simply added on top of audit's — this is the gap the prompt
+        instruction exists to prevent in practice, not a guard that exists in
+        code."""
+        restated_response = """```json
+[
+  {
+    "error_code": "CONTRADICTS_PRIOR_PROSE",
+    "offending_text": "The lamp turned through the fog at midnight.",
+    "suggested_fix": "This repeats prose already committed earlier.",
+    "critic_source": "continuity_critic"
+  }
+]
+```"""
+        patched_loop(restated_response)
+        state = state_with(
+            critic_failures=[
+                FailureObject(
+                    error_code="PARAGRAPH_OVERLAP",
+                    offending_text="The lamp turned through the fog at midnight.",
+                    suggested_fix="Write fresh prose.",
+                    critic_source="programmatic_audit",
+                )
+            ],
+            repetition_overlap_count=1,
+        )
+
+        delta = await adversarial_critics(state)
+
+        # audit's one overlap + the critic restating the same paragraph: no
+        # code-level dedup, so both count.
+        assert delta["best_seen_failure_count"] == 2
 
 
 UNFULFILLED_RESPONSE = """```json

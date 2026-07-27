@@ -50,7 +50,7 @@ REPORT_LIST_ANCHOR = "Report a problem only when the draft actually contradicts"
 # The current shape. These are observations, not targets.
 EXPECTED_ERROR_CODES = 7
 EXPECTED_REPORT_BULLETS = 8
-EXPECTED_TOOL_BULLETS = 8
+EXPECTED_TOOL_BULLETS = 7
 
 
 # A context package sized like a real mid-chapter beat rather than a fixture
@@ -103,8 +103,7 @@ PACKAGE = {
 }
 
 
-@pytest.fixture
-def critic_messages():
+def _render(repetition_overlap_count: int = 0):
     return render_messages(
         "continuity_critic",
         draft_text=DRAFT,
@@ -115,7 +114,13 @@ def critic_messages():
         characters=PACKAGE["characters"],
         recent_prose=PACKAGE["recent_prose"],
         research_mode=False,
+        repetition_overlap_count=repetition_overlap_count,
     )
+
+
+@pytest.fixture
+def critic_messages():
+    return _render()
 
 
 @pytest.fixture
@@ -173,14 +178,20 @@ def test_the_report_list_has_not_quietly_grown(critic_messages):
     assert len(bullets) == EXPECTED_REPORT_BULLETS
 
 
-def test_the_tool_roster_in_the_prompt_matches_the_real_one(critic_messages):
+@pytest.mark.parametrize("repetition_overlap_count", [0, 2])
+def test_the_tool_roster_in_the_prompt_matches_the_real_one(repetition_overlap_count):
     """A prompt that offers a tool the registry does not serve teaches the model
     to invent names. The live run fabricated four — `check_continuity`,
     `check_draft_against_context`, `check_draft_for_continuity`, and one that
-    parsed as `[]` — so the two lists have to agree."""
+    parsed as `[]` — so the two lists have to agree.
+
+    Parametrized over both repetition-check branches: `find_repetition` was
+    dropped from the roster specifically because a hit had nowhere to be
+    reported (see the error-code test below), and that has to hold whether or
+    not the audit actually found an overlap on this draft."""
     from museai.fsm.tools.registry import AGENT_TOOLS
 
-    system = _system(critic_messages)
+    system = _system(_render(repetition_overlap_count))
     offered = {
         line.strip()[2:].split(":")[0].strip()
         for line in system.splitlines()
@@ -189,15 +200,28 @@ def test_the_tool_roster_in_the_prompt_matches_the_real_one(critic_messages):
     roster = set(AGENT_TOOLS["critic"])
     assert roster <= offered, f"prompt omits real tools: {roster - offered}"
     assert len(roster) == EXPECTED_TOOL_BULLETS
+    assert "find_repetition" not in system
 
 
-def test_every_named_error_code_is_one_the_parser_accepts(critic_messages):
+@pytest.mark.parametrize("repetition_overlap_count", [0, 2])
+def test_every_named_error_code_is_one_the_parser_accepts(repetition_overlap_count):
     """A code the model is told to use but the parser rejects is a re-prompt the
     critic can never win — it would answer correctly and be told it was wrong.
-    The two lists have to be the same list."""
+    The two lists have to be the same list.
+
+    Parametrized over both repetition-check branches on purpose: an earlier
+    version of the overlap-found block spelled its status as the literal token
+    `PARAGRAPH_OVERLAP`, which this test would have caught immediately had it
+    run against a nonzero count — the fixture only ever rendered the clean
+    branch, so a clean suite proved nothing about the branch that actually
+    ships on a draft with real overlaps. That token collided with
+    `CRITIC_ERROR_CODES` exactly the way this test exists to prevent: a model
+    that echoed it back as an `error_code` would hit `StructuredOutputError`
+    on every repeat-heavy draft, feeding the same unreadable-verdict retry
+    loop F-A and F-D closed."""
     from museai.llm.structured import CRITIC_ERROR_CODES
 
-    prompt = " ".join(m["content"] for m in critic_messages)
+    prompt = " ".join(m["content"] for m in _render(repetition_overlap_count))
     named = {
         word.strip(',."')
         for word in prompt.split()
@@ -205,6 +229,24 @@ def test_every_named_error_code_is_one_the_parser_accepts(critic_messages):
     }
     assert named == set(CRITIC_ERROR_CODES)
     assert len(named) == EXPECTED_ERROR_CODES
+
+
+def test_a_clean_draft_is_told_the_repetition_check_passed():
+    user = _render(0)[1]["content"]
+    assert '<repetition_check status="clean"/>' in user
+
+
+def test_an_overlap_carries_the_count_and_a_do_not_repeat_instruction():
+    """The instruction is the only guard against double-counting: `total` in
+    `adversarial_critics` sums `state["critic_failures"]` (already carrying
+    audit's own overlap findings) with whatever the critic reports, and
+    nothing in code deduplicates a critic finding that restates one of them."""
+    messages = _render(2)
+    user = messages[1]["content"]
+    system = messages[0]["content"]
+    assert 'status="overlap_found" count="2"' in user
+    assert "do not report" in user.lower()
+    assert "do not add your own finding" in system.lower()
 
 
 # ------------------------------------------------------------ pricing a cut

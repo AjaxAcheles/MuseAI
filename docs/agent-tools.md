@@ -32,7 +32,7 @@ payload naming the real options, never an exception.
 | beat_planner | get_seed_contract, get_current_pointer_context, get_chapter_context, get_character_emotion_history, get_canonical_state, check_plan_node |
 | drafter | get_current_pointer_context, get_recent_commits, search_manuscript, get_character_sheet, find_repetition |
 | reviser | check_draft, verify_replacement, search_manuscript, find_repetition |
-| critic | search_manuscript, get_full_outline, get_thread_status, get_thread_history, get_canonical_state, get_current_pointer_context, get_recent_commits, find_repetition |
+| critic | search_manuscript, get_full_outline, get_thread_status, get_thread_history, get_canonical_state, get_current_pointer_context, get_recent_commits |
 
 Planners read seed/outline/thread/canonical state and validate their own plan
 elements; the drafter reads the committed manuscript and the cast's voices;
@@ -118,6 +118,17 @@ read-only continuity surface. `+ web_search` on every roster when
   last beats; whole runs converge on one register. `find_repetition` gives
   agents the check; the remaining work is a cross-beat repetition audit and
   style-variation guidance keyed to beat intent.
+- **The critic lost `find_repetition`, not just an optimization**: its own
+  error-code list (`CRITIC_ERROR_CODES`) never had a repetition category, so a
+  hit had nowhere to be reported — and `audit.paragraph_overlaps` already runs
+  the same paragraph-level check against the full committed manuscript before
+  the critic sees the draft (`repetition_overlap_count` in its prompt). What
+  the critic can no longer catch: verbatim short phrases, and near-duplicate
+  paragraphs shorter than `generation.repetition_min_run` sentences —
+  `paragraph_overlaps` gates on that length, `find_repetition` didn't. If that
+  gap ever needs closing, it belongs to `paragraph_overlaps` (drop or lower the
+  length gate), not to re-adding a tool call with no schema slot to report
+  into.
 - **Beat specs are emotional abstractions**: specs carry intent/PAD but rarely
   concrete events, which yields interiority instead of dramatized action. A
   planner prompt rework should require an observable event per beat.

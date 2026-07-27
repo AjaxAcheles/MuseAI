@@ -1597,3 +1597,70 @@ suppression (F-C, a second `/api/chat` wire adapter) is still deferred.
 - The three F-A regressions verified to fail against the pre-fix code, which
   reproduced the six-identical-attempt sequence from the live log.
 - `git diff --check` -> clean.
+
+## Post-v1.17 maintenance — critic latency: F-F, the tool roster
+
+`reports/2026-07-25-critic-latency-investigation.md` §9 found that 71% of the
+continuity critic's tool calls were `find_repetition`, and 70% of those came
+back empty. This lands the fix that report deferred as analysis-only, now
+approved: `find_repetition` is dropped from the critic's roster and
+`audit.paragraph_overlaps`' own verdict is carried into the prompt instead.
+
+The report's first framing — "it rarely finds anything, so drop it" — was not
+the reason taken. The real one is structural and was checked before writing
+any code: `CRITIC_ERROR_CODES` (`museai/llm/structured.py:50`) has exactly
+seven codes and none of them is a repetition category, and the prompt's own
+report list never listed repetition as something to report either. A
+`find_repetition` hit had nowhere to be reported even when it found one.
+`audit.paragraph_overlaps` already runs the same check against the full
+committed manuscript (`assemble_context.py`'s `committed_prose`, unconditional,
+same source `find_repetition(scope="project")` used) before the critic ever
+sees the draft, so nothing was gained by asking twice.
+
+Reconstructing the 43 critic invocations in `data/chat.jsonl` for a secondary
+check — did a real `find_repetition` match ever change a verdict — found 4
+runs with a genuine non-empty match, and all 4 ended `finish_reason: length`
+with no verdict at all. That number is **not** the headline: it is confounded
+with the identical-prompt-retry and discarded-evidence bugs F-A/F-D just
+fixed, so it says as much about the truncation problem as about the tool.
+Recorded here as an observation, not the argument.
+
+**Fixes / changes**
+
+- **`museai/fsm/state.py`, `museai/fsm/nodes/audit.py`**: new
+  `repetition_overlap_count: int` state field, set by every `audit()` call
+  from the same `overlaps` list it already computes. Plain replace, no
+  reducer — `retry_critic` re-enters `critics` directly, never through
+  `audit` (`graph.py:238`), so the count from the last real audit stays
+  correct for a draft that hasn't changed, the same guarantee `critic_evidence`
+  already relies on.
+- **`museai/fsm/nodes/critics.py`**: `critic_messages()` takes the count as a
+  required third argument and renders it into the prompt.
+- **`museai/prompts/continuity_critic.xml.j2`**: the `find_repetition` tool
+  bullet is gone; a `<repetition_check status="clean"/>` or
+  `status="overlap_found" count="N"` block is rendered into `<context>`
+  instead, with an explicit "do not report them again here." The system
+  prompt also states directly that repeated prose is never one of the
+  critic's own findings. Neither is decoration: `critics.py`'s `total` sums
+  `state["critic_failures"]` (already carrying audit's overlap entries) with
+  whatever the critic reports, and nothing in code deduplicates a critic
+  finding that restates one — the prompt wording is the only guard, so it has
+  to survive as pinned text. An early draft of the overlap-found wording
+  spelled the status as the literal token `PARAGRAPH_OVERLAP`, which collides
+  with `CRITIC_ERROR_CODES` exactly the way a re-prompt loop starts — caught
+  by parametrizing the prompt's own error-code test over both branches before
+  it ever ran live, not after.
+- **`museai/fsm/tools/registry.py`**: `find_repetition` dropped from
+  `AGENT_TOOLS["critic"]` only; unchanged on `drafter` and `reviser`.
+- **`docs/agent-tools.md`**: roster table updated; a follow-up note records
+  what the critic actually lost — verbatim short phrases and near-duplicate
+  paragraphs shorter than `generation.repetition_min_run` sentences, since
+  `paragraph_overlaps` gates on that length and `find_repetition` didn't. If
+  that gap needs closing later it belongs to `paragraph_overlaps`, not to
+  reintroducing a tool call with no schema slot to report into.
+
+**Done-check**
+
+- `./.venv/bin/python -m pytest -q` -> **825 passed** in 12.26s (was 818).
+- `git diff --check` -> clean.
+- `graphify update .` run.

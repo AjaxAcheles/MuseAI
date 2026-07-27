@@ -147,7 +147,7 @@ class TestAuditNode:
         assert "25%" in failure.suggested_fix
 
     async def test_a_clean_passage_does_not_breach(self):
-        assert await audit(state_with(CLEAN)) == {"critic_failures": []}
+        assert await audit(state_with(CLEAN)) == {"critic_failures": [], "repetition_overlap_count": 0}
 
     async def test_one_failure_is_raised_for_the_beat_not_one_per_sentence(self):
         delta = await audit(state_with(PASSIVE_HEAVY))
@@ -156,7 +156,7 @@ class TestAuditNode:
     async def test_the_threshold_is_read_from_config(self, config_factory):
         # Under a permissive gate the same passive-heavy prose passes.
         set_node_config(config_factory(passive_voice_threshold=0.9))
-        assert await audit(state_with(PASSIVE_HEAVY)) == {"critic_failures": []}
+        assert await audit(state_with(PASSIVE_HEAVY)) == {"critic_failures": [], "repetition_overlap_count": 0}
 
     async def test_exactly_at_the_threshold_does_not_breach(self, config_factory):
         # Eight sentences, two passive: density 0.25, equal to the gate. Sized
@@ -166,14 +166,14 @@ class TestAuditNode:
             "The seal was broken. The letter was sorted. She stood. She read it. "
             "She left. She locked the door. She walked home. She slept."
         )
-        assert await audit(state_with(draft)) == {"critic_failures": []}
+        assert await audit(state_with(draft)) == {"critic_failures": [], "repetition_overlap_count": 0}
 
     async def test_an_empty_draft_yields_no_failures(self):
-        assert await audit(state_with("")) == {"critic_failures": []}
+        assert await audit(state_with("")) == {"critic_failures": [], "repetition_overlap_count": 0}
 
     async def test_no_drift_or_stylometric_metric_is_reported(self):
         delta = await audit(state_with(PASSIVE_HEAVY))
-        assert set(delta) == {"critic_failures"}
+        assert set(delta) == {"critic_failures", "repetition_overlap_count"}
 
 
 class TestOffenderList:
@@ -234,7 +234,7 @@ class TestSentenceFloor:
             config_factory(passive_voice_threshold=0.25, passive_min_sentences=6)
         )
         draft = "The door was opened. The letter was sealed. The truth was hidden."
-        assert await audit(state_with(draft)) == {"critic_failures": []}
+        assert await audit(state_with(draft)) == {"critic_failures": [], "repetition_overlap_count": 0}
 
     async def test_at_or_above_the_floor_the_gate_still_fires(self, config_factory):
         set_node_config(

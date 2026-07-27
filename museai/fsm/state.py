@@ -100,6 +100,15 @@ class OrchestratorState(TypedDict):
     # the next pass starts clean. Cleared whenever the verdict was readable —
     # nothing is coming back to reuse it.
     critic_evidence: dict | None
+    # How many paragraphs `audit`'s own repetition guard (`paragraph_overlaps`)
+    # flagged against the current draft. Set fresh by every `audit` call, never
+    # by `critics`; `retry_critic` re-enters `critics` directly (see
+    # `graph.py`), so the count from the last real audit stays correct for a
+    # draft that hasn't changed. Carried into the critic's prompt so it can be
+    # told the manuscript-repetition question is already answered, instead of
+    # offering `find_repetition` as a tool for a claim its own error-code list
+    # (`CRITIC_ERROR_CODES`) has no category for.
+    repetition_overlap_count: int
     # set when the revision cap is exhausted; parks at the interactive review state
     review_requested: bool
     pause_requested: bool
@@ -129,6 +138,7 @@ def make_initial_state(
         "last_cycle_improved": True,
         "critic_parse_failure_streak": 0,
         "critic_evidence": None,
+        "repetition_overlap_count": 0,
         "review_requested": False,
         "pause_requested": False,
         "hard_stop_asserted": False,

@@ -4,7 +4,8 @@ where it contradicts what has already been established.
 
 Your check is scoped to the material in the <context> block below: the beat's
 own goal, the story world (premise, genre, setting), the chapter's obligations,
-the open threads, the characters as described, and the recent committed prose. Judge the draft against that
+the open threads, the characters as described, the recent committed prose, and
+the automated repetition check. Judge the draft against that
 material and what your tools return, and nothing else. If a fact is in
 neither, you do not know it, and its absence is not an error.
 
@@ -32,8 +33,6 @@ before reporting it.
   characters, by id.
 - get_current_pointer_context: the active arc, chapter, and beat as recorded.
 - get_recent_commits: the last committed beats and their closing words.
-- find_repetition: check whether a passage already exists in the manuscript,
-  to ground a repetition claim.
 {% if research_mode %}
 - web_search: look up a real-world fact. Use it only when the draft asserts
   something checkable about the real world — a date, a place, how a mechanism
@@ -72,6 +71,9 @@ Report a problem only when the draft actually contradicts the context. Report:
 
 Do not report matters of taste, pacing, or style. Those are not continuity.
 Physical blocking is the exception: it is spatial continuity, not style.
+Repeated prose is checked separately and reported in <repetition_check>, never
+by you — do not add your own finding for it, even when its status is
+overlap_found.
 If the draft is clean, that is the expected outcome — say so with an empty array.
 </system>
 <user>
@@ -113,6 +115,14 @@ If the draft is clean, that is the expected outcome — say so with an empty arr
   <draft_beat>
 {{ draft_text }}
   </draft_beat>
+
+{% if repetition_overlap_count %}
+  <repetition_check status="overlap_found" count="{{ repetition_overlap_count }}">
+    The automated repetition check has already recorded these findings against this draft. Do not report them again here.
+  </repetition_check>
+{% else %}
+  <repetition_check status="clean"/>
+{% endif %}
 
   <chapter_obligations>
 {% for obligation in chapter.obligations %}
