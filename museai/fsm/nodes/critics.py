@@ -126,8 +126,16 @@ def _fits_window(conversation: list[dict], endpoint) -> bool:
     return tokens <= budget
 
 
-def critic_messages(draft_text: str, package: dict) -> list[dict]:
-    """Render the continuity-critic prompt for a draft and its context."""
+def critic_messages(
+    draft_text: str, package: dict, repetition_overlap_count: int
+) -> list[dict]:
+    """Render the continuity-critic prompt for a draft and its context.
+
+    ``repetition_overlap_count`` is ``audit``'s own paragraph-repetition
+    verdict for this exact draft (see ``OrchestratorState.repetition_overlap_
+    count``), carried into the prompt so the critic is told that question is
+    already answered rather than offered a tool for it.
+    """
     return render_messages(
         CRITIC_NAME,
         draft_text=draft_text,
@@ -138,6 +146,7 @@ def critic_messages(draft_text: str, package: dict) -> list[dict]:
         characters=package["characters"],
         recent_prose=package["recent_prose"],
         research_mode=get_node_config().generation.research_mode,
+        repetition_overlap_count=repetition_overlap_count,
     )
 
 
@@ -212,7 +221,7 @@ async def adversarial_critics(state: OrchestratorState) -> dict:
         )
         await bus.publish("critic_tool", {"beat_id": beat_id, **event})
 
-    messages = critic_messages(draft, package)
+    messages = critic_messages(draft, package, state["repetition_overlap_count"])
     generation = config.generation
     endpoint = config.endpoint_for("critic")
 

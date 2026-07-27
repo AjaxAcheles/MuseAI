@@ -143,6 +143,12 @@ AGENT_TOOLS: dict[str, tuple[str, ...]] = {
         "search_manuscript",
         "find_repetition",
     ),
+    # find_repetition is deliberately absent: the critic's own error-code list
+    # (CRITIC_ERROR_CODES) has no repetition category, and `audit`'s
+    # paragraph_overlaps guard already runs this exact check against the whole
+    # committed manuscript before the critic sees the draft — its verdict
+    # reaches the prompt as `repetition_overlap_count` instead. See
+    # `museai/fsm/nodes/critics.py:critic_messages`.
     "critic": (
         "search_manuscript",
         "get_full_outline",
@@ -151,7 +157,6 @@ AGENT_TOOLS: dict[str, tuple[str, ...]] = {
         "get_canonical_state",
         "get_current_pointer_context",
         "get_recent_commits",
-        "find_repetition",
     ),
 }
 

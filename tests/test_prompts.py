@@ -142,6 +142,7 @@ def context_for(template: str) -> dict:
             "chapter": CHAPTER,
             "recent_prose": RECENT_PROSE,
             "draft_text": DRAFT_TEXT,
+            "repetition_overlap_count": 0,
         }
     if template == "reviser":
         return {
