@@ -235,15 +235,14 @@ class TestRepetitionCheck:
         assert 'count="3"' in body
         assert "do not report" in body.lower()
 
-    async def test_an_audit_overlap_and_a_critic_finding_are_not_deduplicated(
+    async def test_a_critic_finding_lifted_from_committed_prose_is_discarded(
         self, patched_loop
     ):
-        """Documents present behavior honestly: the prompt asks the critic not
-        to re-report a repetition audit already found, but nothing enforces
-        it. If the critic restates the same paragraph anyway, its finding is
-        simply added on top of audit's — this is the gap the prompt
-        instruction exists to prevent in practice, not a guard that exists in
-        code."""
+        """A critic finding quoted only from committed prose is discarded.
+
+        The audit finding remains counted, while the unlocatable critic reply
+        leaves the critic unhealthy instead of adding a second issue.
+        """
         restated_response = """```json
 [
   {
@@ -271,7 +270,8 @@ class TestRepetitionCheck:
 
         # audit's one overlap + the critic restating the same paragraph: no
         # code-level dedup, so both count.
-        assert delta["best_seen_failure_count"] == 2
+        assert delta["best_seen_failure_count"] == 1
+        assert delta["critic_parse_failure_streak"] == 1
 
 
 UNFULFILLED_RESPONSE = """```json

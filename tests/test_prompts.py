@@ -262,6 +262,17 @@ class TestRendering:
         assert "scoped to the material" in system
         assert "continuity_critic" in messages[1]["content"]
 
+    def test_critic_requires_draft_only_quotes(self):
+        messages = render_messages("continuity_critic", **context_for("continuity_critic"))
+        rendered = "\n".join(message["content"] for message in messages)
+        assert '"offending_text" must be copied verbatim from inside <draft_beat>' in rendered
+        assert "Do not quote <recent_committed_prose>" in rendered
+
+    def test_critic_forbids_copying_context_into_suggested_fix(self):
+        rendered = render("continuity_critic", **context_for("continuity_critic"))
+        assert "Never copy a sentence or phrase out of" in rendered
+        assert "<recent_committed_prose> or any other context block into \"suggested_fix\"" in rendered
+
     def test_critic_sees_the_beat_goal(self):
         """The critic must be shown the mandate it is asked to enforce."""
         messages = render_messages("continuity_critic", **context_for("continuity_critic"))

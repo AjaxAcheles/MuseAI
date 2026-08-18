@@ -87,6 +87,10 @@ class StructuredOutputError(ValueError):
     """The model's response could not be read as a list of failure objects."""
 
 
+class UnlocatableFindingError(StructuredOutputError):
+    """Every parsed critic finding quoted text absent from the current draft."""
+
+
 class FakeToolCallTextError(StructuredOutputError):
     """The planner wrote tool-call-shaped JSON as text instead of using tools."""
 

@@ -35,7 +35,9 @@ from museai.core.logging_setup import log_node_event
 from museai.core.stream_bus import bus
 from museai.fsm.nodes.context_budget import window_budget
 from museai.fsm.nodes.deps import get_node_config
-from museai.fsm.state import OrchestratorState
+from museai.fsm.nodes.audit import longest_shared_verbatim_word_run
+from museai.fsm.nodes.revise import locate
+from museai.fsm.state import FailureObject, OrchestratorState
 from museai.fsm.tools.loop import AgentLoopError, run_agent_loop
 from museai.fsm.tools.registry import tool_impls_for, tool_specs_for
 from museai.llm.client import LLMCallError
@@ -43,6 +45,7 @@ from museai.llm.prompts import render_messages
 from museai.llm.tokenizer import count_message_tokens
 from museai.llm.structured import (
     StructuredOutputError,
+    UnlocatableFindingError,
     parse_failure_objects,
     response_truncation_remedy,
 )
@@ -124,6 +127,62 @@ def _fits_window(conversation: list[dict], endpoint) -> bool:
         conversation, endpoint.tokenizer_family, endpoint.model_name
     )
     return tokens <= budget
+
+
+def _locatable_findings(
+    draft: str, findings: list[FailureObject], beat_id: str
+) -> list[FailureObject]:
+    """Keep critic findings whose quoted text can be located in the draft."""
+    kept: list[FailureObject] = []
+    for finding in findings:
+        if locate(draft, finding.offending_text) is not None:
+            kept.append(finding)
+            continue
+        log_node_event(
+            "critics",
+            level=logging.WARNING,
+            event="finding_discarded",
+            beat_id=beat_id,
+            error_code=finding.error_code,
+            offending_text=finding.offending_text[:120],
+        )
+    return kept
+
+
+_SANITIZED_FIX = (
+    "Rewrite the offending text in fresh prose that carries this beat forward. "
+    "Do not reuse wording from prose already committed earlier in the manuscript."
+)
+
+
+def _sanitize_borrowed_fixes(
+    findings: list[FailureObject],
+    committed_prose: list[str],
+    beat_id: str,
+    max_borrowed_words: int,
+) -> list[FailureObject]:
+    """Replace remedies that paste the critic's recent-prose context verbatim."""
+    sanitized: list[FailureObject] = []
+    for finding in findings:
+        borrowed_words = longest_shared_verbatim_word_run(
+            finding.suggested_fix, committed_prose
+        )
+        if borrowed_words < max_borrowed_words:
+            sanitized.append(finding)
+            continue
+        log_node_event(
+            "critics",
+            level=logging.WARNING,
+            event="fix_sanitized",
+            beat_id=beat_id,
+            error_code=finding.error_code,
+            borrowed_words=borrowed_words,
+            suggested_fix=finding.suggested_fix[:120],
+        )
+        sanitized.append(
+            finding.model_copy(update={"suggested_fix": _SANITIZED_FIX})
+        )
+    return sanitized
 
 
 def critic_messages(
@@ -228,10 +287,12 @@ async def adversarial_critics(state: OrchestratorState) -> dict:
     # Every attempt validates strictly, even in a degraded run: a model that has
     # started answering correctly again must be able to clear the streak. Lenient
     # parsing is the last resort below, never the loop's contract.
-    failures: list | None = None
+    failures: list[FailureObject] = []
+    unreadable = True
     last_error = ""
     last_text = ""
     last_truncated = False
+    unlocatable_findings = False
 
     # Carries forward across parse retries so a bad reply doesn't discard the
     # tool results the previous attempt already paid for; run_agent_loop fills
@@ -380,9 +441,22 @@ async def adversarial_critics(state: OrchestratorState) -> dict:
                         response, config.endpoint_for("critic")
                     )
                 )
-            failures = parse_failure_objects(response.text)
+            parsed_failures = parse_failure_objects(response.text)
+            failures = _locatable_findings(draft, parsed_failures, beat_id)
+            failures = _sanitize_borrowed_fixes(
+                failures,
+                package["recent_prose"],
+                beat_id,
+                generation.critic_fix_max_borrowed_words,
+            )
+            if parsed_failures and not failures:
+                raise UnlocatableFindingError(
+                    "critic quoted text that is not in the draft"
+                )
+            unreadable = False
             break
         except StructuredOutputError as exc:
+            unlocatable_findings = isinstance(exc, UnlocatableFindingError)
             last_error = str(exc)
             log_node_event(
                 "critics",
@@ -442,19 +516,30 @@ async def adversarial_critics(state: OrchestratorState) -> dict:
                     )
 
     lenient_used = False
-    unreadable = failures is None
-    if failures is not None:
+    if not unreadable:
         streak = 0
     else:
         # Every retry spent and still unreadable. The run continues — see the
         # module docstring — but the streak climbs and the UI is told.
         streak = state["critic_parse_failure_streak"] + 1
         failures = []
-        if streak >= generation.critic_degrade_threshold and not last_truncated:
+        if (
+            streak >= generation.critic_degrade_threshold
+            and not last_truncated
+            and not unlocatable_findings
+        ):
             try:
                 failures = parse_failure_objects(last_text, lenient=True)
             except StructuredOutputError:
                 failures = []
+            else:
+                failures = _locatable_findings(draft, failures, beat_id)
+                failures = _sanitize_borrowed_fixes(
+                    failures,
+                    package["recent_prose"],
+                    beat_id,
+                    generation.critic_fix_max_borrowed_words,
+                )
             # "Salvaged" only if something was actually recovered. Relaxed parsing
             # that yielded nothing salvaged nothing, and the UI must not claim it did.
             lenient_used = bool(failures)

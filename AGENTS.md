@@ -87,3 +87,27 @@ Every session, in order:
 3. Build the one prompt that is next up.
 4. Run that prompt's done-check.
 5. Update `PROGRESS_LEDGER.md`.
+
+
+# Graphify
+This project has a knowledge graph at graphify-out/ with god nodes,
+community structure, and cross-file relationships.
+
+Rules:
+- For codebase questions, first run `graphify query "<question>"` when
+  graphify-out/graph.json exists. Use `graphify path "<A>" "<B>"` for
+  relationships and `graphify explain "<concept>"` for focused concepts.
+  These return a scoped subgraph, usually much smaller than
+  GRAPH_REPORT.md or raw grep output.
+- If graphify-out/wiki/index.md exists, use it for broad navigation
+  instead of raw source browsing.
+- Read graphify-out/GRAPH_REPORT.md only for broad architecture review
+  or when query/path/explain do not surface enough context.
+- After modifying code, run `graphify update .` to keep the graph
+  current (AST-only, no API cost).
+
+# Working agreements
+- Make the smallest change that satisfies the task; do not refactor
+  unrelated code.
+- Follow the existing code style in the files you touch.
+- Never edit files under graphify-out/ by hand; they are generated.

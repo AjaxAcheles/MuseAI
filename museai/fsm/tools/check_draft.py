@@ -1,7 +1,7 @@
 """Run the deterministic prose audit on a draft, before it is submitted.
 
 This is the exact same set of model-free checks the ``audit`` node will run —
-passive-voice density, verbatim paragraph overlap with recent committed prose,
+passive-voice density, verbatim prose overlap with recent committed prose,
 and named-emotion density — offered as a tool so the drafter and reviser can
 self-correct instead of paying a full critic-revise round trip for a problem a
 regex can name.
@@ -18,6 +18,7 @@ from museai.fsm.nodes.audit import (
     _emotion_pattern,
     emotion_word_density,
     paragraph_overlaps,
+    phrase_echoes,
     passive_voice_density,
 )
 from museai.fsm.nodes.deps import get_node_config
@@ -30,7 +31,7 @@ CHECK_DRAFT_TOOL_SPEC: dict[str, Any] = {
         "name": "check_draft",
         "description": (
             "Run the deterministic prose checks that will audit your draft: "
-            "passive-voice density, paragraphs that duplicate recently "
+            "passive-voice density, prose that duplicates recently "
             "committed prose, and sentences that name an emotion outright. "
             "Returns pass/fail with the offending sentences, so you can fix "
             "them before answering."
@@ -64,7 +65,8 @@ def check_draft(text: str) -> dict:
     if not draft:
         return {"error": "no text was given to check"}
 
-    generation = get_node_config().generation
+    config = get_node_config()
+    generation = config.generation
     findings: list[dict] = []
 
     density, passives = passive_voice_density(draft)
@@ -101,6 +103,29 @@ def check_draft(text: str) -> dict:
                     "fresh prose that moves the beat forward instead."
                 ),
                 "offending": _quotes(overlaps),
+            }
+        )
+
+    echoes = [
+        paragraph
+        for paragraph in phrase_echoes(
+            draft,
+            [row["prose"] for row in recent],
+            min_words=generation.repetition_min_phrase_words,
+            allowlist=list(generation.repetition_allowlist),
+        )
+        if paragraph not in overlaps
+    ]
+    if echoes:
+        findings.append(
+            {
+                "error_code": OVERLAP_ERROR_CODE,
+                "detail": (
+                    "These paragraphs reuse short phrases from prose already "
+                    "committed. Rewrite the repeated words in fresh prose that "
+                    "moves the beat forward instead."
+                ),
+                "offending": _quotes(echoes),
             }
         )
 

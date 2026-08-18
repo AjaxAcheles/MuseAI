@@ -12,6 +12,7 @@ exists so it can never take a run down again.
 
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 
@@ -54,6 +55,42 @@ CORRECTED = """```json
 ```"""
 
 CLEAN = "[]"
+
+COMMITTED_PROSE = "Mara had already lowered the borrowed ladder."
+BORROWED_LADDER_PROSE = (
+    "Nell stepped onto the grass with the ladder and set it down among the weeds "
+    "near the base of Ida's shed. The aluminium was light in her hands but felt "
+    "heavier now. She glanced at the third rung: not much more than a hairline "
+    "split."
+)
+SANITIZED_FIX = (
+    "Rewrite the offending text in fresh prose that carries this beat forward. "
+    "Do not reuse wording from prose already committed earlier in the manuscript."
+)
+
+COMMITTED_PROSE_FINDING = """[
+  {
+    "error_code": "CONTRADICTS_PRIOR_PROSE",
+    "offending_text": "Mara had already lowered the borrowed ladder.",
+    "suggested_fix": "Keep the ladder where it was.",
+    "critic_source": "continuity_critic"
+  }
+]"""
+
+MIXED_FINDINGS = """[
+  {
+    "error_code": "CONTRADICTS_CHARACTER",
+    "offending_text": "Mara lied about the letter.",
+    "suggested_fix": "Have Mara say nothing.",
+    "critic_source": "continuity_critic"
+  },
+  {
+    "error_code": "CONTRADICTS_PRIOR_PROSE",
+    "offending_text": "Mara had already lowered the borrowed ladder.",
+    "suggested_fix": "Keep the ladder where it was.",
+    "critic_source": "continuity_critic"
+  }
+]"""
 
 DRAFT = "The sun stood at noon. Mara lied about the letter."
 
@@ -306,6 +343,148 @@ async def test_a_clean_critic_never_retries(configure, scripted_loop):
 
     assert len(calls) == 1
     assert delta["critic_parse_failure_streak"] == 0
+
+
+async def test_a_locatable_finding_is_kept(configure, scripted_loop):
+    configure(critic_parse_retries=0, critic_degrade_threshold=3)
+    scripted_loop(CORRECTED)
+
+    delta = await adversarial_critics(state_with())
+
+    assert [failure.offending_text for failure in delta["critic_failures"]] == [
+        "Mara lied about the letter."
+    ]
+    assert delta["critic_parse_failure_streak"] == 0
+
+
+async def test_borrowed_critic_fix_is_sanitized_but_its_finding_survives(
+    configure, scripted_loop, caplog
+):
+    configure(critic_parse_retries=0, critic_degrade_threshold=3)
+    scripted_loop(
+        json.dumps([
+            {
+                "error_code": "CONTRADICTS_CHARACTER",
+                "offending_text": "Mara lied about the letter.",
+                "suggested_fix": BORROWED_LADDER_PROSE,
+                "critic_source": "continuity_critic",
+            }
+        ])
+    )
+    package = {**PACKAGE, "recent_prose": [BORROWED_LADDER_PROSE]}
+
+    with caplog.at_level(logging.WARNING, logger="museai"):
+        state = state_with()
+        state["active_context_package"] = package
+        delta = await adversarial_critics(state)
+
+    finding = delta["critic_failures"][0]
+    assert finding.suggested_fix == SANITIZED_FIX
+    assert (finding.error_code, finding.offending_text, finding.critic_source) == (
+        "CONTRADICTS_CHARACTER", "Mara lied about the letter.", "continuity_critic"
+    )
+    sanitized = [r for r in caplog.records if "event=fix_sanitized" in r.getMessage()]
+    assert len(sanitized) == 1
+    assert "borrowed_words=" in sanitized[0].getMessage()
+
+
+async def test_short_borrowed_critic_fix_is_untouched(configure, scripted_loop):
+    configure(critic_parse_retries=0, critic_degrade_threshold=3)
+    suggested_fix = "Check the third rung before she climbs."
+    scripted_loop(
+        json.dumps([
+            {
+                "error_code": "CONTRADICTS_CHARACTER",
+                "offending_text": "Mara lied about the letter.",
+                "suggested_fix": suggested_fix,
+                "critic_source": "continuity_critic",
+            }
+        ])
+    )
+    package = {**PACKAGE, "recent_prose": [BORROWED_LADDER_PROSE]}
+
+    state = state_with()
+    state["active_context_package"] = package
+    delta = await adversarial_critics(state)
+
+    assert delta["critic_failures"][0].suggested_fix == suggested_fix
+
+
+async def test_unlocatable_finding_is_not_sanitized(configure, scripted_loop, caplog):
+    configure(critic_parse_retries=0, critic_degrade_threshold=3)
+    scripted_loop(
+        json.dumps([
+            {
+                "error_code": "CONTRADICTS_PRIOR_PROSE",
+                "offending_text": "This is not in the draft.",
+                "suggested_fix": BORROWED_LADDER_PROSE,
+                "critic_source": "continuity_critic",
+            }
+        ])
+    )
+    package = {**PACKAGE, "recent_prose": [BORROWED_LADDER_PROSE]}
+
+    with caplog.at_level(logging.WARNING, logger="museai"):
+        state = state_with()
+        state["active_context_package"] = package
+        await adversarial_critics(state)
+
+    assert not any("event=fix_sanitized" in r.getMessage() for r in caplog.records)
+
+
+async def test_a_finding_lifted_from_committed_prose_is_discarded(
+    configure, scripted_loop, caplog
+):
+    configure(critic_parse_retries=0, critic_degrade_threshold=3)
+    scripted_loop(COMMITTED_PROSE_FINDING)
+
+    with caplog.at_level(logging.WARNING, logger="museai"):
+        delta = await adversarial_critics(state_with())
+
+    assert "critic_failures" not in delta
+    assert delta["critic_parse_failure_streak"] == 1
+    discarded = [r for r in caplog.records if "event=finding_discarded" in r.getMessage()]
+    assert len(discarded) == 1
+    assert COMMITTED_PROSE in discarded[0].getMessage()
+
+
+async def test_all_discarded_findings_reprompt_without_a_clean_verdict(
+    configure, scripted_loop
+):
+    configure(critic_parse_retries=1, critic_degrade_threshold=3)
+    calls = scripted_loop(COMMITTED_PROSE_FINDING)
+
+    delta = await adversarial_critics(state_with())
+
+    assert len(calls) == 2
+    assert "critic quoted text that is not in the draft" in calls[1][-1]["content"]
+    assert "critic_failures" not in delta
+    assert delta["critic_parse_failure_streak"] == 1
+
+
+async def test_an_empty_array_remains_a_clean_verdict(configure, scripted_loop):
+    configure(critic_parse_retries=0, critic_degrade_threshold=3)
+    scripted_loop(CLEAN)
+
+    delta = await adversarial_critics(state_with())
+
+    assert "critic_failures" not in delta
+    assert delta["critic_parse_failure_streak"] == 0
+
+
+async def test_mixed_findings_keep_only_the_locatable_finding(
+    configure, scripted_loop, caplog
+):
+    configure(critic_parse_retries=0, critic_degrade_threshold=3)
+    scripted_loop(MIXED_FINDINGS)
+
+    with caplog.at_level(logging.WARNING, logger="museai"):
+        delta = await adversarial_critics(state_with())
+
+    assert [failure.offending_text for failure in delta["critic_failures"]] == [
+        "Mara lied about the letter."
+    ]
+    assert sum("event=finding_discarded" in r.getMessage() for r in caplog.records) == 1
 
 
 # ---------------------------------------------------------------- the streak
@@ -732,6 +911,20 @@ async def test_degraded_mode_never_invents_an_empty_offending_text(configure, sc
 
     delta = await adversarial_critics(state_with())
 
+    assert "critic_failures" not in delta
+
+
+async def test_degraded_mode_does_not_salvage_unlocatable_findings(
+    configure, scripted_loop, health_events
+):
+    """Findings absent from the draft remain unreadable at the degrade threshold."""
+    configure(critic_parse_retries=0, critic_degrade_threshold=1)
+    scripted_loop(COMMITTED_PROSE_FINDING)
+
+    delta = await adversarial_critics(state_with())
+
+    assert health_events[-1]["degraded"] is True
+    assert health_events[-1]["lenient_used"] is False
     assert "critic_failures" not in delta
 
 

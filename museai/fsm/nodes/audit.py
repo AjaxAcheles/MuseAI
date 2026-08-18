@@ -149,6 +149,87 @@ def _is_allowlisted(paragraph_norm: str, allowlist_norm: list[str]) -> bool:
     return any(phrase and phrase in paragraph_norm for phrase in allowlist_norm)
 
 
+def _normalized_verbatim_phrase_matches(
+    phrase_norm: str, passages: list[tuple[str, str]], *, max_words: int
+) -> list[str]:
+    """Return original passages whose supplied normalized text contains a phrase."""
+    if not phrase_norm or len(phrase_norm.split()) > max_words:
+        return []
+    return [passage for passage, norm in passages if phrase_norm in norm]
+
+
+def verbatim_phrase_matches(
+    phrase: str, passages: list[str], *, max_words: int
+) -> list[str]:
+    """Return passages containing a normalized short phrase verbatim.
+
+    This is shared by the audit's short-echo guard and ``find_repetition`` so
+    they use one bounded phrase-matching rule.
+    """
+    phrase_norm = _normalize_for_compare(phrase)
+    normalized_passages = [
+        (passage, _normalize_for_compare(passage)) for passage in passages
+    ]
+    return _normalized_verbatim_phrase_matches(
+        phrase_norm, normalized_passages, max_words=max_words
+    )
+
+
+def longest_shared_verbatim_word_run(text: str, passages: list[str]) -> int:
+    """Return the longest normalized consecutive word run shared with a passage."""
+    words = _normalize_for_compare(text).split()
+    if not words:
+        return 0
+
+    longest = 0
+    for passage in passages:
+        passage_words = _normalize_for_compare(passage).split()
+        previous = [0] * (len(passage_words) + 1)
+        for word in words:
+            current = [0] * (len(passage_words) + 1)
+            for index, passage_word in enumerate(passage_words, start=1):
+                if word == passage_word:
+                    current[index] = previous[index - 1] + 1
+                    longest = max(longest, current[index])
+            previous = current
+    return longest
+
+
+def phrase_echoes(
+    draft: str,
+    committed: list[str],
+    *,
+    min_words: int,
+    allowlist: list[str],
+) -> list[str]:
+    """Return paragraphs with a non-allowlisted verbatim run of ``min_words`` or more; there is no maximum."""
+    allowlist_norm = [_normalize_for_compare(p) for p in allowlist]
+    corpus_ngrams = {
+        tuple(words[index : index + min_words])
+        for passage in committed
+        for paragraph in split_paragraphs(passage)
+        for words in [_normalize_for_compare(paragraph).split()]
+        for index in range(len(words) - min_words + 1)
+    }
+
+    offenders: list[str] = []
+    for paragraph in split_paragraphs(draft):
+        words = _normalize_for_compare(paragraph).split()
+        ngrams = [
+            tuple(words[index : index + min_words])
+            for index in range(len(words) - min_words + 1)
+        ]
+        norm = " ".join(words)
+        if not norm or _is_allowlisted(norm, allowlist_norm):
+            corpus_ngrams.update(ngrams)
+            continue
+
+        if any(ngram in corpus_ngrams for ngram in ngrams):
+            offenders.append(paragraph)
+        corpus_ngrams.update(ngrams)
+    return offenders
+
+
 def paragraph_overlaps(
     draft: str,
     committed: list[str],
@@ -269,9 +350,9 @@ async def audit(state: OrchestratorState) -> dict:
     the reducer, which is what a fresh audit of a new draft should do: the
     previous cycle's findings describe prose that no longer exists.
 
-    Four model-free checks run here: passive-voice density, verbatim paragraph
-    overlap against committed prose, named-emotion density, and stock-phrase
-    (style-tic) density. All four append ``FailureObject``s to the same list,
+    Five model-free checks run here: passive-voice density, verbatim paragraph
+    and short-phrase overlap against committed prose, named-emotion density,
+    and stock-phrase (style-tic) density. All append ``FailureObject``s to the same list,
     which flows into the existing draft→audit→revise loop.
     """
     config = get_node_config()
@@ -327,6 +408,16 @@ async def audit(state: OrchestratorState) -> dict:
         min_sentences=generation.repetition_min_run,
         allowlist=allowlist,
     )
+    echoes = [
+        paragraph
+        for paragraph in phrase_echoes(
+            draft,
+            corpus,
+            min_words=generation.repetition_min_phrase_words,
+            allowlist=allowlist,
+        )
+        if paragraph not in overlaps
+    ]
     for paragraph in overlaps:
         failures.append(
             FailureObject(
@@ -336,6 +427,19 @@ async def audit(state: OrchestratorState) -> dict:
                     "This paragraph duplicates prose already committed earlier in "
                     "the manuscript. Do not restate it — write fresh prose that "
                     "moves the beat forward from where the story now stands."
+                ),
+                critic_source=CRITIC_SOURCE,
+            )
+        )
+    for paragraph in echoes:
+        failures.append(
+            FailureObject(
+                error_code=OVERLAP_ERROR_CODE,
+                offending_text=paragraph[:quote_chars],
+                suggested_fix=(
+                    "This paragraph reuses a short phrase from prose already "
+                    "committed earlier in the manuscript. Rewrite the repeated "
+                    "words in fresh prose that moves the beat forward."
                 ),
                 critic_source=CRITIC_SOURCE,
             )
@@ -402,6 +506,7 @@ async def audit(state: OrchestratorState) -> dict:
         threshold=threshold,
         passive_sentences=len(passives),
         paragraph_overlaps=len(overlaps),
+        phrase_echoes=len(echoes),
         emotion_density=f"{emotion_density:.3f}",
         emotion_sentences=len(emotion_sentences),
         tic_density=f"{tic_density:.3f}",
@@ -415,10 +520,14 @@ async def audit(state: OrchestratorState) -> dict:
             "passive_density": round(density, 3),
             "threshold": threshold,
             "paragraph_overlaps": len(overlaps),
+            "phrase_echoes": len(echoes),
             "emotion_density": round(emotion_density, 3),
             "tic_density": round(tic_density, 3),
             "failures": [f.model_dump() for f in failures],
         },
     )
 
-    return {"critic_failures": failures, "repetition_overlap_count": len(overlaps)}
+    return {
+        "critic_failures": failures,
+        "repetition_overlap_count": len(overlaps) + len(echoes),
+    }

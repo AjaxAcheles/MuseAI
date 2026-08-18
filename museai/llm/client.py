@@ -231,6 +231,8 @@ def _build_request(
         body["tool_choice"] = tool_choice
     if response_format is not None:
         body["response_format"] = dict(response_format)
+    if endpoint.reasoning_effort is not None:
+        body["reasoning_effort"] = endpoint.reasoning_effort
     if extra_body:
         body.update(extra_body)
 

@@ -33,6 +33,8 @@ endpoint:
   # request_timeout: a reasoning model legitimately pauses minutes mid-stream.
   stream_read_timeout: 300
   temperature: 0.7
+  # OpenAI-compatible hidden-reasoning budget hint; leave commented out to omit it.
+  # reasoning_effort: none
   # Sent as max_tokens when set. Leave null to omit the field — some endpoints
   # bill hidden reasoning against this budget, and some apply a small default
   # cap when it is absent. Truncation (finish_reason "length") is detected and
@@ -93,6 +95,8 @@ generation:
   served_window_mismatch_fraction: 0.9
   repetition_threshold: 0.9      # paragraph similarity (0..1) that counts as duplicated prose
   repetition_min_run: 3          # consecutive near-duplicate sentences before a copy is faulted
+  repetition_min_phrase_words: 6 # short verbatim echoes beneath the 3-sentence repetition_min_run gate
+  critic_fix_max_borrowed_words: 15 # a fix may quote a few words (such as "the third rung"); fifteen consecutive borrowed words is duplication, not a fix
   emotion_word_threshold: 0.3    # max proportion of sentences that may name an emotion outright
   planner_intensity_retries: 1   # re-prompts for a varied emotional arc when a plan is all high-arousal
   intensity_hot_threshold: 0.6   # |target arousal| at/above which a beat counts as "hot"
@@ -138,6 +142,9 @@ agents:
   critic:
     temperature: 0.2
     output_reservation: 1024
+    # A reasoning model that returns finish_reason='length' with an empty verdict
+    # spent its whole grant on hidden reasoning; this disables it where honoured.
+    # reasoning_effort: none
     # Optional: cap a critic that burns its whole grant on reasoning tokens and
     # returns finish_reason='length' with no verdict. Setting this skips the
     # client's remaining-room calculation, so with a context_window set it must

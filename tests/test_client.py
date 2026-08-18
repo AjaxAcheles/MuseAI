@@ -1017,6 +1017,51 @@ class TestTimeoutsAndOutputCap:
         await call_llm(endpoint, MESSAGES, transport=httpx.MockTransport(handler))
         assert seen[0]["options"] == {"num_ctx": 16384}
 
+    async def test_reasoning_effort_reaches_the_wire(self):
+        endpoint = EndpointConfig(
+            base_url="https://example.invalid/v1",
+            api_key="k",
+            model_name="m",
+            tokenizer_family="char_heuristic",
+            reasoning_effort="none",
+        )
+        seen: list[dict] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(json.loads(request.content))
+            return json_response(completion())
+
+        await call_llm(endpoint, MESSAGES, transport=httpx.MockTransport(handler))
+        assert seen[0]["reasoning_effort"] == "none"
+
+    async def test_unset_reasoning_effort_keeps_the_field_off_the_wire(self, endpoint):
+        seen: list[dict] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(json.loads(request.content))
+            return json_response(completion())
+
+        await call_llm(endpoint, MESSAGES, transport=httpx.MockTransport(handler))
+        assert "reasoning_effort" not in seen[0]
+
+    async def test_extra_body_overrides_reasoning_effort(self):
+        endpoint = EndpointConfig(
+            base_url="https://example.invalid/v1",
+            api_key="k",
+            model_name="m",
+            tokenizer_family="char_heuristic",
+            reasoning_effort="none",
+            extra_body={"reasoning_effort": "high"},
+        )
+        seen: list[dict] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(json.loads(request.content))
+            return json_response(completion())
+
+        await call_llm(endpoint, MESSAGES, transport=httpx.MockTransport(handler))
+        assert seen[0]["reasoning_effort"] == "high"
+
     async def test_context_window_reserves_the_full_remainder_when_no_cap_is_set(self):
         # No explicit cap: max_tokens is the window's real remainder after the
         # prompt, so long output can use the headroom instead of being pinned to

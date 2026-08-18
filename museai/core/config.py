@@ -35,6 +35,7 @@ class ConfigError(RuntimeError):
 
 # The five LLM-powered agent roles. Every ``agents:`` key must be one of these.
 AGENT_ROLES = ("chapter_planner", "beat_planner", "drafter", "reviser", "critic")
+_REASONING_EFFORTS = {"none", "minimal", "low", "medium", "high"}
 
 
 def _resolve_env_api_key(value: str) -> str:
@@ -50,6 +51,16 @@ def _resolve_env_api_key(value: str) -> str:
             f"but it is unset or empty"
         )
     return resolved
+
+
+def _validate_reasoning_effort(value: str | None) -> str | None:
+    """Reject reasoning-budget hints an OpenAI-compatible server cannot name."""
+    if value is not None and value not in _REASONING_EFFORTS:
+        accepted = ", ".join(sorted(_REASONING_EFFORTS))
+        raise ValueError(
+            f"reasoning_effort must be one of {accepted}, got {value!r}"
+        )
+    return value
 
 
 class EndpointConfig(BaseModel):
@@ -71,6 +82,11 @@ class EndpointConfig(BaseModel):
     # longer between tokens than it takes to open a connection.
     stream_read_timeout: int = 300
     temperature: float = 0.7
+    # OpenAI-compatible hint for the endpoint's hidden reasoning budget. None
+    # omits it entirely, preserving existing requests; "none" disables hidden
+    # reasoning where honoured. A server may silently ignore unknown fields:
+    # Ollama's /v1 layer honours reasoning_effort but ignores think (0.32.1).
+    reasoning_effort: str | None = None
     # Sent as max_tokens when set. None omits the field entirely, preserving the
     # v1.02 wire-format finding: some endpoints bill hidden reasoning against
     # this budget. Truncation is detected via finish_reason either way.
@@ -115,6 +131,11 @@ class EndpointConfig(BaseModel):
     @classmethod
     def _resolve_env_ref(cls, value: str) -> str:
         return _resolve_env_api_key(value)
+
+    @field_validator("reasoning_effort")
+    @classmethod
+    def _known_reasoning_effort(cls, value: str | None) -> str | None:
+        return _validate_reasoning_effort(value)
 
     @field_validator("max_attempts")
     @classmethod
@@ -185,6 +206,7 @@ class AgentEndpointOverride(BaseModel):
     request_timeout: int | None = None
     stream_read_timeout: int | None = None
     temperature: float | None = None
+    reasoning_effort: str | None = None
     max_output_tokens: int | None = None
     extra_body: dict[str, Any] | None = None
     stream_usage: bool | None = None
@@ -199,6 +221,11 @@ class AgentEndpointOverride(BaseModel):
         if value is None:
             return None
         return _resolve_env_api_key(value)
+
+    @field_validator("reasoning_effort")
+    @classmethod
+    def _known_reasoning_effort(cls, value: str | None) -> str | None:
+        return _validate_reasoning_effort(value)
 
 
 class GenerationConfig(BaseModel):
@@ -247,6 +274,13 @@ class GenerationConfig(BaseModel):
     # (or a whole paragraph) before it is faulted. Short deliberate refrains stay
     # under the gate and are never touched.
     repetition_min_run: int
+    # Shorter verbatim echoes sit below the paragraph gate. Common language is
+    # ignored; only a phrase at or above this many words is faulted.
+    repetition_min_phrase_words: int = 6
+    # A legitimate critic fix may quote a few words (a name, "the third rung")
+    # from its passage. Fifteen or more consecutive borrowed words is duplication,
+    # not a fix, so the critic remedy is replaced before revision.
+    critic_fix_max_borrowed_words: int = 15
     # Phrases the author has declared may recur verbatim. The beat planner may
     # also register a refrain per beat (`intended_refrain`); both are exempt.
     repetition_allowlist: list[str] = []
@@ -438,6 +472,8 @@ class GenerationConfig(BaseModel):
     @field_validator(
         "critic_degrade_threshold",
         "repetition_min_run",
+        "repetition_min_phrase_words",
+        "critic_fix_max_borrowed_words",
         "tool_call_cap",
         "intensity_min_beats",
         "audit_quote_chars",

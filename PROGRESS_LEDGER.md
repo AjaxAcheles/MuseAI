@@ -1663,4 +1663,70 @@ Recorded here as an observation, not the argument.
 
 - `./.venv/bin/python -m pytest -q` -> **825 passed** in 12.26s (was 818).
 - `git diff --check` -> clean.
+
+- `graphify update .` run.
+
+## Post-v1.17 maintenance — short-phrase echo audit and critic context boundary
+
+The audit now detects normalized verbatim phrase echoes from six words upward,
+against both committed prose and earlier paragraphs in the current draft. It
+uses the existing phrase-size cap and the same shared matcher as
+`find_repetition`; paragraph-overlap behavior remains unchanged. Author
+allowlists and planner-declared refrains suppress both repetition checks. The
+audit event now includes `phrase_echoes`, and `check_draft` applies the same
+guard before a drafter or reviser submits prose.
+
+`generation.repetition_min_phrase_words` is the one new configuration key;
+it defaults to 6 and is documented in `config.example.yaml`. `config.yaml` was
+not modified. The continuity critic's `suggested_fix` instructions now forbid
+copying text from `<recent_committed_prose>` or any other context block.
+
+**Done-check**
+
+- `wsl -d Ubuntu -- bash -lc "cd '/mnt/c/Users/imarg/syncthing_shared/Coding Projects/MuseAI' && uv run pytest -q"` -> **847 passed**.
+- `graphify update .` run.
+
+## Post-v1.17 analysis — story-generation pipeline architecture audit
+
+Audited `reports/exploring the story generation pipeline.md` against the current
+planning, context, agent-loop, audit, revision, routing, persistence, and
+recovery implementation. The resulting `reports/codex_audit.md` records 70
+domain-model, representation, sampling, context-pruning, topology, control-flow,
+and recovery findings with concise architectural recommendations. This was a
+documentation-only analysis; no runtime or configuration files were changed.
+
+**Done-check**
+
+- Required finding fields verified for all 70 numbered findings.
+- `git diff --check` -> clean.
+
+## Post-v1.17 analysis — final council cross-examination
+
+Cross-examined `reports/claude_audit.md` and `reports/codex_audit.md` against the
+source pipeline report and current implementation. The consolidated
+`reports/final_council_critique_codex.md` separates consensus findings,
+single-audit verified findings, rejected or downgraded claims, and council-new
+risks. The council report contains 60 complete findings, including newly
+identified live runtime-swap/reset races, unreadable-critic zero scoring,
+human-edit validation bypass, and stale-event recovery correlation.
+
+**Done-check**
+
+- Required finding fields verified for all 60 numbered findings.
+- Cross-examination section records the principal false positives and scope
+  conflicts instead of silently carrying them into the final list.
+- `git diff --check` -> clean.
+
+## Post-v1.17 maintenance — critic fix sanitization
+
+The continuity critic now preserves locatable findings while replacing any
+`suggested_fix` that copies fifteen or more consecutive normalized words from
+the same recent committed-prose context shown to that critic. The shared audit
+matcher supplies the longest-run calculation; discarded findings are never
+sanitized. `generation.critic_fix_max_borrowed_words` defaults to 15 in code
+and `config.example.yaml`; `config.yaml` was not modified for this work.
+
+**Done-check**
+
+- `wsl -d Ubuntu -- bash -lc "cd '/mnt/c/Users/imarg/syncthing_shared/Coding Projects/MuseAI' && uv run pytest -q"` -> **851 passed**.
 - `graphify update .` run.

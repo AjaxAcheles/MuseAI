@@ -3,12 +3,12 @@ project_id: the-borrowed-ladder
 endpoint:
   base_url: http://127.0.0.1:11434/v1
   api_key: ollama
-  model_name: qwen3.5:9b
+  model_name: hf.co/empero-ai/Qwythos-9B-Claude-Mythos-5-1M-GGUF:Q4_K_M
   tokenizer_family: char_heuristic
   request_timeout: 60
   stream_read_timeout: 300
   # Fallback only: every one of the five agent roles overrides this below.
-  temperature: 0.7
+  temperature: 0.8
   # Leave null. With context_window set, max_tokens is sent as the window's
   # actual remainder after the prompt, so long prose is never capped early.
   max_output_tokens: null
@@ -16,8 +16,8 @@ endpoint:
   # if there are more retries than entries.
   max_attempts: 3
   retry_backoff_seconds: [5.0, 15.0]
-  # qwen3.5:9b is architecturally a 256k-context model, but Ollama serves its
-  # own small default (a few thousand tokens) unless told otherwise, and it
+  # The configured 9B GGUF is architecturally a long-context model, but Ollama
+  # serves its own small default (a few thousand tokens) unless told otherwise, and it
   # discards the overflow from the LEFT — taking the system message with it.
   # 16384 is sized for a 12 GB card: ~6.6 GB weights (Q4_K_M) plus KV cache
   # still fits on the GPU, and spilling KV to system RAM would cost far more
@@ -403,6 +403,13 @@ tools:
 # To split roles across machines, add `base_url` and `api_key: "${VAR}"` here —
 # the PLANNER_*/DRAFTER_*/CRITIC_* variables already in .env are wired nowhere
 # until they are referenced from this block.
+#
+# `reasoning_effort: none` is set on the critic and the drafter only, because
+# those are the two roles where it was actually measured (see their notes). The
+# planners are deliberately left alone: every run in that session reused an
+# existing plan, so neither planner ever ran under either setting and there is
+# no evidence either way. They emit JSON like the critic does, so the same win
+# is plausible — measure before assuming it.
 agents:
   chapter_planner:
     temperature: 0.4          # structural JSON: obligations and chapter shape
@@ -413,11 +420,18 @@ agents:
   drafter:
     temperature: 0.9          # prose — the one role that should run hot
     output_reservation: 3072
+    # Counter-intuitive but measured (2026-08-18): hidden reasoning was crowding
+    # the prose out of the output budget. With reasoning on, one beat came back
+    # as 29 words costing 5,254 completion tokens; with it off, 83 words for 99.
+    # Deliberation is not what writes the sentence, and here it was starving it.
+    reasoning_effort: none
   reviser:
     temperature: 0.7          # prose, but constrained by the failures it answers
     output_reservation: 3072
   critic:
     temperature: 0.3          # judgement, emitted as JSON: heat is pure downside
+    # See the long note below: this is the fix for the empty-verdict stall.
+    reasoning_effort: none
     # A [] verdict needs ~10 tokens; observed useful replies land under 1600.
     # Without a cap, a stuck critic burns its whole grant on <think> tokens and
     # returns finish_reason='length' with zero text (llm_io.log:82, 2026-07-24).
@@ -428,17 +442,30 @@ agents:
     # This was 2048/2048 in v0.2.3; raised to 4096 on 2026-07-25 after the live
     # run showed a 2048 cap alone was not enough headroom — 42% of post-fix
     # critic wall clock was spent hitting it with zero answer text (empty_reply
-    # in fsm.log). The obvious fix, disabling reasoning outright, was tried
-    # first and does not survive the wire: `chat_template_kwargs:
-    # {enable_thinking: false}` in extra_body — like `options.num_ctx` above —
-    # is silently ignored by Ollama's /v1 compatibility endpoint (confirmed live
-    # against 0.32.1: reasoning still ran, replies still hit the cap). Only the
-    # native /api/chat endpoint's `think: false` actually suppresses it, and
-    # MuseAI does not speak that endpoint. So the cap is widened instead: a
-    # 4096-token deliberation that answers beats a 2048-token one that doesn't
-    # — a mitigation sized against one live sample, not a demonstrated fix.
-    # Watch `empty_reply` in fsm.log to see whether 4096 is still not enough on
-    # real (~6.4k-token) critic prompts, not the toy prompt this was tried on.
+    # in fsm.log). The cap was widened as a mitigation, and it never worked:
+    # truncation stayed at ~37% while every failure just got slower.
+    #
+    # RESOLVED 2026-08-18 by `reasoning_effort` below, not by the cap. The
+    # earlier note here said disabling reasoning "does not survive the wire" and
+    # that only native /api/chat's `think: false` suppresses it. That was half
+    # right and led the investigation astray. Measured live against Ollama
+    # 0.32.1 on a real ~3.2k-token critic prompt with tools attached:
+    #
+    #   extra_body chat_template_kwargs / `think` / a "/no_think" suffix
+    #                                     -> all ignored on /v1, as documented
+    #   reasoning_effort: none            -> HONOURED on /v1
+    #
+    #   as shipped         43.6 s, finish_reason='length', 4096 tokens, no text
+    #   reasoning_effort   1.7 s, finish_reason='stop', 2 tokens, verdict "[]"
+    #
+    # `reasoning_effort` is a standard OpenAI-compatible request field, so this
+    # needs no second wire adapter and no /api/chat support. In a live run it
+    # took `empty_reply` from 2 per beat to 0 and the beat from 209 s to 32 s.
+    #
+    # max_output_tokens stays at 4096: with reasoning off, observed verdicts run
+    # 55-600 tokens, so it is no longer the binding constraint and costs nothing
+    # as headroom. Watch `empty_reply` in fsm.log if the model is ever changed —
+    # this finding is model-specific and was false for qwen3.5:9b.
     #
     # Side effect: window_budget(critic endpoint) = context_window -
     # output_reservation drops from 14336 to 12288 tokens — the room

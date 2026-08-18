@@ -12,7 +12,11 @@ from __future__ import annotations
 from difflib import SequenceMatcher
 from typing import Any
 
-from museai.fsm.nodes.audit import _normalize_for_compare, split_paragraphs
+from museai.fsm.nodes.audit import (
+    _normalize_for_compare,
+    split_paragraphs,
+    verbatim_phrase_matches,
+)
 from museai.fsm.nodes.deps import get_node_config
 from museai.fsm.tools.project_db import project_connection
 from museai.memory.db import get_committed_beats, get_recent_committed_beats
@@ -96,7 +100,9 @@ def find_repetition(text_or_query: str, scope: str = "project") -> dict:
             if not committed_norm:
                 continue
             if is_phrase:
-                if input_norm and input_norm in committed_norm:
+                if verbatim_phrase_matches(
+                    input_norm, [committed], max_words=tools.repetition_phrase_max_words
+                ):
                     matches.append(
                         {
                             "beat_id": beat_id,

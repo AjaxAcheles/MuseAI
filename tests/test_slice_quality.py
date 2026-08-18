@@ -97,13 +97,14 @@ def _findings(*quotes: str) -> str:
 # Findings quoting prose the critic paraphrased rather than copied. `locate`
 # finds none of them, so `revise` takes its full-rewrite path and the scripted
 # replacement draft is exactly what the next cycle audits.
-THREE_FAILURES = _findings("She dated the letter.", "He waited.", "The clerk left.")
-TWO_FAILURES = _findings("She dated the letter.", "He waited.")
+THREE_FAILURES = _findings(OFFENDING, OFFENDING, OFFENDING)
+TWO_FAILURES = _findings(OFFENDING, OFFENDING)
+REPAIRED_FAILURE = _findings(REPAIRED)
 
 # Three sentences each, so every draft stays under `passive_min_sentences` and
 # the programmatic audit contributes nothing to the counts under test.
-REWRITE_ONE = "Rain crossed the roof. Mara set the letter down. She waited."
-REWRITE_TWO = "The lamp guttered. Mara folded the letter twice. She stood up."
+REWRITE_ONE = "Rain crossed the roof. Mara lied about the letter. She waited."
+REWRITE_TWO = "The lamp guttered. Mara lied about the letter. She stood up."
 
 
 class _Response:
@@ -219,7 +220,7 @@ async def test_the_quality_loop_reaches_commit_once_the_failure_is_fixed(project
 
 async def test_a_failure_that_survives_the_cap_reaches_review(project, endpoint):
     # The critic finds the same problem on every pass, revision never fixes it.
-    endpoint([ONE_FAILURE] * (RETRY_CAP + 1))
+    endpoint([ONE_FAILURE, REPAIRED_FAILURE, REPAIRED_FAILURE])
 
     state = await drafted_state(project)
 

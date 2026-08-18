@@ -449,6 +449,23 @@ class TestFindRepetition:
         result = find_repetition("the brass lantern on the sill")
         assert result["matches"][0]["similarity"] == 1.0
 
+    def test_phrase_limit_is_honoured(self, world, config_factory):
+        config = config_factory(project_id=PROJECT_ID)
+        set_node_config(
+            config.model_copy(
+                update={
+                    "tools": config.tools.model_copy(
+                        update={"repetition_phrase_max_words": 4}
+                    )
+                }
+            )
+        )
+
+        result = find_repetition("the brass lantern on")
+
+        assert result["matches"][0]["similarity"] == 1.0
+        assert find_repetition("the brass lantern on the")["matches"] == []
+
     def test_fresh_prose_matches_nothing(self, world):
         result = find_repetition(
             "Idris waited at the ferry slip with two tickets and no plan. "

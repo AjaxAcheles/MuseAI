@@ -18,9 +18,11 @@ from museai.fsm.nodes.audit import (
     emotion_word_density,
     is_passive,
     paragraph_overlaps,
+    phrase_echoes,
     passive_voice_density,
     split_paragraphs,
     split_sentences,
+    verbatim_phrase_matches,
     _emotion_pattern,
 )
 from museai.fsm.nodes.deps import set_node_config
@@ -371,6 +373,14 @@ class TestParagraphOverlap:
 
 
 class TestRepetitionAuditNode:
+    def test_shared_phrase_matcher_normalizes_its_public_passages(self):
+        matching = "She waited; when Ida came out on the afternoon door."
+        assert verbatim_phrase_matches(
+            "WHEN Ida came out on the afternoon door!",
+            [matching, "She crossed the garden without speaking."],
+            max_words=12,
+        ) == [matching]
+
     async def test_overlap_becomes_a_failure_object(self):
         draft = f"{PARA_A}\n\nFresh continuation. She rose. She went to the door."
         delta = await audit(state_with_package(draft, recent_prose=[PARA_A]))
@@ -378,6 +388,92 @@ class TestRepetitionAuditNode:
         assert len(overlaps) == 1
         assert overlaps[0].critic_source == CRITIC_SOURCE
         assert overlaps[0].offending_text == PARA_A[:240]
+
+    async def test_eight_word_committed_echo_is_faulted(self):
+        committed = (
+            "She told him to say nothing about the ladder when Ida came out "
+            "on the afternoon door."
+        )
+        draft = "Tomas made no mention when Ida came out on the afternoon door."
+
+        delta = await audit(state_with_package(draft, committed_prose=[committed]))
+
+        assert [f for f in delta["critic_failures"] if f.error_code == OVERLAP_ERROR_CODE]
+        assert delta["repetition_overlap_count"] == 1
+
+    async def test_single_sentence_forty_word_copy_is_faulted(self):
+        copied = (
+            "She left the third rung quietly behind in the way things sometimes "
+            "had to be left undisturbed to keep a balance between what could be "
+            "said and what was best not touched at all before they met again, then "
+            "picked up the ladder and walked toward her own house."
+        )
+
+        delta = await audit(state_with_package(copied, committed_prose=[copied]))
+
+        assert [f for f in delta["critic_failures"] if f.error_code == OVERLAP_ERROR_CODE]
+
+    async def test_phrase_shorter_than_the_minimum_is_not_faulted(self):
+        committed = "She said nothing after dusk."
+        draft = "She said nothing after dusk."
+
+        delta = await audit(state_with_package(draft, committed_prose=[committed]))
+
+        assert [f for f in delta["critic_failures"] if f.error_code == OVERLAP_ERROR_CODE] == []
+
+    async def test_allowlisted_phrase_is_not_faulted(self, config_factory):
+        phrase = "when Ida came out on the afternoon door"
+        set_node_config(config_factory(repetition_allowlist=[phrase]))
+        committed = f"He waited by the ladder {phrase}."
+        draft = f"She made no mention {phrase}."
+
+        delta = await audit(state_with_package(draft, committed_prose=[committed]))
+
+        assert [f for f in delta["critic_failures"] if f.error_code == OVERLAP_ERROR_CODE] == []
+
+    async def test_intended_refrain_is_not_faulted(self):
+        phrase = "when Ida came out on the afternoon door"
+        committed = f"He waited by the ladder {phrase}."
+        draft = f"She made no mention {phrase}."
+
+        delta = await audit(
+            state_with_package(
+                draft, committed_prose=[committed], intended_refrain=[phrase]
+            )
+        )
+
+        assert [f for f in delta["critic_failures"] if f.error_code == OVERLAP_ERROR_CODE] == []
+
+    async def test_clean_continuation_with_shared_characters_and_place_passes(self):
+        committed = "Ida set the ladder against the afternoon door and went inside."
+        draft = "Ida crossed the yard, then asked Tomas to bring the ladder home."
+
+        delta = await audit(state_with_package(draft, committed_prose=[committed]))
+
+        assert [f for f in delta["critic_failures"] if f.error_code == OVERLAP_ERROR_CODE] == []
+
+    def test_earlier_draft_paragraph_is_also_checked(self):
+        phrase = "when Ida came out on the afternoon door"
+        draft = f"He waited by the ladder {phrase}.\n\nShe made no mention {phrase}."
+
+        assert phrase_echoes(
+            draft, [], min_words=6, allowlist=[]
+        ) == [f"She made no mention {phrase}."]
+
+    def test_phrase_echoes_flags_exactly_the_minimum_word_run(self):
+        shared = "one two three four five six"
+
+        assert phrase_echoes(
+            f"before {shared} after.", [shared], min_words=6, allowlist=[]
+        ) == [f"before {shared} after."]
+        assert phrase_echoes(
+            "one two three four five", [shared], min_words=6, allowlist=[]
+        ) == []
+
+    def test_paragraph_overlap_behavior_is_unchanged(self):
+        assert paragraph_overlaps(
+            PARA_A, [PARA_A], threshold=0.9, min_sentences=3, allowlist=[]
+        ) == [PARA_A]
 
     async def test_a_declared_refrain_exempts_the_paragraph(self):
         long_refrain = f"{REFRAIN} {REFRAIN} {REFRAIN}"

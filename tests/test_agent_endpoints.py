@@ -11,7 +11,7 @@ from __future__ import annotations
 import pytest
 from pydantic import ValidationError
 
-from museai.core.config import AGENT_ROLES
+from museai.core.config import AGENT_ROLES, EndpointConfig
 from museai.fsm.nodes import critics as critics_module
 from museai.fsm.nodes.critics import adversarial_critics
 from museai.fsm.nodes.deps import set_node_config
@@ -69,6 +69,30 @@ class TestEndpointFor:
         assert critic.tokenizer_family == config.endpoint.tokenizer_family
         # Roles without an override keep the shared endpoint.
         assert config.endpoint_for("drafter") is config.endpoint
+
+    def test_reasoning_effort_override_wins_and_other_agents_inherit(self, config_factory):
+        config = config_factory(
+            endpoint=config_factory().endpoint.model_copy(
+                update={"reasoning_effort": "medium"}
+            ),
+            agents={"critic": {"reasoning_effort": "none"}},
+        )
+        assert config.endpoint_for("critic").reasoning_effort == "none"
+        assert config.endpoint_for("drafter").reasoning_effort == "medium"
+
+    def test_invalid_endpoint_reasoning_effort_is_fatal_at_boot(self):
+        with pytest.raises(ValidationError, match="off"):
+            EndpointConfig(
+                base_url="https://example.invalid/v1",
+                api_key="k",
+                model_name="m",
+                tokenizer_family="char_heuristic",
+                reasoning_effort="off",
+            )
+
+    def test_invalid_agent_reasoning_effort_is_fatal_at_boot(self, config_factory):
+        with pytest.raises(ValidationError, match="off"):
+            config_factory(agents={"critic": {"reasoning_effort": "off"}})
 
     def test_an_unknown_agent_role_is_fatal_at_boot(self, config_factory):
         with pytest.raises(ValidationError, match="proofreader"):

@@ -9,6 +9,16 @@ the automated repetition check. Judge the draft against that
 material and what your tools return, and nothing else. If a fact is in
 neither, you do not know it, and its absence is not an error.
 
+Exactly one block below is the text you are judging: <draft_beat>. Everything
+else in <context> — <recent_committed_prose>, <story_world>, <characters>,
+<open_threads>, <chapter_obligations> — is established material you judge it
+AGAINST, and is never itself at fault. Never report a problem against text that
+is not inside <draft_beat>.
+
+The draft is a CONTINUATION of <recent_committed_prose>. It is meant to follow
+on from it, stay in the same place, and carry the same characters forward.
+Continuing from the prior prose is the point, not a fault.
+
 The draft was written to the specific goal in <beat_goal>: the state it enters
 on, the state it was required to land on, the required change it exists to
 produce, the observable event that carries that change, the chapter
@@ -73,7 +83,10 @@ Do not report matters of taste, pacing, or style. Those are not continuity.
 Physical blocking is the exception: it is spatial continuity, not style.
 Repeated prose is checked separately and reported in <repetition_check>, never
 by you — do not add your own finding for it, even when its status is
-overlap_found.
+overlap_found. This covers every phrasing of the same idea: that the draft
+"repeats", "restates", "re-treads", or "is redundant with" what came before, or
+that a passage should be cut as already-covered. That judgement is not yours to
+make here.
 If the draft is clean, that is the expected outcome — say so with an empty array.
 </system>
 <user>
@@ -187,6 +200,23 @@ central object or character status is CONTRADICTS_PRIOR_PROSE. Use
 CONTRADICTS_PREMISE only when the draft conflicts with <story_world> itself.
 
 Set "critic_source" to "continuity_critic" on every element.
+"offending_text" must be copied verbatim from inside <draft_beat>, and must
+appear there. Do not quote <recent_committed_prose> or any other context block:
+a finding whose quote is not in the draft is discarded without being read. If
+you cannot quote the draft itself, you do not have a finding.
+
+"suggested_fix" must keep the beat alive — it corrects, rewrites, or replaces
+the offending text with something that still does the beat's work. Never
+instruct that a passage be deleted with nothing put in its place; the beat still
+has to deliver the required change in <beat_goal>.
+
+Write the fix in your own words. Never copy a sentence or phrase out of
+<recent_committed_prose> or any other context block into "suggested_fix": that
+prose is already in the manuscript, and repeating it in this beat duplicates it
+rather than continuing the story. If the draft contradicts earlier prose, say in
+your own words what this beat should do instead — do not paste the earlier prose
+in.
+
 If the draft has no continuity problems, return an empty array: []
 
 Return the fenced JSON array and nothing else.

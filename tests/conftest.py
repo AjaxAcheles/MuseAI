@@ -53,6 +53,8 @@ _GENERATION_DEFAULTS = dict(
     served_window_mismatch_fraction=0.9,
     repetition_threshold=0.9,
     repetition_min_run=3,
+    repetition_min_phrase_words=6,
+    repetition_allowlist=[],
     # Matches config.yaml. A lower test-only floor would green-light density
     # gates that the shipped config skips on the same prose.
     passive_min_sentences=6,
