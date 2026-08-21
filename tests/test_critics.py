@@ -7,8 +7,13 @@ parsing the findings, tracking the best draft seen — runs for real.
 
 from __future__ import annotations
 
-import pytest
+import json
+from pathlib import Path
 
+import pytest
+from pydantic import ValidationError
+
+from museai.core.config import AppConfig, load_config
 from museai.core.stream_bus import bus
 from museai.fsm.nodes import critics as critics_module
 from museai.fsm.nodes.critics import adversarial_critics, critic_messages
@@ -169,6 +174,40 @@ class TestPrompt:
         package = {k: v for k, v in PACKAGE.items() if k != "project"}
         body = critic_messages(DRAFT, package, 0)[1]["content"]
         assert "<beat_goal>" in body
+
+    def test_obligation_scope_names_this_beats_rendered_field(self):
+        package = {
+            **PACKAGE,
+            "beat": {**PACKAGE["beat"], "discharges": ["Mara dates the earliest letter."]},
+        }
+        body = critic_messages(DRAFT, package, 0)[0]["content"]
+        assert "<discharges_chapter_obligations>" in body
+        assert "this beat's `discharges`" in body
+        assert "list) or its planned thread movement" in body
+        assert "other <chapter_obligations>" in body
+
+
+class TestCriticConfig:
+    def test_shipped_configs_boot_with_the_critic_cap(self, monkeypatch):
+        root = Path(__file__).parents[1]
+        monkeypatch.setenv("MUSEAI_API_KEY", "test-key")
+
+        live = load_config(root / "config.yaml")
+        example = load_config(root / "config.example.yaml")
+
+        assert live.generation.critic_max_findings_per_code == 2
+        assert example.generation.critic_max_findings_per_code == 2
+
+    def test_missing_or_unknown_critic_cap_key_is_fatal(self, config_factory):
+        missing = config_factory().model_dump()
+        del missing["generation"]["critic_max_findings_per_code"]
+        with pytest.raises(ValidationError, match="critic_max_findings_per_code"):
+            AppConfig(**missing)
+
+        unknown = config_factory().model_dump()
+        unknown["generation"]["unexpected_critic_key"] = 1
+        with pytest.raises(ValidationError, match="unexpected_critic_key"):
+            AppConfig(**unknown)
 
 
 class TestCleanPass:
@@ -336,6 +375,83 @@ class TestFailures:
 
         delta = await adversarial_critics(state_with())
         assert delta["critic_parse_failure_streak"] == 1
+
+    async def test_repeated_error_codes_are_capped_in_order_and_logged(
+        self, patched_loop, monkeypatch
+    ):
+        """One latched code cannot inflate routing's failure-count measurement."""
+        response = json.dumps(
+            [
+                {
+                    "error_code": "CONTRADICTS_CHARACTER",
+                    "offending_text": "Mara lied about the letter.",
+                    "suggested_fix": f"Fix number {number}.",
+                    "critic_source": "continuity_critic",
+                }
+                for number in range(1, 4)
+            ]
+        )
+        events: list[dict] = []
+        original = critics_module.log_node_event
+
+        def capture(node_name, **fields):
+            if fields.get("event") == "critiqued":
+                events.append(fields)
+            original(node_name, **fields)
+
+        monkeypatch.setattr(critics_module, "log_node_event", capture)
+        patched_loop(response)
+
+        delta = await adversarial_critics(state_with())
+
+        failures = delta["critic_failures"]
+        assert [finding.suggested_fix for finding in failures] == [
+            "Fix number 1.", "Fix number 2."
+        ]
+        assert events[-1]["critic_findings_dropped_by_code_cap"] == 1
+
+    async def test_mixed_findings_within_each_code_cap_are_untouched(self, patched_loop):
+        response = json.dumps(
+            [
+                {
+                    "error_code": "CONTRADICTS_CHARACTER",
+                    "offending_text": "Mara lied about the letter.",
+                    "suggested_fix": "First character fix.",
+                    "critic_source": "continuity_critic",
+                },
+                {
+                    "error_code": "CONTRADICTS_PRIOR_PROSE",
+                    "offending_text": "The sun stood at noon.",
+                    "suggested_fix": "First prose fix.",
+                    "critic_source": "continuity_critic",
+                },
+                {
+                    "error_code": "CONTRADICTS_CHARACTER",
+                    "offending_text": "Mara lied about the letter.",
+                    "suggested_fix": "Second character fix.",
+                    "critic_source": "continuity_critic",
+                },
+            ]
+        )
+        patched_loop(response)
+
+        delta = await adversarial_critics(state_with())
+
+        assert [finding.suggested_fix for finding in delta["critic_failures"]] == [
+            "First character fix.", "First prose fix.", "Second character fix."
+        ]
+
+    async def test_programmatic_audit_failures_are_not_subject_to_the_critic_cap(
+        self, config_factory, patched_loop
+    ):
+        set_node_config(config_factory(critic_max_findings_per_code=1))
+        patched_loop(CLEAN_RESPONSE)
+        audit_failures = [programmatic_failure(), programmatic_failure()]
+
+        delta = await adversarial_critics(state_with(critic_failures=audit_failures))
+
+        assert "critic_failures" not in delta
+        assert delta["best_seen_failure_count"] == len(audit_failures)
 
 
 class TestBestSeen:

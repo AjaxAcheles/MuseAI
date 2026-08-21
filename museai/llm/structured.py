@@ -34,6 +34,7 @@ from typing import Any, Sequence
 from pydantic import ConfigDict, ValidationError
 
 from museai.core.logging_setup import get_fsm_logger
+from museai.fsm.nodes.audit import split_sentences
 from museai.fsm.state import FailureObject
 
 # Openers paired with their closers, for the balanced-span scan.
@@ -167,17 +168,22 @@ def truncation_remedy(
         and served_completion_tokens is not None
         and served_completion_tokens >= max_output_tokens
     ):
-        reasoning_note = (
-            " The model spent the whole grant on internal reasoning (a non-empty "
-            "<think> block was returned as `thinking`) and never got to an answer."
-            if thinking and thinking.strip()
-            else ""
-        )
+        if thinking and thinking.strip():
+            return (
+                f"the reply used its full output budget ({served_completion_tokens} "
+                f"completion tokens against endpoint.max_output_tokens="
+                f"{max_output_tokens}) before producing any answer text. The model "
+                "spent the whole grant on internal reasoning (a non-empty <think> "
+                "block was returned as `thinking`) and never got to an answer. Set "
+                "reasoning_effort: none for the affected agent under agents.<role> "
+                "in config.yaml; this is the primary remedy. If the requested answer "
+                "is still too long after reasoning is disabled, ask for a shorter answer"
+            )
         return (
             f"the reply used its full output budget ({served_completion_tokens} "
             f"completion tokens against endpoint.max_output_tokens="
             f"{max_output_tokens}) before producing any answer text."
-            f"{reasoning_note} This is a completion-length cap, not a context-"
+            " This is a completion-length cap, not a context-"
             f"window problem: raise endpoint.max_output_tokens (and "
             f"output_reservation to match) or ask for a shorter answer"
         )
@@ -487,9 +493,9 @@ def _validate(data: Any, *, lenient: bool = False) -> list[FailureObject]:
 # A critic sometimes phrases "no issues" as prose instead of `[]`. Rejecting
 # that burns every re-prompt and pushes the run toward degraded mode over a
 # draft the critic just said was fine. The reading below is deliberately
-# narrow: any JSON-ish bracket, any schema vocabulary, any hedge, or anything
-# beyond a short sentence still fails and re-prompts. The length bound is
-# ``generation.critic_verdict_max_chars``.
+# narrow: any JSON-ish bracket, any schema vocabulary, or any hedge still fails
+# and re-prompts. The affirmative verdict must lead the reply's first sentence;
+# the whole reply stays within ``generation.critic_verdict_max_chars``.
 
 _CLEAN_PHRASES = re.compile(
     r"\b(clean|clear|no (?:continuity )?(?:issues?|errors?|problems?)|"
@@ -521,10 +527,11 @@ _HEDGE_MARKERS = re.compile(
 def is_clean_verdict(text: str, max_chars: int | None = None) -> bool:
     """Whether a prose critic reply unambiguously says the draft is clean.
 
-    True only when the text is short, contains no ``[`` or ``{`` at all, none
-    of the failure-object vocabulary, no hedging, and affirmatively matches a
-    clean-ish phrase. Conservative by construction: a truncated or equivocating
-    reply returns False and stays a parse failure.
+    True only when the whole reply stays under its configured bound, contains no
+    ``[`` or ``{`` at all, none of the failure-object vocabulary, and no
+    hedging; its first sentence must affirmatively match a clean-ish phrase.
+    Conservative by construction: a truncated or equivocating reply returns
+    False and stays a parse failure.
 
     ``max_chars`` defaults to ``generation.critic_verdict_max_chars``; the
     argument exists so a caller (or a test) can pin it explicitly. The import is
@@ -545,7 +552,8 @@ def is_clean_verdict(text: str, max_chars: int | None = None) -> bool:
         return False
     if _HEDGE_MARKERS.search(stripped):
         return False
-    return bool(_CLEAN_PHRASES.search(stripped))
+    sentences = split_sentences(stripped)
+    return bool(sentences and _CLEAN_PHRASES.search(sentences[0]))
 
 
 def parse_failure_objects(raw_text: str, *, lenient: bool = False) -> list[FailureObject]:

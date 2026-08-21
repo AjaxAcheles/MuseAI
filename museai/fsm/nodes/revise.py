@@ -265,7 +265,17 @@ async def revise_prose(state: OrchestratorState) -> dict:
 
     located = [(failure, locate(draft, failure.offending_text)) for failure in failures]
     spans = [span for _, span in located if span is not None]
-    span_mode = len(spans) == len(failures) and not _overlapping(spans)
+    # A density breach is a measurement over the whole draft. Its
+    # ``offending_text`` is only the first offending sentence, so it locates and
+    # would otherwise pick span mode — rewriting one sentence to move a metric
+    # counted over all of them. That cannot reliably clear the threshold, and
+    # the router's no_progress rule then parks the beat for good.
+    whole_draft_failures = sum(failure.whole_draft for failure in failures)
+    span_mode = (
+        len(spans) == len(failures)
+        and not _overlapping(spans)
+        and not whole_draft_failures
+    )
     collapsed = False
 
     if span_mode:
@@ -318,6 +328,7 @@ async def revise_prose(state: OrchestratorState) -> dict:
         mode=mode,
         failures_fixed=len(failures),
         spans_located=len(spans),
+        whole_draft_failures=whole_draft_failures,
         collapsed_context=collapsed,
         retry_count=retry_count,
         words=len(revised.split()),

@@ -5,10 +5,13 @@ from __future__ import annotations
 import asyncio
 from typing import Any, cast
 
+from museai.core.config import load_config
 from museai.core.stream_bus import bus
+from museai.llm.client import LLMCallError, TOOL_SUPPORT_DIAGNOSIS
 from museai.memory.db import connect_db, upsert_arc, upsert_project
 from museai.web import app as app_module
 from museai.web.app import create_app
+from museai.web.routes import settings as settings_route
 from museai.web.routes.dashboard import stream
 
 
@@ -168,6 +171,153 @@ async def test_settings_save_rejects_unknown_key(config_factory, tmp_path):
         await _close_started_app(test_app)
 
 
+async def test_settings_renders_agent_reasoning_effort_controls(config_factory, tmp_path):
+    app, test_app = await _started_app(config_factory(), tmp_path)
+    try:
+        response = await app.test_client().get("/settings")
+        assert response.status_code == 200
+        html = await response.get_data(as_text=True)
+        for role in ("chapter_planner", "beat_planner", "drafter", "reviser", "critic"):
+            assert f'id="setting-agent-{role}-reasoning-effort"' in html
+    finally:
+        await _close_started_app(test_app)
+
+
+async def test_settings_save_persists_agent_reasoning_effort(config_factory, tmp_path):
+    config = config_factory()
+    app, test_app = await _started_app(config, tmp_path)
+    config_path = tmp_path / "config.yaml"
+    payload = config.model_dump()
+    payload["agents"] = {"critic": {"reasoning_effort": "none"}}
+    try:
+        response = await app.test_client().post("/settings/save", json=payload)
+        assert response.status_code == 200
+        assert load_config(config_path).agents["critic"].reasoning_effort == "none"
+    finally:
+        await _close_started_app(test_app)
+
+
+async def test_settings_save_keeps_empty_agent_max_output_tokens_null(
+    config_factory, tmp_path
+):
+    config = config_factory()
+    app, test_app = await _started_app(config, tmp_path)
+    config_path = tmp_path / "config.yaml"
+    payload = config.model_dump()
+    # This is the JSON representation the nullable browser control sends when blank.
+    payload["agents"] = {"drafter": {"max_output_tokens": None}}
+    try:
+        response = await app.test_client().post("/settings/save", json=payload)
+        assert response.status_code == 200
+        assert load_config(config_path).agents["drafter"].max_output_tokens is None
+    finally:
+        await _close_started_app(test_app)
+
+
+async def test_settings_save_rejects_agent_cap_above_reservation_with_window(
+    config_factory, tmp_path
+):
+    config = config_factory()
+    app, test_app = await _started_app(config, tmp_path)
+    config_path = tmp_path / "config.yaml"
+    payload = config.model_dump()
+    payload["endpoint"].update({"context_window": 4096, "output_reservation": 1024})
+    payload["agents"] = {
+        "critic": {"max_output_tokens": 1200, "output_reservation": 1000}
+    }
+    try:
+        response = await app.test_client().post("/settings/save", json=payload)
+        assert response.status_code == 400
+        body = await response.get_json()
+        assert "max_output_tokens" in body["error"]
+        assert "output_reservation" in body["error"]
+        assert not config_path.exists()
+    finally:
+        await _close_started_app(test_app)
+
+
+async def test_settings_save_round_trips_research_mode_and_narrative_person(
+    config_factory, tmp_path
+):
+    config = config_factory()
+    app, test_app = await _started_app(config, tmp_path)
+    config_path = tmp_path / "config.yaml"
+    payload = config.model_dump()
+    payload["generation"].update({"research_mode": True, "narrative_person": "third"})
+    try:
+        response = await app.test_client().post("/settings/save", json=payload)
+        assert response.status_code == 200
+        reloaded = load_config(config_path)
+        assert reloaded.generation.research_mode is True
+        assert reloaded.generation.narrative_person == "third"
+
+        payload = reloaded.model_dump()
+        payload["generation"]["narrative_person"] = None
+        response = await app.test_client().post("/settings/save", json=payload)
+        assert response.status_code == 200
+        assert load_config(config_path).generation.narrative_person is None
+    finally:
+        await _close_started_app(test_app)
+
+
+async def test_settings_render_omits_api_key_and_old_hints(config_factory, tmp_path):
+    config = config_factory()
+    app, test_app = await _started_app(config, tmp_path)
+    try:
+        response = await app.test_client().get("/settings")
+        html = await response.get_data(as_text=True)
+        assert config.endpoint.api_key not in html
+        assert "Failed audits before parking for human review." not in html
+        assert "Critic tool-use loop ceiling." not in html
+        assert "Exceeding it sends the draft to revision." not in html
+    finally:
+        await _close_started_app(test_app)
+
+
+async def test_endpoint_probe_reports_tool_support_rejection(
+    config_factory, tmp_path, monkeypatch
+):
+    app, test_app = await _started_app(config_factory(), tmp_path)
+    calls: list[dict[str, Any]] = []
+
+    async def fake_call_llm(*args, **kwargs):
+        calls.append(kwargs)
+        if kwargs.get("tools"):
+            raise LLMCallError(TOOL_SUPPORT_DIAGNOSIS)
+        return type("Response", (), {"text": "ok", "model_name": "test-model"})()
+
+    monkeypatch.setattr(settings_route, "call_llm", fake_call_llm)
+    try:
+        response = await app.test_client().post("/settings/test_endpoint")
+        body = await response.get_json()
+        assert body == {"ok": False, "error": TOOL_SUPPORT_DIAGNOSIS}
+        assert len(calls) == 2
+        assert calls[1]["tools"]
+    finally:
+        await _close_started_app(test_app)
+
+
+async def test_endpoint_probe_succeeds_when_plain_and_tool_calls_pass(
+    config_factory, tmp_path, monkeypatch
+):
+    app, test_app = await _started_app(config_factory(), tmp_path)
+    calls: list[dict[str, Any]] = []
+
+    async def fake_call_llm(*args, **kwargs):
+        calls.append(kwargs)
+        return type("Response", (), {"text": "ok", "model_name": "test-model"})()
+
+    monkeypatch.setattr(settings_route, "call_llm", fake_call_llm)
+    try:
+        response = await app.test_client().post("/settings/test_endpoint")
+        assert await response.get_json() == {"ok": True, "model": "test-model"}
+        assert len(calls) == 2
+        assert "tools" not in calls[0]
+        assert calls[1]["tools"]
+    finally:
+        await _close_started_app(test_app)
+
+
 async def test_control_review_forwards_decision_to_manager(config_factory, tmp_path):
     app, test_app = await _started_app(config_factory(), tmp_path)
     manager = MockManager(status="review")
@@ -217,6 +367,11 @@ async def test_settings_save_preserves_env_reference_on_disk(
     test_app = app.test_app()
     await test_app.__aenter__()
     try:
+        response = await app.test_client().get("/settings")
+        html = await response.get_data(as_text=True)
+        assert "sekrit-value" not in html
+        assert "${TEST_MUSEAI_KEY}" not in html
+
         payload = config.model_dump()
         payload["endpoint"]["api_key"] = ""  # "keep the current key"
         response = await app.test_client().post("/settings/save", json=payload)

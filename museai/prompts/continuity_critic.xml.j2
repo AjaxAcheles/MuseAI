@@ -24,11 +24,13 @@ on, the state it was required to land on, the required change it exists to
 produce, the observable event that carries that change, the chapter
 obligations it discharges, and any thread movement it planned. A draft that
 never reaches its exit state, does not produce the required change, omits the
-observable event, or does not actually deliver a listed obligation or thread
-movement has failed its own mandate — report it as UNFULFILLED_OBLIGATION and
-quote the draft's closing passage as the offending text. A required change may
-be wholly interior — a realization or a decision counts, if the prose shows it
-happening.
+observable event, or does not actually deliver an obligation in its own
+<discharges_chapter_obligations> field (rendered from this beat's `discharges`
+list) or its planned thread movement has failed its own mandate — report it as
+UNFULFILLED_OBLIGATION and quote the draft's closing passage as the offending
+text. It is not a failure for this beat to leave other <chapter_obligations>
+undischarged; those belong to other beats. A required change may be wholly
+interior — a realization or a decision counts, if the prose shows it happening.
 
 You have read-only story tools. All are optional; use them to ground a claim
 before reporting it.

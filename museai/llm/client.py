@@ -701,6 +701,35 @@ async def _parse_stream(
 # request the endpoint will reject identically on a retry.
 _TRANSIENT_STATUSES = (408, 429)
 
+TOOL_SUPPORT_DIAGNOSIS = (
+    "The configured model does not support tool calling. Every MuseAI agent "
+    "requires tool calling, so this model cannot be used."
+)
+
+
+def _error_message(body: str) -> str:
+    """Extract an endpoint's error message without assuming its error envelope."""
+    try:
+        payload = json.loads(body)
+    except ValueError:
+        return body
+    if isinstance(payload, Mapping):
+        error = payload.get("error")
+        if isinstance(error, Mapping) and isinstance(error.get("message"), str):
+            return error["message"]
+    return body
+
+
+def _is_tool_support_rejection(status: int, body: str) -> bool:
+    """Whether a 400 specifically says the endpoint rejected tool calling."""
+    if status != 400:
+        return False
+    message = _error_message(body).casefold()
+    return "tool" in message and any(
+        phrase in message
+        for phrase in ("does not support", "do not support", "not supported", "unsupported")
+    )
+
 
 def _raise_for_status(response: httpx.Response, body: str) -> None:
     """Turn a non-2xx status into the right kind of error.
@@ -713,6 +742,9 @@ def _raise_for_status(response: httpx.Response, body: str) -> None:
         return
     if status >= 500 or status in _TRANSIENT_STATUSES:
         raise _TransientStatusError(status, body[:500])
+    if _is_tool_support_rejection(status, body):
+        detail = _error_message(body)[:500]
+        raise LLMCallError(f"{TOOL_SUPPORT_DIAGNOSIS} Endpoint detail: {detail}")
     raise LLMCallError(f"endpoint returned HTTP {status}: {body[:500]}")
 
 
@@ -990,7 +1022,16 @@ async def call_llm(
     while attempt < max_attempts:
         attempt += 1
         emitted = [False]
-        _log_request(safe_url, endpoint, messages, stream, attempt, max_tokens)
+        _log_request(
+            safe_url,
+            endpoint,
+            messages,
+            stream,
+            attempt,
+            max_tokens,
+            reasoning_effort=body.get("reasoning_effort"),
+            extra_body=extra_body,
+        )
         try:
             async with httpx.AsyncClient(timeout=timeout, transport=transport) as client:
                 if stream:
@@ -1128,6 +1169,9 @@ def _log_request(
     stream: bool,
     attempt: int,
     max_tokens: int | None,
+    *,
+    reasoning_effort: Any,
+    extra_body: Mapping[str, Any] | None,
 ) -> None:
     """Record a request as it goes out, before the endpoint has answered.
 
@@ -1142,9 +1186,21 @@ def _log_request(
             "stream": stream,
             "attempt": attempt,
             "max_tokens": max_tokens,
+            "reasoning_effort": reasoning_effort,
+            "extra_body": _safe_extra_body(extra_body),
             "messages": _safe_messages(messages),
         }
     )
+
+
+def _safe_extra_body(extra_body: Mapping[str, Any] | None) -> Mapping[str, Any] | str | None:
+    """Keep configured request options inspectable without turning the log into a dump."""
+    if extra_body is None:
+        return None
+    rendered = json.dumps(extra_body, ensure_ascii=False, default=str)
+    if len(rendered) > _LOG_CONTENT_PREVIEW_CHARS:
+        return _truncate(rendered)
+    return dict(extra_body)
 
 
 def _log_response(

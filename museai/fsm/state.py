@@ -43,6 +43,12 @@ class FailureObject(BaseModel):
     # v1 has exactly one critic. Requiring the model to echo a constant back
     # bought nothing and cost a whole re-prompt whenever it forgot.
     critic_source: str = "continuity_critic"
+    # True when the finding is a measurement over the entire draft (a density
+    # breach) rather than a fault in one locatable span. A whole-draft failure
+    # cannot be fixed by rewriting the single sentence quoted in
+    # ``offending_text``, so the reviser must regenerate the beat against the
+    # full offender list.
+    whole_draft: bool = False
 
 
 def accumulate_or_reset(

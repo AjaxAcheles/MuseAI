@@ -185,6 +185,28 @@ def _sanitize_borrowed_fixes(
     return sanitized
 
 
+def _cap_findings_per_code(
+    findings: list[FailureObject], max_per_code: int
+) -> tuple[list[FailureObject], int]:
+    """Keep the first ``max_per_code`` model findings for each error code.
+
+    A burst of one code is the critic restating one objection, not evidence of
+    that many independent problems. Preserve response order so the reviser sees
+    the model's earliest, most directly stated findings for every code.
+    """
+    kept: list[FailureObject] = []
+    seen: dict[str, int] = {}
+    dropped = 0
+    for finding in findings:
+        count = seen.get(finding.error_code, 0)
+        if count >= max_per_code:
+            dropped += 1
+            continue
+        seen[finding.error_code] = count + 1
+        kept.append(finding)
+    return kept, dropped
+
+
 def critic_messages(
     draft_text: str, package: dict, repetition_overlap_count: int
 ) -> list[dict]:
@@ -293,6 +315,7 @@ async def adversarial_critics(state: OrchestratorState) -> dict:
     last_text = ""
     last_truncated = False
     unlocatable_findings = False
+    findings_dropped_by_code_cap = 0
 
     # Carries forward across parse retries so a bad reply doesn't discard the
     # tool results the previous attempt already paid for; run_agent_loop fills
@@ -449,6 +472,9 @@ async def adversarial_critics(state: OrchestratorState) -> dict:
                 beat_id,
                 generation.critic_fix_max_borrowed_words,
             )
+            failures, findings_dropped_by_code_cap = _cap_findings_per_code(
+                failures, generation.critic_max_findings_per_code
+            )
             if parsed_failures and not failures:
                 raise UnlocatableFindingError(
                     "critic quoted text that is not in the draft"
@@ -540,6 +566,9 @@ async def adversarial_critics(state: OrchestratorState) -> dict:
                     beat_id,
                     generation.critic_fix_max_borrowed_words,
                 )
+                failures, findings_dropped_by_code_cap = _cap_findings_per_code(
+                    failures, generation.critic_max_findings_per_code
+                )
             # "Salvaged" only if something was actually recovered. Relaxed parsing
             # that yielded nothing salvaged nothing, and the UI must not claim it did.
             lenient_used = bool(failures)
@@ -598,6 +627,7 @@ async def adversarial_critics(state: OrchestratorState) -> dict:
         event="critiqued",
         beat_id=beat_id,
         critic_failures=len(failures),
+        critic_findings_dropped_by_code_cap=findings_dropped_by_code_cap,
         error_codes=[f.error_code for f in failures],
         total_failures=total,
         best_seen_failure_count=delta["best_seen_failure_count"],

@@ -42,6 +42,7 @@ from museai.web.app import create_app  # noqa: E402
 
 _GENERATION_DEFAULTS = dict(
     word_count_target=1500,
+    narrative_person=None,
     revision_retry_cap=3,
     max_agent_iterations=6,
     recent_prose_beats=4,
@@ -59,6 +60,8 @@ _GENERATION_DEFAULTS = dict(
     # gates that the shipped config skips on the same prose.
     passive_min_sentences=6,
     audit_offender_list_chars=1200,
+    critic_verdict_max_chars=700,
+    critic_max_findings_per_code=2,
     emotion_word_threshold=0.3,
     tic_phrase_threshold=0.15,
     planner_intensity_retries=1,

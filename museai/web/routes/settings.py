@@ -10,8 +10,17 @@ import yaml
 from pydantic import ValidationError
 from quart import Blueprint, current_app, jsonify, render_template, request
 
-from museai.core.config import AppConfig, ConfigError, load_config
+from museai.core.config import (
+    AGENT_ROLES,
+    _NARRATIVE_PERSONS,
+    _REASONING_EFFORTS,
+    AgentEndpointOverride,
+    AppConfig,
+    ConfigError,
+    load_config,
+)
 from museai.core.runtime import init_resources
+from museai.fsm.tools.get_seed_contract import GET_SEED_CONTRACT_TOOL_SPEC
 from museai.llm.client import call_llm
 from museai.web.app import get_config, set_runtime
 
@@ -20,6 +29,19 @@ bp = Blueprint("settings", __name__)
 
 def _settings_view(cfg: AppConfig) -> dict[str, Any]:
     """The settings the UI may show. The API key is reported as present, never returned."""
+    agent_fields = (
+        "temperature",
+        "reasoning_effort",
+        "max_output_tokens",
+        "output_reservation",
+    )
+    agents = {
+        role: {
+            field: getattr(cfg.agents.get(role, AgentEndpointOverride()), field)
+            for field in agent_fields
+        }
+        for role in AGENT_ROLES
+    }
     return {
         "endpoint": {
             "base_url": cfg.endpoint.base_url,
@@ -27,8 +49,34 @@ def _settings_view(cfg: AppConfig) -> dict[str, Any]:
             "api_key_present": bool(cfg.endpoint.api_key),
             "tokenizer_family": cfg.endpoint.tokenizer_family,
             "request_timeout": cfg.endpoint.request_timeout,
+            "stream_read_timeout": cfg.endpoint.stream_read_timeout,
             "temperature": cfg.endpoint.temperature,
+            "reasoning_effort": cfg.endpoint.reasoning_effort,
+            "context_window": cfg.endpoint.context_window,
+            "output_reservation": cfg.endpoint.output_reservation,
+            "max_output_tokens": cfg.endpoint.max_output_tokens,
+            "max_attempts": cfg.endpoint.max_attempts,
         },
+        "agents": agents,
+        "agent_roles": AGENT_ROLES,
+        "reasoning_efforts": [
+            {
+                "value": effort,
+                # "none" is sent to the server and disables reasoning; a blank
+                # selection sends no field at all. The suffix keeps that
+                # distinction visible, but stays short enough to read inside the
+                # control rather than being clipped.
+                "label": f"{effort} (no reasoning)" if effort == "none" else effort,
+            }
+            for effort in sorted(_REASONING_EFFORTS)
+        ],
+        "narrative_persons": [
+            {"value": person, "label": person.title()}
+            for person in sorted(_NARRATIVE_PERSONS)
+        ],
+        "all_agents_override_temperature": all(
+            agents[role]["temperature"] is not None for role in AGENT_ROLES
+        ),
         "generation": cfg.generation.model_dump(),
         "runtime": {
             "log_level": cfg.log_level,
@@ -150,4 +198,14 @@ async def test_endpoint():
                 "error": f"endpoint returned an unexpected probe reply: {response.text[:80]!r}",
             }
         )
+    try:
+        await call_llm(
+            cfg.endpoint,
+            [{"role": "user", "content": "Reply with the single word: ok. Do not call a tool."}],
+            agent="endpoint_test",
+            max_tokens=8,
+            tools=[GET_SEED_CONTRACT_TOOL_SPEC],
+        )
+    except Exception as exc:
+        return jsonify({"ok": False, "error": str(exc)})
     return jsonify({"ok": True, "model": response.model_name})

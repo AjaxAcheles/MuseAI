@@ -48,6 +48,7 @@ endpoint:
 
 generation:
   word_count_target: null
+  narrative_person: null
   revision_retry_cap: 4
   # Must stay above tool_call_cap, or one tool can eat the whole agent loop and
   # leave no iterations to answer with.
@@ -58,7 +59,12 @@ generation:
   # fits inside 16384 with slack for tokenizer drift (char_heuristic is an
   # estimate, not an exact count).
   context_token_budget: 12000
-  passive_voice_threshold: 0.25
+  # Raised from 0.25 on 2026-08-19. In the 2026-08-18 full run, 13 of 18 audits
+  # breached 0.25 — against this model's prose it was not a defect detector, it
+  # was the default state, and it generated parks on marginal readings (one beat
+  # parked on a single passive sentence out of six). 0.4 keeps the guard for
+  # genuinely passive-heavy prose without firing on the baseline.
+  passive_voice_threshold: 0.4
   critic_parse_retries: 2
   critic_degrade_threshold: 3
   planner_parse_retries: 2
@@ -353,7 +359,13 @@ generation:
   # reviser matches against to locate a span, so too short makes spans
   # ambiguous and too long wastes the revision prompt.
   audit_quote_chars: 240
-  critic_verdict_max_chars: 240
+  # A clean prose verdict must declare itself in its first sentence; this is
+  # the whole-reply bound that still permits a concise explanation afterwards.
+  critic_verdict_max_chars: 700
+  # A 397-word beat produced as many as eight copies of one code. Keep the
+  # first two per code: enough for distinct evidence, not enough for a burst to
+  # dominate routing's failure count.
+  critic_max_findings_per_code: 2
   # Separate budget for the full offender list a density failure appends to its
   # suggested_fix. That list is instruction prose, not a span to match, and it
   # carries every offending sentence — sizing it at audit_quote_chars (one
@@ -414,9 +426,15 @@ agents:
   chapter_planner:
     temperature: 0.4          # structural JSON: obligations and chapter shape
     output_reservation: 2048
+    # Same measurement as the drafter and critic, extended to the planners on
+    # 2026-08-19. In the 2026-08-18 run the three agents left unset were the
+    # entire remaining latency cost: 10,008 thinking chars here at 32.7 s mean.
+    reasoning_effort: none
   beat_planner:
     temperature: 0.5          # JSON, but the intents need some invention
     output_reservation: 2048
+    # 16,229 thinking chars at 40.5 s mean before this. See chapter_planner.
+    reasoning_effort: none
   drafter:
     temperature: 0.9          # prose — the one role that should run hot
     output_reservation: 3072
@@ -427,7 +445,20 @@ agents:
     reasoning_effort: none
   reviser:
     temperature: 0.7          # prose, but constrained by the failures it answers
-    output_reservation: 3072
+    # The critic's empty-verdict stall, in the agent left unconfigured. On
+    # 2026-08-18 at 14:34:22 the reviser hit finish_reason='length' after 125.9 s
+    # having spent all 9,619 completion tokens on hidden reasoning with no answer
+    # text. That aborted the run mid-arc and cost a full replan. Across the run it
+    # produced 46,694 thinking chars and 635 s — 53% of all LLM time, against the
+    # critic's 157 s.
+    reasoning_effort: none
+    # Unlike the critic, the reviser had no cap at all: it was handed max_tokens
+    # of 9,240-13,870 (the context window minus the prompt), so a runaway reply
+    # failed slowly instead of fast. Same constraint as the critic — setting
+    # max_output_tokens skips the client's room calculation, so the reservation
+    # must be at least the cap, and the two move together.
+    max_output_tokens: 4096
+    output_reservation: 4096
   critic:
     temperature: 0.3          # judgement, emitted as JSON: heat is pure downside
     # See the long note below: this is the fix for the empty-verdict stall.

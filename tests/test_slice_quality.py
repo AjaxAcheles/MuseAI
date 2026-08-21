@@ -264,6 +264,18 @@ async def test_a_beat_that_keeps_improving_spends_its_whole_retry_budget(
         [THREE_FAILURES, TWO_FAILURES, ONE_FAILURE],
         revise_responses=[REWRITE_ONE, REWRITE_TWO],
     )
+    # This test isolates revision-count progress, so it must preserve all
+    # three deliberately repeated critic findings rather than exercise the
+    # production per-code cap (covered in test_critics.py).
+    set_node_config(
+        project.model_copy(
+            update={
+                "generation": project.generation.model_copy(
+                    update={"critic_max_findings_per_code": 3}
+                )
+            }
+        )
+    )
 
     state = await drafted_state(project)
 

@@ -19,6 +19,7 @@ from museai.core.stream_bus import bus
 from museai.llm.client import (
     LLMCallError,
     LLMResponse,
+    TOOL_SUPPORT_DIAGNOSIS,
     _build_request,
     call_llm,
     resolve_inference_url,
@@ -334,6 +335,30 @@ class TestNonStreaming:
         transport = httpx.MockTransport(lambda r: httpx.Response(200, content=b"not json"))
         with pytest.raises(LLMCallError, match="not valid JSON"):
             await call_llm(endpoint, MESSAGES, transport=transport)
+
+    async def test_a_tool_support_400_has_a_readable_diagnosis(self, endpoint):
+        transport = httpx.MockTransport(
+            lambda r: httpx.Response(
+                400,
+                json={"error": {"message": "this deployment does not support tools"}},
+            )
+        )
+        with pytest.raises(LLMCallError, match="configured model does not support tool calling"):
+            await call_llm(endpoint, MESSAGES, transport=transport)
+
+    async def test_an_unrelated_400_keeps_its_existing_error(self, endpoint):
+        transport = httpx.MockTransport(
+            lambda r: httpx.Response(
+                400,
+                json={"error": {"message": "this request does not support response_format"}},
+            )
+        )
+        with pytest.raises(LLMCallError) as raised:
+            await call_llm(endpoint, MESSAGES, transport=transport)
+        message = str(raised.value)
+        assert message.startswith("endpoint returned HTTP 400:")
+        assert "response_format" in message
+        assert TOOL_SUPPORT_DIAGNOSIS not in message
 
     @pytest.mark.parametrize(
         ("payload", "error"),
@@ -1292,6 +1317,45 @@ class TestLogging:
         assert "[+400 chars]" in response["text"]
         # Truncation is a log concern only; the caller still gets everything.
         assert result.text == long_text
+
+    async def test_request_logs_resolved_reasoning_effort_and_merged_extra_body(
+        self, endpoint, records
+    ):
+        resolved = endpoint.model_copy(
+            update={
+                "reasoning_effort": "low",
+                "extra_body": {"request_tag": "configured", "top_p": 0.1},
+            }
+        )
+        transport = httpx.MockTransport(lambda r: json_response(completion()))
+        await call_llm(
+            resolved,
+            MESSAGES,
+            extra_body={"reasoning_effort": "none", "top_p": 0.8},
+            transport=transport,
+        )
+
+        request, _ = self.payloads(records)
+        assert request["reasoning_effort"] == "none"
+        assert request["extra_body"] == {
+            "request_tag": "configured",
+            "top_p": 0.8,
+            "reasoning_effort": "none",
+        }
+        assert "secret-key-do-not-log" not in json.dumps(request)
+
+    async def test_request_log_bounds_a_large_extra_body(self, endpoint, records):
+        transport = httpx.MockTransport(lambda r: json_response(completion()))
+        await call_llm(
+            endpoint,
+            MESSAGES,
+            extra_body={"request_note": "x" * 900},
+            transport=transport,
+        )
+
+        request, _ = self.payloads(records)
+        assert isinstance(request["extra_body"], str)
+        assert "[+" in request["extra_body"]
 
 
 class TestToolCallSummaries:

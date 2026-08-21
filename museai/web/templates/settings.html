@@ -14,11 +14,10 @@
   </header>
 
   <div class="settings-grid">
-
     <section class="panel">
       <div class="panel-header">
-        <h2 class="panel-title">Endpoint</h2>
-        <p class="panel-subtitle">Any OpenAI-compatible server, local or hosted.</p>
+        <h2 class="panel-title">Endpoint fallback defaults</h2>
+        <p class="panel-subtitle">Shared defaults inherited only by agents that leave a field unset.</p>
       </div>
 
       <div class="field">
@@ -54,10 +53,58 @@
                value="{{ settings.endpoint.request_timeout }}">
       </div>
       <div class="field">
+        <label class="form-label" for="setting-stream_read_timeout">Stream read timeout (seconds)</label>
+        <input id="setting-stream_read_timeout" class="form-control dirty-watch endpoint-setting"
+               data-endpoint-key="stream_read_timeout" type="number" min="1" max="3600" step="1"
+               value="{{ settings.endpoint.stream_read_timeout }}">
+      </div>
+      <div class="field">
         <label class="form-label" for="setting-temperature">Temperature</label>
         <input id="setting-temperature" class="form-control dirty-watch endpoint-setting"
                data-endpoint-key="temperature" type="number" min="0" max="2" step="0.05"
                value="{{ settings.endpoint.temperature }}">
+        <p class="form-text">
+          {% if settings.all_agents_override_temperature %}
+          Every role currently overrides temperature, so changing this fallback has no effect until a role's override is cleared.
+          {% else %}
+          Roles without a temperature override inherit this fallback value.
+          {% endif %}
+        </p>
+      </div>
+      <div class="field">
+        <label class="form-label" for="setting-endpoint-reasoning-effort">Reasoning effort</label>
+        <select id="setting-endpoint-reasoning-effort" class="form-select dirty-watch">
+          <option value="" {% if settings.endpoint.reasoning_effort is none %}selected{% endif %}>Do not send a reasoning_effort field</option>
+          {% for effort in settings.reasoning_efforts %}
+          <option value="{{ effort.value }}" {% if settings.endpoint.reasoning_effort == effort.value %}selected{% endif %}>{{ effort.label }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="field">
+        <label class="form-label" for="setting-context_window">Context window (tokens)</label>
+        <input id="setting-context_window" class="form-control dirty-watch nullable-endpoint-setting"
+               data-endpoint-key="context_window" type="number" min="1" max="10000000" step="1"
+               value="{{ settings.endpoint.context_window if settings.endpoint.context_window is not none else '' }}">
+        <p class="form-text">Blank trusts the endpoint and does not trim prompts to a declared window.</p>
+      </div>
+      <div class="field">
+        <label class="form-label" for="setting-output_reservation">Output reservation (tokens)</label>
+        <input id="setting-output_reservation" class="form-control dirty-watch endpoint-setting"
+               data-endpoint-key="output_reservation" type="number" min="1" max="10000000" step="1"
+               value="{{ settings.endpoint.output_reservation }}">
+      </div>
+      <div class="field">
+        <label class="form-label" for="setting-endpoint-max-output-tokens">Max output tokens</label>
+        <input id="setting-endpoint-max-output-tokens" class="form-control dirty-watch nullable-endpoint-setting"
+               data-endpoint-key="max_output_tokens" type="number" min="1" max="10000000" step="1"
+               value="{{ settings.endpoint.max_output_tokens if settings.endpoint.max_output_tokens is not none else '' }}">
+        <p class="form-text">Blank sends no cap. When context window is set, this must not exceed output reservation.</p>
+      </div>
+      <div class="field">
+        <label class="form-label" for="setting-max_attempts">Max attempts</label>
+        <input id="setting-max_attempts" class="form-control dirty-watch endpoint-setting"
+               data-endpoint-key="max_attempts" type="number" min="1" max="100" step="1"
+               value="{{ settings.endpoint.max_attempts }}">
       </div>
 
       <div class="panel-actions">
@@ -69,15 +116,59 @@
 
     <section class="panel">
       <div class="panel-header">
+        <h2 class="panel-title">Agents</h2>
+        <p class="panel-subtitle">Sparse overrides. Blank numeric fields inherit the endpoint fallback.</p>
+      </div>
+      {% for role in settings.agent_roles %}
+      <div class="field">
+        <label class="form-label" for="setting-agent-{{ role }}-temperature">{{ role|replace('_', ' ')|title }} temperature</label>
+        <input id="setting-agent-{{ role }}-temperature" class="form-control dirty-watch agent-number-setting"
+               data-agent-role="{{ role }}" data-agent-key="temperature" type="number" min="0" max="2" step="0.05"
+               value="{{ settings.agents[role].temperature if settings.agents[role].temperature is not none else '' }}">
+      </div>
+      <div class="field">
+        <label class="form-label" for="setting-agent-{{ role }}-reasoning-effort">{{ role|replace('_', ' ')|title }} reasoning effort</label>
+        <select id="setting-agent-{{ role }}-reasoning-effort" class="form-select dirty-watch agent-reasoning-setting"
+                data-agent-role="{{ role }}" data-agent-key="reasoning_effort">
+          <option value="" {% if settings.agents[role].reasoning_effort is none %}selected{% endif %}>Inherit endpoint default (send no override)</option>
+          {% for effort in settings.reasoning_efforts %}
+          <option value="{{ effort.value }}" {% if settings.agents[role].reasoning_effort == effort.value %}selected{% endif %}>{{ effort.label }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="field">
+        <label class="form-label" for="setting-agent-{{ role }}-max-output-tokens">{{ role|replace('_', ' ')|title }} max output tokens</label>
+        <input id="setting-agent-{{ role }}-max-output-tokens" class="form-control dirty-watch agent-number-setting"
+               data-agent-role="{{ role }}" data-agent-key="max_output_tokens" type="number" min="1" max="10000000" step="1"
+               value="{{ settings.agents[role].max_output_tokens if settings.agents[role].max_output_tokens is not none else '' }}">
+        <p class="form-text">Blank inherits the endpoint cap. With a context window, a cap cannot exceed this role's output reservation.</p>
+      </div>
+      <div class="field">
+        <label class="form-label" for="setting-agent-{{ role }}-output-reservation">{{ role|replace('_', ' ')|title }} output reservation</label>
+        <input id="setting-agent-{{ role }}-output-reservation" class="form-control dirty-watch agent-number-setting"
+               data-agent-role="{{ role }}" data-agent-key="output_reservation" type="number" min="1" max="10000000" step="1"
+               value="{{ settings.agents[role].output_reservation if settings.agents[role].output_reservation is not none else '' }}">
+        <p class="form-text">Blank inherits the endpoint reservation.</p>
+      </div>
+      {% endfor %}
+    </section>
+
+    <section class="panel">
+      <div class="panel-header">
         <h2 class="panel-title">Generation</h2>
         <p class="panel-subtitle">Targets and caps for the draft → audit → revise loop.</p>
       </div>
       {% for key, label, min, max, step, hint in [
         ("word_count_target", "Word count target", 0, 200000, 500, "Total manuscript length to aim for. 0 or empty means no limit."),
-        ("revision_retry_cap", "Revision retry cap", 0, 10, 1, "Failed audits before parking for human review."),
-        ("max_agent_iterations", "Max agent iterations", 1, 20, 1, "Critic tool-use loop ceiling."),
+        ("revision_retry_cap", "Revision retry cap", 0, 10, 1, "Maximum revision retries. Audit-only failures spend this budget before parking for human review."),
+        ("max_agent_iterations", "Max agent iterations", 1, 20, 1, "Bounded tool-use loop ceiling for every agent."),
         ("recent_prose_beats", "Recent prose beats", 0, 20, 1, "Prior beats included in drafting context."),
-        ("context_token_budget", "Context token budget", 500, 200000, 500, "Soft ceiling on assembled prompt size.")
+        ("context_token_budget", "Context token budget", 500, 200000, 500, "Soft ceiling on assembled prompt size."),
+        ("critic_parse_retries", "Critic parse retries", 0, 20, 1, "Re-prompts allowed when the critic reply cannot be parsed."),
+        ("critic_degrade_threshold", "Critic degrade threshold", 1, 100, 1, "Consecutive unreadable critic outputs before the run degrades."),
+        ("critic_max_findings_per_code", "Critic findings per code", 1, 100, 1, "Maximum model-produced continuity findings retained for one error code."),
+        ("tool_call_cap", "Tool call cap", 1, 100, 1, "Maximum calls to any one tool in a single agent loop."),
+        ("tool_timeout", "Tool timeout (seconds)", 0.01, 3600, 0.01, "Wall-clock limit for one agent-tool execution.")
       ] %}
       <div class="field">
         <label class="form-label" for="setting-{{ key }}">{{ label }}</label>
@@ -86,23 +177,52 @@
         <p class="form-text">{{ hint }}</p>
       </div>
       {% endfor %}
+      <div class="field form-check">
+        <input id="setting-research_mode" class="form-check-input dirty-watch" type="checkbox"
+               {% if settings.generation.research_mode %}checked{% endif %}>
+        <label class="form-check-label" for="setting-research_mode">Research mode</label>
+        <p class="form-text">Allows every agent to use web search. Leave off to keep tools limited to story canon.</p>
+      </div>
+      <div class="field">
+        <label class="form-label" for="setting-web_search_timeout">Web search timeout (seconds)</label>
+        <input id="setting-web_search_timeout" class="form-control dirty-watch" type="number" min="1" max="120" step="1"
+               value="{{ settings.runtime.web_search_timeout }}">
+        <p class="form-text">Used only in research mode; bounds each agent's web search.</p>
+      </div>
     </section>
 
     <section class="panel">
       <div class="panel-header">
         <h2 class="panel-title">Quality</h2>
-        <p class="panel-subtitle">The programmatic audit gate applied to every draft.</p>
+        <p class="panel-subtitle">Scalar thresholds for the programmatic passive-voice, repetition, emotion, style-tic, and optional point-of-view checks.</p>
       </div>
+      {% for key, label, min, max, step, hint in [
+        ("passive_voice_threshold", "Passive voice threshold", 0, 1, 0.01, "Proportion (0–1) of passive sentences tolerated per beat. A density breach forces a full beat rewrite, not a span revision."),
+        ("passive_min_sentences", "Density check minimum sentences", 1, 1000, 1, "Density-based passive, emotion, and style-tic checks do not run below this sentence count."),
+        ("emotion_word_threshold", "Named emotion threshold", 0, 1, 0.01, "Proportion (0–1) of sentences that may name an emotion outright."),
+        ("tic_phrase_threshold", "Style-tic threshold", 0, 1, 0.01, "Proportion (0–1) of sentences that may contain a configured stock phrase."),
+        ("repetition_threshold", "Paragraph repetition threshold", 0, 1, 0.01, "Similarity threshold for repeated paragraphs."),
+        ("repetition_min_run", "Paragraph repetition minimum sentences", 1, 1000, 1, "Minimum paragraph length before the paragraph repetition check applies."),
+        ("repetition_min_phrase_words", "Short-phrase echo minimum words", 1, 1000, 1, "Minimum verbatim phrase length for the short-phrase echo check.")
+      ] %}
       <div class="field">
-        <label class="form-label" for="setting-passive_voice_threshold">Passive voice threshold</label>
-        <input id="setting-passive_voice_threshold" class="form-control dirty-watch generation-setting"
-               data-generation-key="passive_voice_threshold" type="number" min="0" max="1" step="0.01"
-               value="{{ settings.generation.passive_voice_threshold }}">
-        <p class="form-text">
-          Proportion (0–1) of passive sentences tolerated per beat. Exceeding it sends the draft to
-          revision.
-        </p>
+        <label class="form-label" for="setting-{{ key }}">{{ label }}</label>
+        <input id="setting-{{ key }}" class="form-control dirty-watch generation-setting" data-generation-key="{{ key }}"
+               type="number" min="{{ min }}" max="{{ max }}" step="{{ step }}" value="{{ settings.generation[key] }}">
+        <p class="form-text">{{ hint }}</p>
       </div>
+      {% endfor %}
+      <div class="field">
+        <label class="form-label" for="setting-narrative_person">Narrative person</label>
+        <select id="setting-narrative_person" class="form-select dirty-watch">
+          <option value="" {% if settings.generation.narrative_person is none %}selected{% endif %}>Not declared — check disabled</option>
+          {% for person in settings.narrative_persons %}
+          <option value="{{ person.value }}" {% if settings.generation.narrative_person == person.value %}selected{% endif %}>{{ person.label }}</option>
+          {% endfor %}
+        </select>
+        <p class="form-text">Only the third-person direction is checked for first-person narration. A first-person declaration has no corresponding check.</p>
+      </div>
+      <p class="form-text">The emotion-word and style-tic phrase lists remain in <code>config.yaml</code>; they are long author-maintained vocabularies, not form fields.</p>
     </section>
 
     <section class="panel">
@@ -117,12 +237,6 @@
           <option value="{{ level }}" {% if settings.runtime.log_level == level %}selected{% endif %}>{{ level }}</option>
           {% endfor %}
         </select>
-      </div>
-      <div class="field">
-        <label class="form-label" for="setting-web_search_timeout">Web search timeout (seconds)</label>
-        <input id="setting-web_search_timeout" class="form-control dirty-watch" type="number" min="1" max="120" step="1"
-               value="{{ settings.runtime.web_search_timeout }}">
-        <p class="form-text">Ceiling on a continuity critic search. A timeout is data, not a crash.</p>
       </div>
       <div class="field form-check">
         <input id="setting-allow_reset" class="form-check-input dirty-watch" type="checkbox"

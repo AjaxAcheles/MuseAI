@@ -33,12 +33,13 @@ ERROR_CODE = "PASSIVE_VOICE_DENSITY"
 OVERLAP_ERROR_CODE = "PARAGRAPH_OVERLAP"
 EMOTION_ERROR_CODE = "EMOTION_TELL"
 TIC_ERROR_CODE = "STYLE_TIC"
+POV_ERROR_CODE = "POINT_OF_VIEW_INTRUSION"
 
 # Sentence split on terminal punctuation followed by whitespace. Abbreviations
 # ("Dr. Vance") over-split, which costs at most one extra sentence in the
 # denominator — it never invents a passive, so it can only make the check more
 # forgiving, which is the right way for a heuristic gate to be wrong.
-_SENTENCE_SPLIT = re.compile(r"(?<=[.!?])[\"')\]]*\s+")
+_SENTENCE_SPLIT = re.compile(r"(?<=[.!?])[\"')\]”’]*\s+")
 
 # A passive clause in English is an inflection of "to be" (or the colloquial
 # "get" passive) followed by a past participle, optionally with an adverb
@@ -98,9 +99,29 @@ def _is_participle(word: str) -> bool:
     return lowered.endswith("ed") and len(lowered) >= 4
 
 
+def sentence_spans(text: str) -> list[tuple[int, int]]:
+    """Return ``(start, end)`` offsets of the non-empty split sentences."""
+    spans: list[tuple[int, int]] = []
+    start = 0
+    for boundary in _SENTENCE_SPLIT.finditer(text):
+        segment = text[start : boundary.start()]
+        left = len(segment) - len(segment.lstrip())
+        right = len(segment.rstrip())
+        if left < right:
+            spans.append((start + left, start + right))
+        start = boundary.end()
+
+    segment = text[start:]
+    left = len(segment) - len(segment.lstrip())
+    right = len(segment.rstrip())
+    if left < right:
+        spans.append((start + left, start + right))
+    return spans
+
+
 def split_sentences(text: str) -> list[str]:
     """Split prose into non-empty sentences."""
-    return [s for s in (part.strip() for part in _SENTENCE_SPLIT.split(text)) if s]
+    return [text[start:end] for start, end in sentence_spans(text)]
 
 
 def is_passive(sentence: str) -> bool:
@@ -302,6 +323,80 @@ def emotion_word_density(text: str, pattern: re.Pattern[str] | None) -> tuple[fl
     return len(offenders) / len(sentences), offenders
 
 
+# First-person pronouns are evidence of a third-person intrusion only outside
+# dialogue. ``I`` followed by a period is skipped: that inexpensive exception
+# avoids treating an initial or acronym component as narration.
+_FIRST_PERSON_PRONOUN = re.compile(
+    r"\b(?:me|my|mine|myself|we|us|our|ours|ourselves)\b|\b(?-i:I)\b(?!\.)",
+    re.IGNORECASE,
+)
+
+
+def _is_single_quote_opener(text: str, index: int) -> bool:
+    """True only for a leading single-quote dialogue delimiter, never ``Nell's``."""
+    previous = text[index - 1] if index else ""
+    following = text[index + 1] if index + 1 < len(text) else ""
+    return not previous.isalnum() and following.isalpha()
+
+
+def _strip_dialogue(text: str) -> str:
+    """Mask paired quoted dialogue while retaining sentence boundaries.
+
+    Straight and typographic double quotes are ordinary delimiters. A straight
+    single quote opens dialogue only at a word boundary, so possessive and
+    contraction apostrophes cannot swallow later narration. Unpaired marks are
+    left alone: malformed punctuation must not make the rest of a beat invisible
+    to an audit.
+    """
+    masked = list(text)
+    quote_end: str | None = None
+    start: int | None = None
+
+    for index, character in enumerate(text):
+        if quote_end is None:
+            if character == '"':
+                quote_end, start = '"', index
+            elif character == "“":
+                quote_end, start = "”", index
+            elif character == "‘":
+                quote_end, start = "’", index
+            elif character == "'" and _is_single_quote_opener(text, index):
+                quote_end, start = "'", index
+            continue
+
+        is_apostrophe = (
+            quote_end == "'"
+            and character == "'"
+            and index > 0
+            and index + 1 < len(text)
+            and text[index - 1].isalnum()
+            and text[index + 1].isalnum()
+        )
+        if character != quote_end or is_apostrophe:
+            continue
+
+        assert start is not None
+        for masked_index in range(start, index + 1):
+            if masked[masked_index] not in "\r\n.!?\"'”’":
+                masked[masked_index] = " "
+        quote_end, start = None, None
+
+    return "".join(masked)
+
+
+def first_person_narration_sentences(text: str) -> list[str]:
+    """Return original sentences with first-person narration outside dialogue."""
+    masked = _strip_dialogue(text)
+    # The masked text is character-for-character with the original, but it must
+    # never be re-split: masking ``"It is 9 a.m., Nell,"`` leaves the period
+    # followed by a space, creating a boundary absent from the original.
+    return [
+        text[start:end]
+        for start, end in sentence_spans(text)
+        if _FIRST_PERSON_PRONOUN.search(masked[start:end])
+    ]
+
+
 def _list_offenders(sentences: list[str], budget: int) -> str:
     """Render every offending sentence for the revision prompt, not the draft.
 
@@ -350,9 +445,10 @@ async def audit(state: OrchestratorState) -> dict:
     the reducer, which is what a fresh audit of a new draft should do: the
     previous cycle's findings describe prose that no longer exists.
 
-    Five model-free checks run here: passive-voice density, verbatim paragraph
+    Six model-free checks run here: passive-voice density, verbatim paragraph
     and short-phrase overlap against committed prose, named-emotion density,
-    and stock-phrase (style-tic) density. All append ``FailureObject``s to the same list,
+    stock-phrase (style-tic) density, and declared-third-person POV intrusion.
+    All append ``FailureObject``s to the same list,
     which flows into the existing draft→audit→revise loop.
     """
     config = get_node_config()
@@ -384,6 +480,7 @@ async def audit(state: OrchestratorState) -> dict:
                     f"sentences: {_list_offenders(passives, offender_list_chars)}"
                 ),
                 critic_source=CRITIC_SOURCE,
+                whole_draft=True,
             )
         )
 
@@ -466,6 +563,7 @@ async def audit(state: OrchestratorState) -> dict:
                     f"sentences: {_list_offenders(emotion_sentences, offender_list_chars)}"
                 ),
                 critic_source=CRITIC_SOURCE,
+                whole_draft=True,
             )
         )
 
@@ -495,8 +593,38 @@ async def audit(state: OrchestratorState) -> dict:
                     f"{_list_offenders(tic_sentences, offender_list_chars)}"
                 ),
                 critic_source=CRITIC_SOURCE,
+                whole_draft=True,
             )
         )
+
+    # --- point-of-view guard -----------------------------------------------
+    # First-person narration is valid when the author chose it, and third-person
+    # pronouns are normal when a first-person narrator refers to other people.
+    # The one reliable direction is therefore a declared third-person draft
+    # slipping into first person. Dialogue is deliberately masked before the
+    # pronoun scan: characters say "I" constantly in third-person fiction.
+    pov_sentences: list[str] = []
+    pov_intrusions: int | None = None
+    if generation.narrative_person == "third":
+        pov_sentences = first_person_narration_sentences(draft)
+        pov_intrusions = len(pov_sentences)
+        # Unlike a density breach, each POV intrusion is an independent,
+        # locatable sentence. One span-local failure per sentence lets a single
+        # span-mode revision correct every intrusion in this draft.
+        for sentence in pov_sentences:
+            failures.append(
+                FailureObject(
+                    error_code=POV_ERROR_CODE,
+                    offending_text=sentence[:quote_chars],
+                    suggested_fix=(
+                        "First-person narration appears in this declared "
+                        "third-person draft. Rewrite this sentence in the "
+                        "established third-person point of view."
+                    ),
+                    critic_source=CRITIC_SOURCE,
+                    whole_draft=False,
+                )
+            )
 
     log_node_event(
         "audit",
@@ -511,6 +639,8 @@ async def audit(state: OrchestratorState) -> dict:
         emotion_sentences=len(emotion_sentences),
         tic_density=f"{tic_density:.3f}",
         tic_sentences=len(tic_sentences),
+        narrative_person=generation.narrative_person,
+        pov_intrusions=pov_intrusions,
         failures=len(failures),
     )
     await bus.publish(
@@ -523,6 +653,8 @@ async def audit(state: OrchestratorState) -> dict:
             "phrase_echoes": len(echoes),
             "emotion_density": round(emotion_density, 3),
             "tic_density": round(tic_density, 3),
+            "narrative_person": generation.narrative_person,
+            "pov_intrusions": pov_intrusions,
             "failures": [f.model_dump() for f in failures],
         },
     )

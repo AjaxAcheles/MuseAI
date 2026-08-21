@@ -36,6 +36,7 @@ class ConfigError(RuntimeError):
 # The five LLM-powered agent roles. Every ``agents:`` key must be one of these.
 AGENT_ROLES = ("chapter_planner", "beat_planner", "drafter", "reviser", "critic")
 _REASONING_EFFORTS = {"none", "minimal", "low", "medium", "high"}
+_NARRATIVE_PERSONS = {"first", "third"}
 
 
 def _resolve_env_api_key(value: str) -> str:
@@ -59,6 +60,16 @@ def _validate_reasoning_effort(value: str | None) -> str | None:
         accepted = ", ".join(sorted(_REASONING_EFFORTS))
         raise ValueError(
             f"reasoning_effort must be one of {accepted}, got {value!r}"
+        )
+    return value
+
+
+def _validate_narrative_person(value: str | None) -> str | None:
+    """Reject narrative-person declarations the audit cannot interpret."""
+    if value is not None and value not in _NARRATIVE_PERSONS:
+        accepted = ", ".join(sorted(_NARRATIVE_PERSONS))
+        raise ValueError(
+            f"narrative_person must be one of {accepted}, got {value!r}"
         )
     return value
 
@@ -237,6 +248,10 @@ class GenerationConfig(BaseModel):
     # run ends only when every outlined beat is committed. A seeded project's own
     # target takes precedence over this value.
     word_count_target: int | None = None
+    # Declared narrative person for the programmatic POV audit. None leaves the
+    # check off, so projects that have not made this authorial choice are
+    # unchanged.
+    narrative_person: str | None = None
     revision_retry_cap: int
     max_agent_iterations: int
     recent_prose_beats: int
@@ -411,6 +426,10 @@ class GenerationConfig(BaseModel):
     # Longest reply still treated as a clean critic verdict rather than prose
     # the parser should reject.
     critic_verdict_max_chars: int = 240
+    # Per-error-code ceiling on model-produced continuity findings in one
+    # critique. Prevents a critic that latches onto one code from making the
+    # routing count look like several distinct problems.
+    critic_max_findings_per_code: int
     # Budget for the full list of offending sentences a density failure appends
     # to its suggested_fix. Deliberately wider than audit_quote_chars, which
     # sizes a single locatable span: this list is instruction prose covering
@@ -440,6 +459,11 @@ class GenerationConfig(BaseModel):
         if isinstance(value, int) and value < 0:
             raise ValueError(f"word_count_target must be >= 0 or empty, got {value}")
         return value
+
+    @field_validator("narrative_person")
+    @classmethod
+    def _known_narrative_person(cls, value: str | None) -> str | None:
+        return _validate_narrative_person(value)
 
     @field_validator(
         "passive_voice_threshold",
@@ -479,6 +503,7 @@ class GenerationConfig(BaseModel):
         "audit_quote_chars",
         "audit_offender_list_chars",
         "critic_verdict_max_chars",
+        "critic_max_findings_per_code",
         "passive_min_sentences",
         # The agent loop raises AgentLoopError on a non-positive budget, and
         # critics now survives that exception rather than propagating it — so a
@@ -656,6 +681,15 @@ class AppConfig(BaseModel):
                 f"known roles: {', '.join(AGENT_ROLES)}"
             )
         return value
+
+    @model_validator(mode="after")
+    def _agent_overrides_fit_endpoint_window(self) -> "AppConfig":
+        """Validate each sparse override after it has inherited endpoint values."""
+        for role in self.agents:
+            # ``endpoint_for`` reconstructs EndpointConfig, whose reservation
+            # validator is the single authority for the window/cap invariant.
+            self.endpoint_for(role)
+        return self
 
     def endpoint_for(self, agent: str) -> EndpointConfig:
         """The inference endpoint one agent role actually uses.

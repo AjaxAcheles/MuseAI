@@ -81,11 +81,15 @@ endpoint:
 # Generation shape.
 generation:
   word_count_target: 1500      # whole-manuscript stop signal; 0 or empty = no limit (outline decides)
+  # Declares the narration for the POV guard. null disables the check entirely;
+  # only third-person drafts are checked, after a 2026-08-18 six-beat run
+  # committed one first-person narration intrusion outside dialogue.
+  narrative_person: null       # allowed values: first, third, or null
   revision_retry_cap: 3        # max draft->audit->revise cycles per beat
   max_agent_iterations: 6      # max tool-loop steps for any tool-using agent
   recent_prose_beats: 4        # recent committed beats injected as context
   context_token_budget: 8000   # soft token ceiling on the assembled draft context
-  passive_voice_threshold: 0.25  # max proportion of passive sentences per beat
+  passive_voice_threshold: 0.4   # max proportion of passive sentences per beat
   critic_parse_retries: 2        # re-prompts when the critic's JSON will not parse
   critic_degrade_threshold: 3    # consecutive unreadable critics before degrading + warning
   planner_parse_retries: 2       # re-prompts when a planner's JSON will not parse
@@ -106,7 +110,8 @@ generation:
   passive_min_sentences: 6       # below this many sentences the density gates are skipped — a proportion quantizes too coarsely to mean anything
   audit_quote_chars: 240         # offending prose quoted into a failure — what the reviser locates a span with
   audit_offender_list_chars: 1200 # separate, wider budget for the full offender list a density failure puts in its suggested_fix
-  critic_verdict_max_chars: 240  # longest reply still read as a clean critic verdict rather than prose
+  critic_verdict_max_chars: 700  # whole clean-prose reply bound; its first sentence must already declare the verdict, so the rest may only explain it
+  critic_max_findings_per_code: 2 # a 397-word beat produced up to eight copies of one code; retain the first two per code so one burst cannot dominate routing
   research_mode: false           # offer web_search to the agents; off = story-canon tools only
   tool_call_cap: 6               # max calls to any one tool within a single agent loop
   tool_timeout: 30               # seconds allowed for one tool execution
@@ -130,26 +135,40 @@ agents:
   chapter_planner:
     temperature: 0.3
     output_reservation: 2048
+    reasoning_effort: none
   beat_planner:
     temperature: 0.4
     output_reservation: 2048
+    reasoning_effort: none
   drafter:
     temperature: 0.9             # prose — the one role that should run hot
     output_reservation: 3072
+    reasoning_effort: none
   reviser:
     temperature: 0.6
-    output_reservation: 3072
+    # Same failure the critic hits: an unbounded reviser can spend its entire
+    # grant on hidden reasoning and return finish_reason='length' with no prose,
+    # which aborts the run. reasoning_effort disables the thinking; the cap makes
+    # a runaway reply fail fast instead of after two minutes. The cap must be
+    # <= output_reservation, so the two move together.
+    reasoning_effort: none
+    max_output_tokens: 4096
+    output_reservation: 4096
   critic:
     temperature: 0.2
-    output_reservation: 1024
     # A reasoning model that returns finish_reason='length' with an empty verdict
-    # spent its whole grant on hidden reasoning; this disables it where honoured.
-    # reasoning_effort: none
-    # Optional: cap a critic that burns its whole grant on reasoning tokens and
-    # returns finish_reason='length' with no verdict. Setting this skips the
-    # client's remaining-room calculation, so with a context_window set it must
-    # be <= output_reservation — that is the only room the trimmer keeps free.
-    # max_output_tokens: 1024
+    # spent its whole grant on hidden reasoning. This is where that was first
+    # measured: the same call went from 43.6 s / 4096 tokens / no answer text to
+    # 1.7 s / 2 tokens / a valid "[]" verdict. It ships on rather than commented
+    # out, because a critic left unset is the documented way to stall a run.
+    reasoning_effort: none
+    # Caps a critic that burns its whole grant on reasoning tokens and returns
+    # finish_reason='length' with no verdict. Setting this skips the client's
+    # remaining-room calculation, so with a context_window set it must be
+    # <= output_reservation — that is the only room the trimmer keeps free, which
+    # is why the two are raised together.
+    max_output_tokens: 4096
+    output_reservation: 4096
   # Split roles across servers by overriding the connection too:
   # drafter:
   #   base_url: "http://192.168.1.50:11434/v1"

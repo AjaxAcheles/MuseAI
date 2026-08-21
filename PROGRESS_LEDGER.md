@@ -1730,3 +1730,110 @@ and `config.example.yaml`; `config.yaml` was not modified for this work.
 
 - `wsl -d Ubuntu -- bash -lc "cd '/mnt/c/Users/imarg/syncthing_shared/Coding Projects/MuseAI' && uv run pytest -q"` -> **851 passed**.
 - `graphify update .` run.
+
+## Post-v1.17 maintenance — density failures use full rewrites
+
+Programmatic density findings now explicitly carry `whole_draft=True`, so the
+reviser cannot mistake their first quoted offender for the complete scope of a
+beat-wide measurement. Any such finding selects the existing full-rewrite path;
+paragraph-overlap and phrase-echo findings remain span-local. The `revised` log
+event now includes the number of whole-draft failures that drove the choice.
+Older failure records validate with `whole_draft=False`, preserving their
+span-local meaning on replay.
+
+**Done-check**
+
+- `wsl -d Ubuntu -- bash -lc "cd '/mnt/c/Users/imarg/syncthing_shared/Coding Projects/MuseAI' && uv run pytest -q"` -> **860 passed**.
+- `graphify update .` run.
+- `git diff --check` -> clean.
+
+## Post-v1.17 maintenance -- audit-only failures spend the revision budget
+
+`mode_selector` now exempts an outstanding failure batch only when every
+finding carries `audit.CRITIC_SOURCE`. A deterministic programmatic measurement
+that remains unchanged after one rewrite therefore falls through to the
+existing `generation.revision_retry_cap`; any continuity-critic finding,
+including a mixed batch, still takes the no-progress review boundary. The route
+log records `audit_only` so an operator can see why the no-progress guard did
+or did not fire.
+
+**Done-check**
+
+- `uv run pytest -q` -> **865 passed**.
+- `git diff --check` -> clean.
+- `graphify update .` run.
+
+## Post-v1.17 maintenance -- tool-support diagnostics and LLM I/O observability
+
+The truncation remedy now distinguishes hidden-reasoning exhaustion from an
+ordinary output-length cap: a non-empty `thinking` field directs the reader to
+set `reasoning_effort: none` for the affected `agents.<role>` override, while
+the no-thinking branch retains its cap advice. The endpoint probe makes a
+second, bounded request carrying an existing story-canon tool schema, and a
+narrow tool-support 400 detector supplies the same readable diagnosis at the
+shared LLM boundary. Request records now include the final `reasoning_effort`
+and merged, bounded `extra_body` values.
+
+**Done-check**
+
+- `wsl -d Ubuntu -- bash -lc "cd '/mnt/c/Users/imarg/syncthing_shared/Coding Projects/MuseAI' && uv run pytest -q"` -> **872 passed**.
+- `git diff --check` -> clean.
+- `graphify update .` run.
+
+## Post-v1.17 maintenance -- continuity critic guards
+
+Clean prose verdicts may include a concise explanation within a 700-character
+bound, but their first sentence must declare the clean result and all existing
+whole-reply safety guards remain. Model-produced critic findings are capped at
+two per error code, preserving first-seen order and recording dropped findings
+on the existing `critiqued` event; deterministic audit failures are untouched.
+The critic prompt now states that an unfulfilled obligation belongs only to the
+beat's own rendered `discharges_chapter_obligations` field (`discharges` in the
+beat spec), never the other chapter obligations assigned to other beats.
+
+**Done-check**
+
+- `C:\tmp\museai-pytest-env\Scripts\pytest.exe -q` -> **883 passed**.
+- `git diff --check` -> clean.
+- `graphify update .` run.
+
+## Post-v1.17 maintenance -- third-person POV audit guard
+
+`generation.narrative_person` now declares `first`, `third`, or `null`; the
+default `null` leaves point-of-view auditing disabled. A declared third-person
+draft is checked for first-person narration outside paired straight, typographic,
+or safely detected single-quoted dialogue. Intrusions produce a span-local
+`POINT_OF_VIEW_INTRUSION` failure with the first locatable sentence and the
+bounded offender list. The audit event and bus payload record the declaration
+and intrusion count, with `null` counts when no POV check runs. First-person
+declarations intentionally have no inverse check because third-person pronouns
+are normal references to other characters in first-person narration.
+
+**Done-check**
+
+- `wsl -d Ubuntu -- bash -lc "cd '/mnt/c/Users/imarg/syncthing_shared/Coding Projects/MuseAI' && uv run pytest -q"` -> **891 passed** (baseline: 883).
+- `config.yaml` and `config.example.yaml` loaded; the app booted with
+  `narrative_person` unset, `first`, and `third` (the example used a temporary
+  `MUSEAI_API_KEY` value for its documented environment reference).
+- `git diff --check` -> clean.
+- `graphify update .` run.
+
+## Post-v1.17 maintenance -- settings configuration surface
+
+The Settings page now renders endpoint fallback defaults separately from the
+five sparse per-agent overrides. Each role exposes temperature, reasoning
+effort, max output tokens, and output reservation; blank nullable controls
+serialize as `null` so the role inherits the endpoint value. Reasoning options,
+narrative-person options, and agent roles are supplied by the configuration
+model rather than duplicated in the template.
+
+The page now also exposes the active generation, quality, and research-mode
+controls accurately. Agent overrides are validated after inheritance, so an
+agent cap wider than its reservation under a declared context window is rejected
+at save time rather than failing later in generation.
+
+**Done-check**
+
+- `uv run --active pytest -q` -> **906 passed**.
+- `config.yaml` loaded and the Quart app booted.
+- `git diff --check` -> clean.

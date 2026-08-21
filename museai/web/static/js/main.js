@@ -984,30 +984,65 @@
       });
     });
 
-    /** Read number inputs, naming the offending field rather than silently clamping it. */
+    /** Read a number input, naming the offending field rather than silently clamping it. */
+    function readNumber(input, nullable) {
+      if (nullable && input.value.trim() === "") return null;
+      const value = Number(input.value);
+      const min = Number(input.min);
+      const max = Number(input.max);
+      if (Number.isNaN(value) || value < min || value > max) {
+        const label = document.querySelector(`label[for="${input.id}"]`);
+        const name = label ? label.textContent.trim() : input.id;
+        throw new Error(`${name} must be between ${min} and ${max}.`);
+      }
+      return value;
+    }
+
+    /** Read required number inputs, naming the offending field rather than silently clamping it. */
     function readNumbers(selector, datasetKey) {
       const values = {};
       for (const input of document.querySelectorAll(selector)) {
-        const value = Number(input.value);
-        const min = Number(input.min);
-        const max = Number(input.max);
-        if (Number.isNaN(value) || value < min || value > max) {
-          const label = document.querySelector(`label[for="${input.id}"]`);
-          const name = label ? label.textContent.trim() : input.id;
-          throw new Error(`${name} must be between ${min} and ${max}.`);
-        }
-        values[input.dataset[datasetKey]] = value;
+        values[input.dataset[datasetKey]] = readNumber(input, false);
       }
       return values;
+    }
+
+    /** Read nullable number inputs; a blank field intentionally serializes as null. */
+    function readNullableNumbers(selector, datasetKey) {
+      const values = {};
+      for (const input of document.querySelectorAll(selector)) {
+        values[input.dataset[datasetKey]] = readNumber(input, true);
+      }
+      return values;
+    }
+
+    function readAgentOverrides() {
+      const overrides = {};
+      for (const input of document.querySelectorAll(".agent-number-setting")) {
+        const role = input.dataset.agentRole;
+        if (!overrides[role]) overrides[role] = {};
+        overrides[role][input.dataset.agentKey] = readNumber(input, true);
+      }
+      for (const select of document.querySelectorAll(".agent-reasoning-setting")) {
+        const role = select.dataset.agentRole;
+        if (!overrides[role]) overrides[role] = {};
+        // Empty means no override; "none" remains a deliberate value.
+        overrides[role][select.dataset.agentKey] = select.value || null;
+      }
+      return overrides;
     }
 
     if (saveButton) {
       saveButton.addEventListener("click", async () => {
         let generation;
         let endpointNumbers;
+        let nullableEndpointNumbers;
+        let agentOverrides;
         try {
           generation = readNumbers(".generation-setting", "generationKey");
           endpointNumbers = readNumbers(".endpoint-setting", "endpointKey");
+          nullableEndpointNumbers = readNullableNumbers(".nullable-endpoint-setting", "endpointKey");
+          agentOverrides = readAgentOverrides();
         } catch (error) {
           setInlineResult(saveResult, error.message, false);
           return;
@@ -1017,13 +1052,21 @@
         payload.endpoint = {
           ...payload.endpoint,
           ...endpointNumbers,
+          ...nullableEndpointNumbers,
           base_url: byId("setting-base-url").value.trim(),
           model_name: byId("setting-model-name").value.trim(),
           tokenizer_family: byId("setting-tokenizer").value,
+          reasoning_effort: byId("setting-endpoint-reasoning-effort").value || null,
           // An empty string means "keep the key already configured"; the server substitutes it.
           api_key: byId("setting-api-key").value,
         };
-        payload.generation = { ...payload.generation, ...generation };
+        payload.agents = { ...payload.agents, ...agentOverrides };
+        payload.generation = {
+          ...payload.generation,
+          ...generation,
+          research_mode: byId("setting-research_mode").checked,
+          narrative_person: byId("setting-narrative_person").value || null,
+        };
         payload.log_level = byId("setting-log_level").value;
         payload.web_search_timeout = Number(byId("setting-web_search_timeout").value);
         payload.allow_reset = byId("setting-allow_reset").checked;

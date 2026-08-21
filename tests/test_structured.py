@@ -126,7 +126,19 @@ class TestTruncationRemedy:
             max_output_tokens=2048,
             thinking="the door was red earlier so this scene contradicts...",
         )
-        assert "reasoning" in remedy.lower()
+        assert "reasoning_effort: none" in remedy
+        assert "agents.<role>" in remedy
+        assert "raise endpoint.max_output_tokens" not in remedy
+
+    def test_the_cap_diagnosis_keeps_the_raise_cap_advice_without_thinking(self):
+        remedy = truncation_remedy(
+            empty=True,
+            served_completion_tokens=2048,
+            max_output_tokens=2048,
+            thinking="",
+        )
+        assert "raise endpoint.max_output_tokens" in remedy
+        assert "reasoning_effort" not in remedy
 
     def test_the_4096_vs_16384_case_still_produces_todays_message(self):
         # Run 2, 2026-07-24 18:11:36: a genuine served-window mismatch, no cap
@@ -256,6 +268,16 @@ class TestCriticSpanSearch:
 
 
 class TestCleanVerdict:
+    VERBOSE_CLEAN_REPLY = (
+        "The draft is clean. It fulfills all obligations in <beat_goal>: it shows Nell "
+        "standing with the cracked ladder on her grass, establishes that nobody has "
+        "seen it break (no neighbour or Ida noticed), and makes available the option of "
+        "leaning it against Ida's shed without saying anything. The prose also "
+        "correctly conveys that the garden forgets once items cross back, which is "
+        "exactly the mechanism needed to justify Nell's silence. No contradictions with "
+        "<story_world>, <characters>, <open_threads>..."
+    )
+
     @pytest.mark.parametrize(
         "text",
         [
@@ -271,6 +293,36 @@ class TestCleanVerdict:
         assert is_clean_verdict(text)
         assert parse_failure_objects(text) == []
 
+    def test_accepts_the_observed_verbose_clean_reply(self):
+        """The 2026-08-18 clean reply exceeded the old 240-character cap."""
+        assert len(self.VERBOSE_CLEAN_REPLY) > 240
+        assert is_clean_verdict(self.VERBOSE_CLEAN_REPLY)
+        assert parse_failure_objects(self.VERBOSE_CLEAN_REPLY) == []
+
+    def test_rejects_a_clean_phrase_that_arrives_after_discussion(self):
+        text = (
+            "The beat follows the recent prose and lands its required change. "
+            "The draft is clean."
+        )
+        assert not is_clean_verdict(text)
+        with pytest.raises(StructuredOutputError):
+            parse_failure_objects(text)
+
+    @pytest.mark.parametrize(
+        "tail",
+        [
+            " It might still omit a detail.",
+            " Its offending_text is irrelevant.",
+            " The reviewer wrote [clean] in the margin.",
+        ],
+    )
+    def test_long_clean_reply_keeps_whole_text_safety_guards(self, tail):
+        text = "The draft is clean. " + ("Its obligations are all present. " * 12) + tail
+        assert len(text) > 240
+        assert not is_clean_verdict(text)
+        with pytest.raises(StructuredOutputError):
+            parse_failure_objects(text)
+
     @pytest.mark.parametrize(
         "text",
         [
@@ -279,7 +331,7 @@ class TestCleanVerdict:
             "Mostly clean, but the timeline might be off",  # hedging
             "It is unclear whether this contradicts chapter two",
             "No issues except the name change",
-            "clean " * 60,  # over the length bound
+            "clean " * 150,  # over the length bound
             'clean, see [] above',  # contains a bracket
             "The offending_text is fine",  # schema vocabulary
         ],

@@ -6,9 +6,12 @@ mode choice, the splice guard, and the budget tiers all run for real.
 
 from __future__ import annotations
 
+import logging
+
 import pytest
 
 from museai.core.stream_bus import bus
+from museai.fsm.nodes.audit import ERROR_CODE, POV_ERROR_CODE
 from museai.fsm.tools import loop as loop_module
 from museai.fsm.nodes.deps import DraftingError, set_node_config
 from museai.fsm.nodes.revise import (
@@ -64,12 +67,17 @@ class _Response:
         self.tool_calls = []
 
 
-def failure(offending_text: str = OFFENDING, code: str = "CONTRADICTS_CHARACTER"):
+def failure(
+    offending_text: str = OFFENDING,
+    code: str = "CONTRADICTS_CHARACTER",
+    whole_draft: bool = False,
+):
     return FailureObject(
         error_code=code,
         offending_text=offending_text,
         suggested_fix="Mara never lies.",
         critic_source="continuity_critic",
+        whole_draft=whole_draft,
     )
 
 
@@ -168,6 +176,39 @@ class TestSpanMode:
         assert REPLACEMENT in revised
         assert revised.endswith("She climbed the stair and slept.")
 
+    async def test_multiple_located_pov_failures_use_span_mode(self, patched_llm):
+        draft = (
+            "I crossed the courtyard before dawn. "
+            "Mara fastened the gate behind her. "
+            "My hands shook around the key. "
+            "We waited for the rain to stop."
+        )
+        failures = [
+            failure("I crossed the courtyard before dawn.", POV_ERROR_CODE),
+            failure("My hands shook around the key.", POV_ERROR_CODE),
+            failure("We waited for the rain to stop.", POV_ERROR_CODE),
+        ]
+        patched_llm(
+            "They waited for the rain to stop.",
+            "Her hands shook around the key.",
+            "Mara crossed the courtyard before dawn.",
+        )
+        queue = bus.subscribe()
+        try:
+            delta = await revise_prose(state_with(failures, draft=draft))
+            events = [queue.get_nowait() for _ in range(queue.qsize())]
+        finally:
+            bus.unsubscribe(queue)
+
+        revision = next(event["data"] for event in events if event["type"] == "revision")
+        assert revision["mode"] == "span"
+        assert delta["current_draft_text"] == (
+            "Mara crossed the courtyard before dawn. "
+            "Mara fastened the gate behind her. "
+            "Her hands shook around the key. "
+            "They waited for the rain to stop."
+        )
+
     async def test_overlapping_spans_fall_back_to_a_full_rewrite(self, patched_llm):
         calls = patched_llm("A wholly rewritten beat.")
         failures = [
@@ -177,6 +218,25 @@ class TestSpanMode:
 
         delta = await revise_prose(state_with(failures))
 
+        assert len(calls) == 1
+        assert "<passage_to_rewrite>" not in calls[0][1]["content"]
+        assert delta["current_draft_text"] == "A wholly rewritten beat."
+
+    async def test_identical_pov_quotes_fall_back_to_full_mode(self, patched_llm):
+        sentence = "I waited by the gate."
+        draft = f"{sentence} Mara crossed the yard. {sentence}"
+        failures = [
+            failure(sentence, POV_ERROR_CODE),
+            failure(sentence, POV_ERROR_CODE),
+        ]
+        calls = patched_llm("A wholly rewritten beat.")
+
+        delta = await revise_prose(state_with(failures, draft=draft))
+
+        assert [locate(draft, failure.offending_text) for failure in failures] == [
+            (0, len(sentence)),
+            (0, len(sentence)),
+        ]
         assert len(calls) == 1
         assert "<passage_to_rewrite>" not in calls[0][1]["content"]
         assert delta["current_draft_text"] == "A wholly rewritten beat."
@@ -226,6 +286,24 @@ class TestSpliceGuard:
 
 
 class TestFullMode:
+    async def test_a_locatable_density_failure_uses_full_mode(
+        self, patched_llm, caplog, monkeypatch
+    ):
+        calls = patched_llm("A wholly rewritten beat.")
+        monkeypatch.setattr(logging.getLogger("museai"), "propagate", True)
+        with caplog.at_level(logging.INFO, logger="museai.fsm"):
+            await revise_prose(state_with([failure(OFFENDING, ERROR_CODE, True)]))
+
+        revised = next(
+            record.getMessage()
+            for record in caplog.records
+            if "node=revise event=revised" in record.getMessage()
+        )
+        assert len(calls) == 1
+        assert "<passage_to_rewrite>" not in calls[0][1]["content"]
+        assert "mode=full" in revised
+        assert "whole_draft_failures=1" in revised
+
     async def test_a_missing_span_falls_back_to_a_full_rewrite(self, patched_llm):
         calls = patched_llm("A wholly rewritten beat.")
         failures = [failure("She was dishonest concerning the correspondence")]
@@ -302,6 +380,30 @@ class TestBudget:
 
 
 class TestStateDelta:
+    async def test_a_locatable_span_local_failure_uses_span_mode(self, patched_llm):
+        patched_llm(REPLACEMENT)
+        queue = bus.subscribe()
+        try:
+            await revise_prose(state_with([failure()]))
+            events = [queue.get_nowait() for _ in range(queue.qsize())]
+        finally:
+            bus.unsubscribe(queue)
+
+        revision = next(event["data"] for event in events if event["type"] == "revision")
+        assert revision["mode"] == "span"
+
+    def test_a_legacy_failure_record_defaults_to_span_local(self):
+        legacy = FailureObject.model_validate(
+            {
+                "error_code": "CONTRADICTS_CHARACTER",
+                "offending_text": OFFENDING,
+                "suggested_fix": "Mara never lies.",
+                "critic_source": "continuity_critic",
+            }
+        )
+
+        assert legacy.whole_draft is False
+
     async def test_retry_count_increments(self, patched_llm):
         patched_llm(REPLACEMENT)
 

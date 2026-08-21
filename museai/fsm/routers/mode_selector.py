@@ -6,7 +6,9 @@ state and names the next node. First match wins.
 1. An unreadable critic below its degradation threshold → ``retry_critic``.
 2. An unreadable critic at the threshold with no salvageable findings → ``review``.
 3. No outstanding failures → ``commit``.
-4. A revise already ran and did not lower the failure count it was handed → ``review``.
+4. A revise already ran, did not lower the failure count it was handed, and at
+   least one outstanding finding is critic-sourced → ``review``. Audit-only
+   findings instead spend the configured revision budget.
 5. Failures, and the revision budget is not spent → ``revise``.
 6. Failures, and the budget *is* spent → ``review``.
 
@@ -23,6 +25,7 @@ single critic parser's bounded health streak.
 from __future__ import annotations
 
 from museai.core.logging_setup import log_node_event
+from museai.fsm.nodes.audit import CRITIC_SOURCE as AUDIT_CRITIC_SOURCE
 from museai.fsm.nodes.deps import get_node_config
 from museai.fsm.state import OrchestratorState
 
@@ -35,11 +38,16 @@ RETRY_CRITIC = "retry_critic"
 def mode_selector(state: OrchestratorState) -> str:
     """Route the beat to ``commit``, ``revise``, or ``review``."""
     config = get_node_config()
-    failures = len(state["critic_failures"])
+    outstanding_failures = state["critic_failures"]
+    failures = len(outstanding_failures)
     retry_count = state["retry_count"]
     cap = config.generation.revision_retry_cap
     parse_streak = state["critic_parse_failure_streak"]
     degrade_threshold = config.generation.critic_degrade_threshold
+    audit_only = bool(outstanding_failures) and all(
+        failure.critic_source == AUDIT_CRITIC_SOURCE
+        for failure in outstanding_failures
+    )
     # A revise already ran and its rewrite did not lower the failure count it
     # was handed: another revise would spend a full critic pass re-running the
     # same non-improving cycle (e.g. a beat stuck at an unchanged
@@ -47,8 +55,14 @@ def mode_selector(state: OrchestratorState) -> str:
     # verdict against `pre_revise_failure_count`, which only revise moves — a
     # critic re-score of unchanged prose is not a failed cycle. The
     # `retry_count > 0` guard is redundant with that baseline but says the
-    # precondition out loud.
-    no_progress = retry_count > 0 and not state["last_cycle_improved"]
+    # precondition out loud. Seven observed parks all occurred at retry_count=1
+    # while revision_retry_cap=4 was never approached, so deterministic,
+    # audit-only measurements are allowed to spend that existing budget.
+    no_progress = (
+        retry_count > 0
+        and not state["last_cycle_improved"]
+        and not audit_only
+    )
 
     if 0 < parse_streak < degrade_threshold:
         # A parser failure is not a clean verdict. Retry the critic itself at a
@@ -77,6 +91,7 @@ def mode_selector(state: OrchestratorState) -> str:
         critic_parse_failure_streak=parse_streak,
         critic_degrade_threshold=degrade_threshold,
         last_cycle_improved=state["last_cycle_improved"],
+        audit_only=audit_only,
         no_progress=no_progress,
     )
     return destination

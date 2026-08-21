@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import pytest
 
+from museai.fsm.nodes.audit import CRITIC_SOURCE as AUDIT_CRITIC_SOURCE
 from museai.fsm.nodes.deps import set_node_config
 from museai.fsm.routers.mode_selector import (
     COMMIT,
@@ -20,12 +21,14 @@ from museai.fsm.state import FSM_Pointer, FailureObject, make_initial_state
 RETRY_CAP = 3
 
 
-def failure(code: str = "CONTRADICTS_CHARACTER") -> FailureObject:
+def failure(
+    code: str = "CONTRADICTS_CHARACTER", *, critic_source: str = "continuity_critic"
+) -> FailureObject:
     return FailureObject(
         error_code=code,
         offending_text="Mara lied about the letter.",
         suggested_fix="Mara never lies.",
-        critic_source="continuity_critic",
+        critic_source=critic_source,
     )
 
 
@@ -133,6 +136,43 @@ class TestNoProgress:
         state = state_with([failure()], retry_count=1, parse_streak=2,
                            last_cycle_improved=True)
         assert mode_selector(state) == REVISE
+
+
+class TestAuditOnlyNoProgress:
+    def test_audit_only_non_improving_retry_under_the_cap_revises(self):
+        state = state_with(
+            [failure("PASSIVE_VOICE_DENSITY", critic_source=AUDIT_CRITIC_SOURCE)],
+            retry_count=1,
+            last_cycle_improved=False,
+        )
+        assert mode_selector(state) == REVISE
+
+    def test_audit_only_failure_at_the_cap_goes_to_review(self):
+        state = state_with(
+            [failure("PASSIVE_VOICE_DENSITY", critic_source=AUDIT_CRITIC_SOURCE)],
+            retry_count=RETRY_CAP,
+            last_cycle_improved=False,
+        )
+        assert mode_selector(state) == REVIEW
+
+    def test_mixed_failures_non_improving_retry_goes_to_review(self):
+        state = state_with(
+            [
+                failure("PASSIVE_VOICE_DENSITY", critic_source=AUDIT_CRITIC_SOURCE),
+                failure(),
+            ],
+            retry_count=1,
+            last_cycle_improved=False,
+        )
+        assert mode_selector(state) == REVIEW
+
+    def test_critic_only_failures_non_improving_retry_goes_to_review(self):
+        state = state_with([failure()], retry_count=1, last_cycle_improved=False)
+        assert mode_selector(state) == REVIEW
+
+    def test_empty_failure_list_commits_after_a_non_improving_retry(self):
+        state = state_with([], retry_count=1, last_cycle_improved=False)
+        assert mode_selector(state) == COMMIT
 
 
 class TestPurity:

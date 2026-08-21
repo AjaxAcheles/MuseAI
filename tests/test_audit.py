@@ -8,20 +8,24 @@ from __future__ import annotations
 
 import pytest
 
+import museai.fsm.nodes.audit as audit_module
 from museai.fsm.nodes.audit import (
     CRITIC_SOURCE,
     EMOTION_ERROR_CODE,
     ERROR_CODE,
     OVERLAP_ERROR_CODE,
+    POV_ERROR_CODE,
     TIC_ERROR_CODE,
     audit,
     emotion_word_density,
+    first_person_narration_sentences,
     is_passive,
     paragraph_overlaps,
     phrase_echoes,
     passive_voice_density,
     split_paragraphs,
     split_sentences,
+    sentence_spans,
     verbatim_phrase_matches,
     _emotion_pattern,
 )
@@ -627,3 +631,210 @@ class TestTicAuditNode:
         set_node_config(config_factory(tic_phrase_threshold=0.9))
         delta = await audit(state_with(TIC_HEAVY))
         assert [f for f in delta["critic_failures"] if f.error_code == TIC_ERROR_CODE] == []
+
+
+class TestFailureScope:
+    @pytest.mark.parametrize(
+        ("draft", "config_overrides", "error_code"),
+        [
+            (PASSIVE_HEAVY, {"passive_voice_threshold": 0.25}, ERROR_CODE),
+            (EMOTION_HEAVY, {"emotion_word_threshold": 0.3}, EMOTION_ERROR_CODE),
+            (TIC_HEAVY, {"tic_phrase_threshold": 0.3}, TIC_ERROR_CODE),
+        ],
+    )
+    async def test_density_breaches_are_whole_draft(
+        self, config_factory, draft, config_overrides, error_code
+    ):
+        set_node_config(config_factory(**config_overrides))
+
+        failures = (await audit(state_with(draft)))["critic_failures"]
+
+        assert next(f for f in failures if f.error_code == error_code).whole_draft
+
+    async def test_repetition_failures_are_span_local(self):
+        overlap = next(
+            f
+            for f in (await audit(state_with_package(PARA_A, committed_prose=[PARA_A])))[
+                "critic_failures"
+            ]
+            if f.error_code == OVERLAP_ERROR_CODE
+        )
+        phrase = "when Ida came out on the afternoon door"
+        echo = next(
+            f
+            for f in (
+                await audit(
+                    state_with_package(
+                        f"She made no mention {phrase}.",
+                        committed_prose=[f"He waited by the ladder {phrase}."],
+                    )
+                )
+            )["critic_failures"]
+            if "short phrase" in f.suggested_fix
+        )
+
+        assert overlap.whole_draft is False
+        assert echo.whole_draft is False
+
+
+class TestPointOfViewAudit:
+    def test_dialogue_period_does_not_misalign_narration_sentences(self):
+        text = (
+            'He walked to the shed. "It is 9 a.m., Nell," she said. '
+            'I should not be here, he thought. She lifted the ladder. '
+            'The paint had cracked along the rail. Nell steadied it against the fence.'
+        )
+
+        offenders = first_person_narration_sentences(text)
+
+        assert "I should not be here, he thought." in offenders
+        assert "The paint had cracked along the rail." not in offenders
+
+    def test_dialogue_abbreviation_followed_by_clean_narration_flags_nothing(self):
+        text = (
+            '"The U.S.A. is far away, my friend," Mara said. '
+            "She fastened the gate behind her."
+        )
+
+        assert first_person_narration_sentences(text) == []
+
+    def test_dialogue_abbreviation_preserves_genuine_first_person_narration(self):
+        text = (
+            '"It is 9 a.m., Nell," Mara said. '
+            "I should leave before dawn. She closed the gate."
+        )
+
+        assert first_person_narration_sentences(text) == ["I should leave before dawn."]
+
+    def test_sentence_spans_match_split_sentences(self):
+        texts = [
+            "  Mara entered.  Nell followed.  ",
+            "Wait... What?!  Then silence.",
+            'Mara said." Then Nell left.',
+            "",
+            "No terminal punctuation at all",
+        ]
+
+        for text in texts:
+            assert [text[start:end] for start, end in sentence_spans(text)] == split_sentences(text)
+
+    def test_lowercase_i_is_not_a_first_person_pronoun(self):
+        assert first_person_narration_sentences("i left before dawn.") == []
+        assert first_person_narration_sentences("I left before dawn.") == ["I left before dawn."]
+
+    async def test_default_narrative_person_disables_the_check(self):
+        failures = (await audit(state_with("I took my coat with me. We hurried home.")))[
+            "critic_failures"
+        ]
+
+        assert [f for f in failures if f.error_code == POV_ERROR_CODE] == []
+
+    async def test_third_person_flags_the_committed_regression(self, config_factory):
+        set_node_config(config_factory(narrative_person="third"))
+        draft = (
+            "...there is no line I would have to worry about crossing, only the "
+            "fence between them..."
+        )
+
+        failures = (await audit(state_with(draft)))["critic_failures"]
+
+        pov_failures = [f for f in failures if f.error_code == POV_ERROR_CODE]
+        assert len(pov_failures) == 1
+        assert pov_failures[0].offending_text == draft
+
+    async def test_three_intrusions_produce_ordered_span_local_failures(
+        self, config_factory
+    ):
+        set_node_config(config_factory(narrative_person="third"))
+        draft = (
+            "I crossed the courtyard before dawn. "
+            "Mara fastened the gate behind her. "
+            "My hands shook around the key. "
+            "She watched the road empty. "
+            "We waited for the rain to stop."
+        )
+
+        failures = (await audit(state_with(draft)))["critic_failures"]
+        pov_failures = [f for f in failures if f.error_code == POV_ERROR_CODE]
+
+        assert [f.offending_text for f in pov_failures] == [
+            "I crossed the courtyard before dawn.",
+            "My hands shook around the key.",
+            "We waited for the rain to stop.",
+        ]
+        assert all(f.whole_draft is False for f in pov_failures)
+
+    async def test_pov_intrusion_count_matches_audited_log_event(
+        self, config_factory, monkeypatch
+    ):
+        set_node_config(config_factory(narrative_person="third"))
+        logged_events: list[dict] = []
+
+        def capture_log_event(node_name, **fields):
+            logged_events.append({"node_name": node_name, **fields})
+
+        monkeypatch.setattr(audit_module, "log_node_event", capture_log_event)
+        failures = (
+            await audit(
+                state_with(
+                    "I opened the door. She crossed the kitchen. "
+                    "We waited for the kettle."
+                )
+            )
+        )["critic_failures"]
+
+        pov_failures = [f for f in failures if f.error_code == POV_ERROR_CODE]
+        audited = next(
+            event
+            for event in logged_events
+            if event["node_name"] == "audit" and event["event"] == "audited"
+        )
+        assert audited["pov_intrusions"] == len(pov_failures) == 2
+
+    @pytest.mark.parametrize(
+        "draft",
+        [
+            'Mara said, "I will carry it myself." Then she opened the gate.',
+            "Mara said, \u201cI will carry it myself.\u201d Then she opened the gate.",
+        ],
+    )
+    async def test_third_person_ignores_first_person_dialogue(self, config_factory, draft):
+        set_node_config(config_factory(narrative_person="third"))
+
+        failures = (await audit(state_with(draft)))["critic_failures"]
+
+        assert [f for f in failures if f.error_code == POV_ERROR_CODE] == []
+
+    async def test_possessive_apostrophe_does_not_mask_narration(self, config_factory):
+        set_node_config(config_factory(narrative_person="third"))
+
+        failures = (await audit(state_with("Nell's hands shook as I reached for the latch.")))[
+            "critic_failures"
+        ]
+
+        assert [f for f in failures if f.error_code == POV_ERROR_CODE]
+
+    async def test_clean_third_person_prose_has_no_pov_failure(self, config_factory):
+        set_node_config(config_factory(narrative_person="third"))
+
+        failures = (await audit(state_with(CLEAN)))["critic_failures"]
+
+        assert [f for f in failures if f.error_code == POV_ERROR_CODE] == []
+
+    async def test_pov_failure_is_span_local(self, config_factory):
+        set_node_config(config_factory(narrative_person="third"))
+
+        failure = next(
+            f
+            for f in (await audit(state_with("I opened the door.")))["critic_failures"]
+            if f.error_code == POV_ERROR_CODE
+        )
+
+        assert failure.whole_draft is False
+
+    async def test_word_containing_i_is_not_a_pronoun(self, config_factory):
+        set_node_config(config_factory(narrative_person="third"))
+
+        failures = (await audit(state_with("The iron key lay silent.")))["critic_failures"]
+
+        assert [f for f in failures if f.error_code == POV_ERROR_CODE] == []
