@@ -99,7 +99,6 @@ def _findings(*quotes: str) -> str:
 # replacement draft is exactly what the next cycle audits.
 THREE_FAILURES = _findings(OFFENDING, OFFENDING, OFFENDING)
 TWO_FAILURES = _findings(OFFENDING, OFFENDING)
-REPAIRED_FAILURE = _findings(REPAIRED)
 
 # Three sentences each, so every draft stays under `passive_min_sentences` and
 # the programmatic audit contributes nothing to the counts under test.
@@ -220,7 +219,9 @@ async def test_the_quality_loop_reaches_commit_once_the_failure_is_fixed(project
 
 async def test_a_failure_that_survives_the_cap_reaches_review(project, endpoint):
     # The critic finds the same problem on every pass, revision never fixes it.
-    endpoint([ONE_FAILURE, REPAIRED_FAILURE, REPAIRED_FAILURE])
+    # The two scripted revision replies first reject a draft-sized span
+    # replacement, then use that same unchanged draft for the full rewrite.
+    endpoint([ONE_FAILURE, ONE_FAILURE], revise_responses=[DRAFT, DRAFT])
 
     state = await drafted_state(project)
 

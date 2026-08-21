@@ -399,7 +399,14 @@ class GenerationConfig(BaseModel):
         "the air was thick", "silence stretched", "time seemed to slow",
         "the world narrowed", "a mix of emotions", "wave of emotion",
     ]
-    # --- Intensity arc (beat planner) --------------------------------------
+    # --- Beat decomposition and intensity arc (beat planner) ---------------
+    # Fewest beats a chapter may contain before the planner is asked to break
+    # its work apart further. One beat may still be accepted after the bounded
+    # retry, but it is not a decomposition to aim for.
+    min_beats_per_chapter: int = 3
+    # How many semantic retries may ask the planner to decompose an undersized
+    # chapter. Bounded, then accepted just as the intensity retry is.
+    planner_decomposition_retries: int = 1
     # How many times the beat planner is re-prompted for a varied emotional arc
     # when its plan comes back nearly all high-arousal. Bounded, then accepted.
     planner_intensity_retries: int
@@ -484,7 +491,8 @@ class GenerationConfig(BaseModel):
         return value
 
     @field_validator(
-        "critic_parse_retries", "planner_parse_retries", "planner_intensity_retries"
+        "critic_parse_retries", "planner_parse_retries", "planner_decomposition_retries",
+        "planner_intensity_retries",
     )
     @classmethod
     def _non_negative(cls, value: int, info: ValidationInfo) -> int:
@@ -499,6 +507,7 @@ class GenerationConfig(BaseModel):
         "repetition_min_phrase_words",
         "critic_fix_max_borrowed_words",
         "tool_call_cap",
+        "min_beats_per_chapter",
         "intensity_min_beats",
         "audit_quote_chars",
         "audit_offender_list_chars",

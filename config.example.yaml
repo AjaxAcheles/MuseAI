@@ -102,6 +102,10 @@ generation:
   repetition_min_phrase_words: 6 # short verbatim echoes beneath the 3-sentence repetition_min_run gate
   critic_fix_max_borrowed_words: 15 # a fix may quote a few words (such as "the third rung"); fifteen consecutive borrowed words is duplication, not a fix
   emotion_word_threshold: 0.3    # max proportion of sentences that may name an emotion outright
+  # A four-chapter observed run decomposed into 1/3/1/1 beats; ask the planner
+  # once to break an undersized chapter into dramatic changes before accepting it.
+  min_beats_per_chapter: 3       # fewest beats before the decomposition re-prompt
+  planner_decomposition_retries: 1 # bounded semantic retries for an undersized chapter
   planner_intensity_retries: 1   # re-prompts for a varied emotional arc when a plan is all high-arousal
   intensity_hot_threshold: 0.6   # |target arousal| at/above which a beat counts as "hot"
   intensity_flat_fraction: 0.8   # fraction of a chapter's beats that may be hot before re-prompting

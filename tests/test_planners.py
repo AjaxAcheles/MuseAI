@@ -599,6 +599,29 @@ VARIED_BEATS = """```json
 ]
 ```"""
 
+# A valid but under-decomposed chapter. The semantic retry must preserve the
+# usual JSON validation path, so this has the same fields as a normal beat.
+ONE_BEAT = """```json
+[
+  {"ordering": 1, "intent": "Mara opens the letter and hides it.",
+   "entry_state": "A routine morning.", "exit_state": "The letter is locked away.",
+   "required_change": "Mara cannot treat the post as routine anymore.",
+   "observable_event": "Mara opens the letter and locks it in a drawer.",
+   "beat_function": "discovery",
+   "discharges": ["Mara dates the earliest letter."],
+   "focal_character_id": "char-mara",
+   "target_pad": {"pleasure": -0.4, "arousal": 0.2, "dominance": -0.1}}
+]
+```"""
+
+
+def _set_planner_generation(seeded, **overrides):
+    """Keep the seeded database while narrowing one planner behavior for a test."""
+    config = seeded.model_copy(
+        update={"generation": seeded.generation.model_copy(update=overrides)}
+    )
+    set_node_config(config)
+
 
 async def test_plan_beat_stores_thread_updates_in_the_spec(seeded, monkeypatch):
     chapter_id = _seed_active_chapter(seeded)
@@ -708,6 +731,95 @@ async def test_plan_beat_accepts_a_varied_arc_without_reprompting(seeded, monkey
 
     # A varied plan is accepted on the first call; no intensity re-prompt.
     assert len(calls) == 1
+
+
+async def test_plan_beat_reprompts_once_for_under_decomposition(seeded, monkeypatch):
+    chapter_id = _seed_active_chapter(seeded)
+    _set_planner_generation(
+        seeded, min_beats_per_chapter=3, planner_decomposition_retries=1
+    )
+    calls = []
+    replies = [ONE_BEAT, VARIED_BEATS]
+
+    async def fake_call_llm(endpoint, messages, **kwargs):
+        calls.append(messages)
+        return _response(replies.pop(0))
+
+    patch_planner_llm(monkeypatch, beat=fake_call_llm)
+    await plan_beat(_state(chapter_id))
+
+    conn = connect_db(seeded.db_path)
+    rows = get_beats_for_chapter(conn, chapter_id)
+    conn.close()
+    assert len(calls) == 2
+    assert [json.loads(row["beat_spec"])["intent"] for row in rows] == [
+        "A quiet opening.", "The peak.", "The settling."
+    ]
+    assert "at least 3 beats" in calls[0][0]["content"]
+
+
+async def test_plan_beat_accepts_the_configured_minimum_without_reprompting(
+    seeded, monkeypatch
+):
+    chapter_id = _seed_active_chapter(seeded)
+    _set_planner_generation(
+        seeded, min_beats_per_chapter=3, planner_decomposition_retries=1
+    )
+    calls = []
+
+    async def fake_call_llm(endpoint, messages, **kwargs):
+        calls.append(messages)
+        return _response(VARIED_BEATS)
+
+    patch_planner_llm(monkeypatch, beat=fake_call_llm)
+    await plan_beat(_state(chapter_id))
+
+    assert len(calls) == 1
+
+
+async def test_plan_beat_accepts_an_under_decomposed_plan_when_retries_are_zero(
+    seeded, monkeypatch
+):
+    chapter_id = _seed_active_chapter(seeded)
+    _set_planner_generation(
+        seeded, min_beats_per_chapter=3, planner_decomposition_retries=0
+    )
+    calls = []
+
+    async def fake_call_llm(endpoint, messages, **kwargs):
+        calls.append(messages)
+        return _response(ONE_BEAT)
+
+    patch_planner_llm(monkeypatch, beat=fake_call_llm)
+    await plan_beat(_state(chapter_id))
+
+    conn = connect_db(seeded.db_path)
+    rows = get_beats_for_chapter(conn, chapter_id)
+    conn.close()
+    assert len(calls) == 1
+    assert len(rows) == 1
+
+
+async def test_plan_beat_accepts_an_under_decomposed_plan_after_retries_are_spent(
+    seeded, monkeypatch
+):
+    chapter_id = _seed_active_chapter(seeded)
+    _set_planner_generation(
+        seeded, min_beats_per_chapter=3, planner_decomposition_retries=1
+    )
+    replies = [ONE_BEAT, ONE_BEAT]
+
+    async def fake_call_llm(endpoint, messages, **kwargs):
+        return _response(replies.pop(0))
+
+    patch_planner_llm(monkeypatch, beat=fake_call_llm)
+    await plan_beat(_state(chapter_id))
+
+    conn = connect_db(seeded.db_path)
+    rows = get_beats_for_chapter(conn, chapter_id)
+    conn.close()
+    assert replies == []
+    assert len(rows) == 1
 
 
 async def test_plan_beat_gives_the_planner_story_position_and_threads(seeded, monkeypatch):

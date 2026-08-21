@@ -34,7 +34,7 @@ from typing import Any, Sequence
 from pydantic import ConfigDict, ValidationError
 
 from museai.core.logging_setup import get_fsm_logger
-from museai.fsm.nodes.audit import split_sentences
+from museai.core.text import split_sentences
 from museai.fsm.state import FailureObject
 
 # Openers paired with their closers, for the balanced-span scan.

@@ -29,7 +29,7 @@ from difflib import SequenceMatcher
 from museai.core.logging_setup import get_fsm_logger, log_node_event
 from museai.core.stream_bus import bus
 from museai.fsm.nodes.deps import DraftingError, get_node_config
-from museai.fsm.state import FailureObject, OrchestratorState
+from museai.fsm.state import FailureObject, OrchestratorState, failure_signature
 from museai.fsm.tools.loop import run_agent_loop
 from museai.fsm.tools.registry import tool_impls_for, tool_specs_for
 from museai.llm.prompts import render_messages
@@ -255,6 +255,33 @@ async def revise_prose(state: OrchestratorState) -> dict:
             f"revise_prose ran for beat {beat_id!r} with no failures to fix"
         )
 
+    best_draft = state["best_seen_draft"]
+    best_failures = state["best_seen_failures"]
+    best_count = state["best_seen_failure_count"]
+    if (
+        best_draft is not None
+        and best_failures is not None
+        and best_count is not None
+        and best_count < len(failures)
+        and best_draft != draft
+    ):
+        failures_before_rollback = len(failures)
+        # A non-improving rewrite is still useful evidence, but it must not
+        # become the starting point for the next one. The 2026-08-18 run made
+        # this concrete: one beat went 6 -> 7 failures and another 5 -> 10.
+        # Restore the failure set with the prose, not merely the prose; span
+        # location against a mismatched finding list silently forces a full
+        # rewrite and would erase the protection this rollback is meant to add.
+        draft = best_draft
+        failures = list(best_failures)
+        log_node_event(
+            "revise",
+            event="rolled_back",
+            beat_id=beat_id,
+            failures_before_rollback=failures_before_rollback,
+            failures_after_rollback=len(failures),
+        )
+
     log_node_event(
         "revise",
         event="start",
@@ -352,5 +379,8 @@ async def revise_prose(state: OrchestratorState) -> dict:
         # re-score of unchanged prose (the retry_critic edge) still compares
         # against the draft that was actually handed here.
         "pre_revise_failure_count": len(failures),
+        "pre_revise_failure_signatures": [
+            failure_signature(failure) for failure in failures
+        ],
         "critic_failures": [],
     }

@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
 import yaml
 from pydantic import ValidationError
 from quart import Blueprint, current_app, jsonify, render_template, request
+from ruamel.yaml import YAML
+from ruamel.yaml.comments import CommentedMap
+from ruamel.yaml.error import YAMLError as RuamelYAMLError
 
 from museai.core.config import (
     AGENT_ROLES,
@@ -149,6 +153,42 @@ def _raw_api_key_on_disk(path: Path) -> str | None:
     return key if isinstance(key, str) else None
 
 
+def _merge_validated_config(existing: CommentedMap, validated: Mapping[str, Any]) -> None:
+    """Apply validated settings without replacing nodes that carry config comments.
+
+    ``config.yaml`` documents why its operational limits have their values. The
+    round-trip mapping retains that commentary on its existing keys, so updating
+    values in place preserves the knowledge operators need when tuning them.
+    Reassigning an unchanged node discards its formatting and comments nested
+    inside it, so only values that differ from the validated config are written.
+    """
+    for key in list(existing):
+        if key not in validated:
+            del existing[key]
+
+    for key, value in validated.items():
+        current = existing.get(key)
+        if isinstance(current, CommentedMap) and isinstance(value, Mapping):
+            _merge_validated_config(current, value)
+        elif key not in existing or current != value:
+            existing[key] = value
+
+
+def _sparse_agent_overrides(
+    agents: Mapping[str, Mapping[str, Any]] | None,
+) -> dict[str, dict[str, Any]]:
+    """Drop inherited values so the on-disk agent overrides stay sparse."""
+    return {
+        role: {key: value for key, value in override.items() if value is not None}
+        for role, override in (agents or {}).items()
+    }
+
+
+def _represent_null_as_literal(representer: Any, value: None) -> Any:
+    """Keep configured nulls explicit instead of serializing them as bare keys."""
+    return representer.represent_scalar("tag:yaml.org,2002:null", "null")
+
+
 @bp.post("/settings/save")
 async def save():
     path = Path(current_app.config["MUSEAI_CONFIG_PATH"])
@@ -164,11 +204,26 @@ async def save():
         return jsonify({"ok": False, "error": str(exc)}), 400
 
     persisted = validated.model_dump()
+    persisted["agents"] = _sparse_agent_overrides(persisted.get("agents"))
     if keep_existing_key:
         raw_key = _raw_api_key_on_disk(path)
         if raw_key:
             persisted["endpoint"]["api_key"] = raw_key
-    path.write_text(yaml.safe_dump(persisted, sort_keys=False), encoding="utf-8")
+
+    yaml_rt = YAML()
+    yaml_rt.preserve_quotes = True
+    yaml_rt.representer.add_representer(type(None), _represent_null_as_literal)
+    try:
+        existing = yaml_rt.load(path.read_text(encoding="utf-8")) if path.is_file() else None
+    except (yaml.YAMLError, RuamelYAMLError):
+        existing = None
+    if isinstance(existing, CommentedMap):
+        _merge_validated_config(existing, persisted)
+        document: Mapping[str, Any] = existing
+    else:
+        document = persisted
+    with path.open("w", encoding="utf-8") as handle:
+        yaml_rt.dump(document, handle)
     try:
         reloaded = load_config(path)
     except ConfigError as exc:

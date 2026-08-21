@@ -64,6 +64,10 @@ _GENERATION_DEFAULTS = dict(
     critic_max_findings_per_code=2,
     emotion_word_threshold=0.3,
     tic_phrase_threshold=0.15,
+    # Most planner tests use the deliberately small two-beat fixture; production
+    # config still requires three, and decomposition tests override this floor.
+    min_beats_per_chapter=2,
+    planner_decomposition_retries=1,
     planner_intensity_retries=1,
     intensity_hot_threshold=0.6,
     intensity_flat_fraction=0.8,

@@ -95,6 +95,7 @@ def context_for(template: str) -> dict:
         return {
             **common,
             "chapter": CHAPTER,
+            "min_beats_per_chapter": 3,
             "story_position": {
                 "arc_description": ARC["description"],
                 "chapter_ordering": 2,
@@ -240,6 +241,10 @@ class TestRendering:
         assert "Guarded, alert, and quietly in control." in user
         # Pacing is the drafter's call now; no numeric length target survives.
         assert "word_target" not in user
+
+    def test_beat_planner_receives_the_configured_decomposition_floor(self):
+        system = render_messages("beat_planner", **context_for("beat_planner"))[0]["content"]
+        assert "at least 3 beats" in system
 
     @pytest.mark.parametrize("template", TEMPLATES)
     def test_every_agent_gets_story_tools_by_default(self, template):

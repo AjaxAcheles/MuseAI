@@ -26,6 +26,30 @@ session ritual.
 
 Next up: v1 complete
 
+## 2026-08-20 - Task D revision-progress identity: done
+
+- Revision now records stable error-code/offending-text signatures for the
+  exact failure list it worked from, including a best-seen rollback.
+- A critic pass counts as progress when the failure count falls or every
+  handed-off finding is gone, preventing the first-beat character-to-thread
+  replacement from parking before its configured retry budget is spent.
+
+**Done-check** - WSL `uv run pytest -q` -> `930 passed`. Both shipped configs
+loaded successfully with a disposable `MUSEAI_API_KEY` supplied for the
+documented environment reference. `graphify update .` completed.
+
+## 2026-08-20 — Task A maintenance fixes: done
+
+- Settings saves now merge validated values into ruamel.yaml's round-trip
+  document, preserving operational comments and removing stale keys while
+  retaining an unresolved API-key environment reference.
+- Shared sentence segmentation now lives in `museai.core.text`, removing the
+  LLM seam's dependency on the audit FSM node without changing its behavior.
+
+**Done-check** — WSL `uv run pytest -q` → `912 passed`. Both shipped configs
+loaded successfully with a disposable `MUSEAI_API_KEY` supplied for their
+documented environment reference. `graphify update .` completed.
+
 ## v1.01 — done
 
 Foundation: repo skeleton, standing rules, strict config, dual logging, SSE
@@ -1837,3 +1861,24 @@ at save time rather than failing later in generation.
 - `uv run --active pytest -q` -> **906 passed**.
 - `config.yaml` loaded and the Quart app booted.
 - `git diff --check` -> clean.
+
+## 2026-08-20 — Task B draft→audit→revise loop fixes: done
+
+- The running-best draft now keeps the exact combined audit/critic failure set
+  that scored it. A strictly worse rewrite rolls back both prose and findings
+  before the next revision, preserving equal-count and improving rewrites while
+  ensuring the next critic pass compares with the prose actually revised.
+- Beat planning now carries a configured chapter-decomposition floor in its
+  prompt and makes a bounded semantic re-prompt before the existing intensity
+  correction. This follows the observed 1/3/1/1-beat four-chapter run without
+  turning an undersized response into a parked or failed plan.
+
+**Done-check**
+
+- WSL `uv run pytest -q tests/test_revise.py tests/test_critics.py
+  tests/test_planners.py` → **126 passed**.
+- WSL `uv run pytest -q` → **921 passed**.
+- Both shipped configurations loaded with the documented example-only
+  `MUSEAI_API_KEY` environment reference supplied as a disposable value.
+- `git diff --check` → clean.
+- `graphify update .` run.

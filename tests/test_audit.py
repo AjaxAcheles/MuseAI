@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import pytest
 
+from museai.core.text import sentence_spans, split_sentences
 import museai.fsm.nodes.audit as audit_module
 from museai.fsm.nodes.audit import (
     CRITIC_SOURCE,
@@ -24,8 +25,6 @@ from museai.fsm.nodes.audit import (
     phrase_echoes,
     passive_voice_density,
     split_paragraphs,
-    split_sentences,
-    sentence_spans,
     verbatim_phrase_matches,
     _emotion_pattern,
 )
@@ -79,6 +78,18 @@ class TestSentenceSplitting:
             '"Go," she said.',
             "He went.",
         ]
+
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            ("No terminal punctuation", ["No terminal punctuation"]),
+            ("Wait!!! Really?? Yes.", ["Wait!!!", "Really??", "Yes."]),
+            ('Mara said." Then Nell left.', ["Mara said.", "Then Nell left."]),
+            ("U.S.A.", ["U.S.A."]),
+        ],
+    )
+    def test_sentence_edge_cases(self, text, expected):
+        assert split_sentences(text) == expected
 
 
 class TestPassiveDetection:

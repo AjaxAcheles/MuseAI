@@ -51,6 +51,12 @@ class FailureObject(BaseModel):
     whole_draft: bool = False
 
 
+def failure_signature(failure: FailureObject) -> str:
+    """Return a stable identity for one finding at one place in the prose."""
+    normalized_text = " ".join(failure.offending_text.split()).casefold()
+    return f"{failure.error_code}:{normalized_text}"
+
+
 def accumulate_or_reset(
     current: List[FailureObject], incoming: List[FailureObject]
 ) -> List[FailureObject]:
@@ -76,12 +82,23 @@ class OrchestratorState(TypedDict):
     retry_count: int
     best_seen_draft: str | None
     best_seen_failure_count: int | None
+    # The precise finding set that scored ``best_seen_draft``. A later rewrite
+    # can regress even when the running minimum preserves the earlier prose;
+    # revise must restore both together so it never tries to locate findings in
+    # a different draft. The 2026-08-20 six-beat run otherwise compounded 6
+    # failures into 7, then 5 into 10 across consecutive revisions.
+    best_seen_failures: list[FailureObject] | None
     # The total failure count the last `revise` was handed, for this beat. Only
     # `revise` writes it, which is the point: the `retry_critic` edge routes
     # back into `critics` with no revise in between, and a baseline that moved
     # on every critic pass would read that re-score of unchanged prose as a
     # regression. None until a revise has run.
     pre_revise_failure_count: int | None
+    # The identities of the findings handed to that same revise. A count alone
+    # cannot distinguish a stalled rewrite from ordinary iteration: the
+    # 2026-08-20 first-beat park replaced its character finding with a new
+    # thread finding and was incorrectly scored as no progress.
+    pre_revise_failure_signatures: list[str] | None
     # Whether the most recent critics cycle beat `pre_revise_failure_count` —
     # i.e. whether the last revise actually helped. `best_seen_failure_count`
     # cannot answer this: it is a running minimum, already updated to include
@@ -140,7 +157,9 @@ def make_initial_state(
         "retry_count": 0,
         "best_seen_draft": None,
         "best_seen_failure_count": None,
+        "best_seen_failures": None,
         "pre_revise_failure_count": None,
+        "pre_revise_failure_signatures": None,
         "last_cycle_improved": True,
         "critic_parse_failure_streak": 0,
         "critic_evidence": None,

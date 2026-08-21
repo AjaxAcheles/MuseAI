@@ -25,6 +25,7 @@ from difflib import SequenceMatcher
 
 from museai.core.logging_setup import log_node_event
 from museai.core.stream_bus import bus
+from museai.core.text import sentence_spans, split_sentences
 from museai.fsm.nodes.deps import get_node_config
 from museai.fsm.state import FailureObject, OrchestratorState
 
@@ -34,12 +35,6 @@ OVERLAP_ERROR_CODE = "PARAGRAPH_OVERLAP"
 EMOTION_ERROR_CODE = "EMOTION_TELL"
 TIC_ERROR_CODE = "STYLE_TIC"
 POV_ERROR_CODE = "POINT_OF_VIEW_INTRUSION"
-
-# Sentence split on terminal punctuation followed by whitespace. Abbreviations
-# ("Dr. Vance") over-split, which costs at most one extra sentence in the
-# denominator — it never invents a passive, so it can only make the check more
-# forgiving, which is the right way for a heuristic gate to be wrong.
-_SENTENCE_SPLIT = re.compile(r"(?<=[.!?])[\"')\]”’]*\s+")
 
 # A passive clause in English is an inflection of "to be" (or the colloquial
 # "get" passive) followed by a past participle, optionally with an adverb
@@ -97,31 +92,6 @@ def _is_participle(word: str) -> bool:
     # "need", "seed", "speed" are nouns, not participles; -ed on a stem of at
     # least four characters is the reliable shape.
     return lowered.endswith("ed") and len(lowered) >= 4
-
-
-def sentence_spans(text: str) -> list[tuple[int, int]]:
-    """Return ``(start, end)`` offsets of the non-empty split sentences."""
-    spans: list[tuple[int, int]] = []
-    start = 0
-    for boundary in _SENTENCE_SPLIT.finditer(text):
-        segment = text[start : boundary.start()]
-        left = len(segment) - len(segment.lstrip())
-        right = len(segment.rstrip())
-        if left < right:
-            spans.append((start + left, start + right))
-        start = boundary.end()
-
-    segment = text[start:]
-    left = len(segment) - len(segment.lstrip())
-    right = len(segment.rstrip())
-    if left < right:
-        spans.append((start + left, start + right))
-    return spans
-
-
-def split_sentences(text: str) -> list[str]:
-    """Split prose into non-empty sentences."""
-    return [text[start:end] for start, end in sentence_spans(text)]
 
 
 def is_passive(sentence: str) -> bool:

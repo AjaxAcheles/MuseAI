@@ -20,7 +20,12 @@ from museai.fsm.nodes.revise import (
     replacement_rejection,
     revise_prose,
 )
-from museai.fsm.state import FSM_Pointer, FailureObject, make_initial_state
+from museai.fsm.state import (
+    FSM_Pointer,
+    FailureObject,
+    failure_signature,
+    make_initial_state,
+)
 
 DRAFT = (
     "The lamp turned through the fog. "
@@ -81,7 +86,7 @@ def failure(
     )
 
 
-def state_with(failures, draft: str = DRAFT, retry_count: int = 0):
+def state_with(failures, draft: str = DRAFT, retry_count: int = 0, **overrides):
     return make_initial_state(
         "test-project",
         FSM_Pointer(arc_id="arc-1", chapter_id="arc-1-c01", beat_index=0),
@@ -89,6 +94,7 @@ def state_with(failures, draft: str = DRAFT, retry_count: int = 0):
         current_draft_text=draft,
         critic_failures=failures,
         retry_count=retry_count,
+        **overrides,
     )
 
 
@@ -380,6 +386,77 @@ class TestBudget:
 
 
 class TestStateDelta:
+    async def test_a_regressing_cycle_revises_the_best_seen_draft_and_findings(
+        self, patched_llm
+    ):
+        """A worse rewrite must not become the next rewrite's starting point."""
+        best_draft = "The earlier, better draft is still on the page."
+        worse_draft = "The later draft regressed in six different ways."
+        best_failures = [failure(f"best finding {number}") for number in range(3)]
+        worse_failures = [failure(f"worse finding {number}") for number in range(6)]
+        calls = patched_llm("A recovered rewrite.")
+
+        delta = await revise_prose(
+            state_with(
+                worse_failures,
+                draft=worse_draft,
+                best_seen_draft=best_draft,
+                best_seen_failures=best_failures,
+                best_seen_failure_count=3,
+            )
+        )
+
+        body = calls[0][1]["content"]
+        assert best_draft in body
+        assert worse_draft not in body
+        assert "best finding 0" in body
+        assert "worse finding 0" not in body
+        # The next critics pass compares the recovered rewrite with the score of
+        # the prose it really revised, rather than the discarded regression.
+        assert delta["pre_revise_failure_count"] == 3
+        assert delta["pre_revise_failure_signatures"] == [
+            failure_signature(finding) for finding in best_failures
+        ]
+
+    @pytest.mark.parametrize(
+        ("best_count", "current_count"),
+        [(5, 5), (5, 3)],
+        ids=("equal-count", "improving-count"),
+    )
+    async def test_equal_or_improving_cycles_do_not_roll_back(
+        self, patched_llm, best_count, current_count
+    ):
+        current_draft = "The current draft must remain the reviser's input."
+        calls = patched_llm("A continued rewrite.")
+
+        await revise_prose(
+            state_with(
+                [failure(f"current finding {number}") for number in range(current_count)],
+                draft=current_draft,
+                best_seen_draft="An older draft should not replace this one.",
+                best_seen_failures=[failure(f"best finding {number}") for number in range(best_count)],
+                best_seen_failure_count=best_count,
+            )
+        )
+
+        assert current_draft in calls[0][1]["content"]
+
+    async def test_missing_best_seen_failures_never_rolls_back(self, patched_llm):
+        current_draft = "The first cycle has no paired best findings yet."
+        calls = patched_llm("A first rewrite.")
+
+        await revise_prose(
+            state_with(
+                [failure("current finding")],
+                draft=current_draft,
+                best_seen_draft="An incomplete best-seen record.",
+                best_seen_failure_count=0,
+                best_seen_failures=None,
+            )
+        )
+
+        assert current_draft in calls[0][1]["content"]
+
     async def test_a_locatable_span_local_failure_uses_span_mode(self, patched_llm):
         patched_llm(REPLACEMENT)
         queue = bus.subscribe()

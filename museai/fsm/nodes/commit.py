@@ -412,9 +412,11 @@ async def commit_transaction(state: OrchestratorState) -> dict:
         "critic_failures": [],
         "best_seen_draft": None,
         "best_seen_failure_count": None,
+        "best_seen_failures": None,
         # The next beat has no revise history: a baseline carried over from this
-        # one would make its first retry compare against the wrong number.
+        # one would make its first retry compare against the wrong findings.
         "pre_revise_failure_count": None,
+        "pre_revise_failure_signatures": None,
         "last_cycle_improved": True,
         "current_draft_text": "",
         "streaming_buffer": "",

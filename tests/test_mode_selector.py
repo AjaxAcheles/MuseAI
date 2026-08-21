@@ -98,6 +98,16 @@ class TestNoProgress:
         state = state_with([failure()], retry_count=1, last_cycle_improved=True)
         assert mode_selector(state) == REVISE
 
+    def test_a_replaced_finding_at_the_same_count_still_revises(self):
+        """critics marks the 2026-08-20 character-to-thread replacement as
+        progress, leaving the existing retry budget available to the new issue."""
+        state = state_with(
+            [failure("CONTRADICTS_THREAD")],
+            retry_count=1,
+            last_cycle_improved=True,
+        )
+        assert mode_selector(state) == REVISE
+
     def test_the_first_cycle_is_never_no_progress(self):
         # retry_count == 0: no prior cycle to have failed to improve on, so
         # `last_cycle_improved` (its default, True) cannot route to REVIEW here.

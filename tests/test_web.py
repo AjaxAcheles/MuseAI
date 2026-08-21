@@ -171,6 +171,64 @@ async def test_settings_save_rejects_unknown_key(config_factory, tmp_path):
         await _close_started_app(test_app)
 
 
+async def test_settings_save_preserves_comments_and_removes_stale_keys(
+    config_factory, tmp_path
+):
+    import yaml
+
+    config = config_factory()
+    config = config.model_copy(
+        update={"generation": config.generation.model_copy(update={"emotion_words": ["fear", "anger"]})}
+    )
+    config_path = tmp_path / "config.yaml"
+    on_disk = yaml.safe_dump(config.model_dump(), sort_keys=False)
+    on_disk = "# This operational note must survive Save.\n" + on_disk
+    on_disk = on_disk.replace(
+        "word_count_target: 1500",
+        "word_count_target: 1500 # This changed-value comment must survive Save.",
+    )
+    on_disk = on_disk.replace(
+        "  emotion_words:\n  - fear\n  - anger",
+        "  emotion_words:\n  - fear\n  # A category heading inside the list.\n  - anger",
+    )
+    on_disk = on_disk.replace(
+        "  retry_backoff_seconds:\n  - 5.0\n  - 15.0",
+        "  retry_backoff_seconds: [5.0, 15.0]",
+    )
+    config_path.write_text(on_disk + "legacy_setting: remove me\n", encoding="utf-8")
+
+    app, test_app = await _started_app(config, tmp_path)
+    payload = config.model_dump()
+    payload["generation"]["word_count_target"] = 2400
+    try:
+        response = await app.test_client().post("/settings/save", json=payload)
+        assert response.status_code == 200
+
+        persisted = config_path.read_text(encoding="utf-8")
+        assert "# This operational note must survive Save." in persisted
+        assert "# This changed-value comment must survive Save." in persisted
+        assert "# A category heading inside the list." in persisted
+        assert "retry_backoff_seconds: [5.0, 15.0]" in persisted
+        assert "max_output_tokens: null" in persisted
+        assert "legacy_setting" not in persisted
+        assert load_config(config_path).generation.word_count_target == 2400
+    finally:
+        await _close_started_app(test_app)
+
+
+async def test_settings_save_creates_loadable_config_when_missing(config_factory, tmp_path):
+    config = config_factory()
+    config_path = tmp_path / "config.yaml"
+    app, test_app = await _started_app(config, tmp_path)
+    try:
+        assert not config_path.exists()
+        response = await app.test_client().post("/settings/save", json=config.model_dump())
+        assert response.status_code == 200
+        assert load_config(config_path) == config
+    finally:
+        await _close_started_app(test_app)
+
+
 async def test_settings_renders_agent_reasoning_effort_controls(config_factory, tmp_path):
     app, test_app = await _started_app(config_factory(), tmp_path)
     try:
@@ -193,6 +251,52 @@ async def test_settings_save_persists_agent_reasoning_effort(config_factory, tmp
         response = await app.test_client().post("/settings/save", json=payload)
         assert response.status_code == 200
         assert load_config(config_path).agents["critic"].reasoning_effort == "none"
+    finally:
+        await _close_started_app(test_app)
+
+
+async def test_settings_save_keeps_agent_overrides_sparse(config_factory, tmp_path):
+    import yaml
+
+    config = config_factory()
+    config_path = tmp_path / "config.yaml"
+    on_disk = config.model_dump()
+    on_disk["agents"] = {"chapter_planner": {"temperature": 0.4}}
+    config_path.write_text(yaml.safe_dump(on_disk, sort_keys=False), encoding="utf-8")
+
+    app, test_app = await _started_app(config, tmp_path)
+    payload = config.model_dump()
+    payload["agents"] = {"chapter_planner": {"temperature": 0.4}}
+    try:
+        response = await app.test_client().post("/settings/save", json=payload)
+        assert response.status_code == 200
+
+        persisted = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert persisted["agents"]["chapter_planner"] == {"temperature": 0.4}
+        assert "base_url" not in persisted["agents"]["chapter_planner"]
+    finally:
+        await _close_started_app(test_app)
+
+
+async def test_settings_save_clears_agent_override(config_factory, tmp_path):
+    import yaml
+
+    config = config_factory(agents={"critic": {"reasoning_effort": "none"}})
+    config_path = tmp_path / "config.yaml"
+    on_disk = config.model_dump()
+    on_disk["agents"] = {"critic": {"reasoning_effort": "none"}}
+    config_path.write_text(yaml.safe_dump(on_disk, sort_keys=False), encoding="utf-8")
+
+    app, test_app = await _started_app(config, tmp_path)
+    payload = config.model_dump()
+    payload["agents"] = {"critic": {"reasoning_effort": None}}
+    try:
+        response = await app.test_client().post("/settings/save", json=payload)
+        assert response.status_code == 200
+
+        persisted = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        assert "reasoning_effort" not in persisted["agents"]["critic"]
+        assert load_config(config_path).agents["critic"].reasoning_effort is None
     finally:
         await _close_started_app(test_app)
 

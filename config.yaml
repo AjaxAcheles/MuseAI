@@ -3,12 +3,28 @@ project_id: the-borrowed-ladder
 endpoint:
   base_url: http://127.0.0.1:11434/v1
   api_key: ollama
-  model_name: hf.co/empero-ai/Qwythos-9B-Claude-Mythos-5-1M-GGUF:Q4_K_M
+  # Chosen 2026-08-20 by A/B against hf.co/empero-ai/Qwythos-9B-Claude-Mythos-5-1M
+  # -GGUF:Q4_K_M on the seed's own comprehension trap: who borrowed the ladder.
+  # Qwythos inverted it on the first live beat — it drafted Ida as the one who
+  # "borrowed herself into Nell's gutter" — which the continuity critic caught,
+  # costing a full revise cycle on beat one. Across three samples at the
+  # drafter's own temperature, Qwythos never anchored ownership either way;
+  # this model stated it correctly in all three. It is also the faster of the
+  # two (23.6 s vs 31.7 s on a fixed probe) and the only other 9B here that
+  # returns valid planner JSON. It does run long — one sample reached 1,274
+  # words against a 400-600 ask — so watch draft length in the run log.
+  model_name: qwen3.5:9b
   tokenizer_family: char_heuristic
   request_timeout: 60
   stream_read_timeout: 300
   # Fallback only: every one of the five agent roles overrides this below.
   temperature: 0.8
+  # Also a fallback, but it must be set here as well as on the five roles. The
+  # Settings page's "Test connection" probe calls this bare endpoint directly,
+  # not any agent, with an 8-token budget. Left unset on 2026-08-20, this model
+  # spent all eight tokens on hidden reasoning and returned an empty string, so
+  # the probe reported a broken endpoint while generation itself was fine.
+  reasoning_effort: none
   # Leave null. With context_window set, max_tokens is sent as the window's
   # actual remainder after the prompt, so long prose is never capped early.
   max_output_tokens: null
@@ -19,15 +35,19 @@ endpoint:
   # The configured 9B GGUF is architecturally a long-context model, but Ollama
   # serves its own small default (a few thousand tokens) unless told otherwise, and it
   # discards the overflow from the LEFT — taking the system message with it.
-  # 16384 is sized for a 12 GB card: ~6.6 GB weights (Q4_K_M) plus KV cache
-  # still fits on the GPU, and spilling KV to system RAM would cost far more
-  # speed than the extra context is worth.
+  # 20000 is what this host's Ollama actually serves: measured 2026-08-20 by
+  # reading `context_length` from /api/ps for every installed model, all of
+  # which reported 20000. It was declared as 16384 before that check, which
+  # silently wasted 3,616 tokens of window on every prompt — the trim reserved
+  # room the server was never going to withhold. Sized for a 12 GB card: ~6.6 GB
+  # weights (Q4_K_M) plus KV cache still fits on the GPU, and spilling KV to
+  # system RAM would cost far more speed than the extra context is worth.
   #
   # This value must match what the server actually serves. Set it there too:
-  #   setx OLLAMA_CONTEXT_LENGTH 16384
+  #   setx OLLAMA_CONTEXT_LENGTH 20000
   # then fully quit and relaunch Ollama (setx only reaches processes started
   # after it runs), and CONFIRM with `ollama ps` that the CONTEXT column reads
-  # 16384 and PROCESSOR still says 100% GPU.
+  # 20000 and PROCESSOR still says 100% GPU.
   #
   # Do not treat extra_body as a fallback: verified against Ollama 0.32.1, the
   # /v1 compatibility endpoint discards the `options` block silently, so num_ctx
@@ -37,10 +57,10 @@ endpoint:
   # while the server quietly served 4096 against this declared 16384, which
   # starved every role of output room. `generation.served_window_mismatch_fraction`
   # now catches that gap and names both numbers.
-  context_window: 16384
+  context_window: 20000
   extra_body:
     options:
-      num_ctx: 16384
+      num_ctx: 20000
   # Tokens kept free for generation. Prompts are trimmed to leave at least this
   # much room. Raised from the 1024 default because a prose beat needs more
   # headroom than a JSON verdict; per-agent values are set under `agents:`.
@@ -48,17 +68,19 @@ endpoint:
 
 generation:
   word_count_target: null
-  narrative_person: null
+  narrative_person: third
   revision_retry_cap: 4
   # Must stay above tool_call_cap, or one tool can eat the whole agent loop and
   # leave no iterations to answer with.
   max_agent_iterations: 8
   recent_prose_beats: 4
   # Soft ceiling on the assembled drafting context. Must leave room under
-  # context_window for output: 12000 + the drafter's 3072 reservation still
-  # fits inside 16384 with slack for tokenizer drift (char_heuristic is an
-  # estimate, not an exact count).
-  context_token_budget: 12000
+  # context_window for output: 14000 + the reviser's 4096 reservation (the
+  # largest of the five roles) still fits inside 20000 with slack for tokenizer
+  # drift (char_heuristic is an estimate, not an exact count). Raised with
+  # context_window on 2026-08-20; the extra 2,000 tokens go to recent committed
+  # prose, which is what holds the seam between beats.
+  context_token_budget: 14000
   # Raised from 0.25 on 2026-08-19. In the 2026-08-18 full run, 13 of 18 audits
   # breached 0.25 — against this model's prose it was not a defect detector, it
   # was the default state, and it generated parks on marginal readings (one beat
@@ -341,6 +363,12 @@ generation:
   - a mix of emotions
   - wave of emotion
 
+  # A four-chapter run decomposed into 1/3/1/1 beats, leaving three chapters
+  # with no meaningful internal progression. Ask once for a real decomposition
+  # before accepting the planner's answer; the retry remains bounded.
+  min_beats_per_chapter: 3
+  planner_decomposition_retries: 1
+
   # Emotional arc of a planned chapter. A chapter shorter than
   # intensity_min_beats has no arc to shape and is never flagged as flat.
   # flat_fraction was 0.8 — permissive enough that a chapter could be 4/5
@@ -502,7 +530,7 @@ agents:
     # output_reservation drops from 14336 to 12288 tokens — the room
     # `_fits_window` (critics.py) allows a parse-retry prompt to occupy before
     # dropping carried tool turns. Coincidentally close to but independent of
-    # generation.context_token_budget (12000, drafting/revise only — the critic
+    # generation.context_token_budget (14000, drafting/revise only — the critic
     # doesn't read that key). 12288 still comfortably covers observed critic
     # prompts (~6.4k tokens), but a beat with heavier tool use than any seen so
     # far could now hit `retry_context_dropped` where it never has.

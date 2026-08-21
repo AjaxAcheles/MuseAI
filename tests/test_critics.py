@@ -18,7 +18,12 @@ from museai.core.stream_bus import bus
 from museai.fsm.nodes import critics as critics_module
 from museai.fsm.nodes.critics import adversarial_critics, critic_messages
 from museai.fsm.nodes.deps import set_node_config
-from museai.fsm.state import FSM_Pointer, FailureObject, make_initial_state
+from museai.fsm.state import (
+    FSM_Pointer,
+    FailureObject,
+    failure_signature,
+    make_initial_state,
+)
 from museai.llm.structured import StructuredOutputError
 
 DRAFT = "The sun stood at noon. Mara lied about the letter."
@@ -105,13 +110,31 @@ def programmatic_failure() -> FailureObject:
     )
 
 
+def critic_response(*findings: FailureObject) -> str:
+    """Render only the fields the continuity critic is allowed to return."""
+    return json.dumps(
+        [
+            {
+                "error_code": finding.error_code,
+                "offending_text": finding.offending_text,
+                "suggested_fix": finding.suggested_fix,
+                "critic_source": finding.critic_source,
+            }
+            for finding in findings
+        ]
+    )
+
+
 def state_with(**overrides):
+    defaults = {
+        "active_context_package": PACKAGE,
+        "current_draft_text": DRAFT,
+    }
+    defaults.update(overrides)
     return make_initial_state(
         "test-project",
         FSM_Pointer(arc_id="arc-1", chapter_id="arc-1-c01", beat_index=0),
-        active_context_package=PACKAGE,
-        current_draft_text=DRAFT,
-        **overrides,
+        **defaults,
     )
 
 
@@ -462,6 +485,7 @@ class TestBestSeen:
 
         assert delta["best_seen_draft"] == DRAFT
         assert delta["best_seen_failure_count"] == 2
+        assert len(delta["best_seen_failures"]) == delta["best_seen_failure_count"]
 
     async def test_a_lower_count_replaces_the_best_seen_draft(self, patched_loop):
         patched_loop(ONE_FAILURE_RESPONSE)
@@ -488,6 +512,162 @@ class TestBestSeen:
         delta = await adversarial_critics(state)
 
         assert delta["best_seen_draft"] == "an equal draft"
+
+
+class TestRevisionProgress:
+    async def test_a_replaced_finding_is_progress_at_the_same_count(
+        self, patched_loop, monkeypatch
+    ):
+        """The 2026-08-20 first-beat park fixed the character finding before
+        the critic found a new thread finding; that is ordinary iteration."""
+        character = FailureObject(
+            error_code="CONTRADICTS_CHARACTER",
+            offending_text="Mara lied about the letter.",
+            suggested_fix="Keep Mara from lying.",
+        )
+        thread = FailureObject(
+            error_code="CONTRADICTS_THREAD",
+            offending_text="The sun stood at noon.",
+            suggested_fix="Advance the open thread.",
+        )
+        events: list[dict] = []
+        original = critics_module.log_node_event
+
+        def capture(node_name, **fields):
+            if fields.get("event") == "critiqued":
+                events.append(fields)
+            original(node_name, **fields)
+
+        monkeypatch.setattr(critics_module, "log_node_event", capture)
+        patched_loop(critic_response(thread))
+
+        delta = await adversarial_critics(
+            state_with(
+                pre_revise_failure_count=1,
+                pre_revise_failure_signatures=[failure_signature(character)],
+            )
+        )
+
+        assert delta["last_cycle_improved"] is True
+        assert events[-1]["progressed_by_signature"] is True
+
+    async def test_a_returning_finding_is_not_progress(self, patched_loop):
+        finding = FailureObject(
+            error_code="CONTRADICTS_CHARACTER",
+            offending_text="Mara lied about the letter.",
+            suggested_fix="Keep Mara from lying.",
+        )
+        patched_loop(critic_response(finding))
+
+        delta = await adversarial_critics(
+            state_with(
+                pre_revise_failure_count=1,
+                pre_revise_failure_signatures=[failure_signature(finding)],
+            )
+        )
+
+        assert delta["last_cycle_improved"] is False
+
+    async def test_whitespace_reflow_does_not_turn_a_returning_finding_new(
+        self, patched_loop
+    ):
+        before = FailureObject(
+            error_code="CONTRADICTS_CHARACTER",
+            offending_text="Mara lied about the letter.",
+            suggested_fix="Keep Mara from lying.",
+        )
+        reflowed = FailureObject(
+            error_code="CONTRADICTS_CHARACTER",
+            offending_text="Mara  lied\nabout the letter.",
+            suggested_fix="Keep Mara from lying.",
+        )
+        patched_loop(critic_response(reflowed))
+
+        delta = await adversarial_critics(
+            state_with(
+                current_draft_text=reflowed.offending_text,
+                pre_revise_failure_count=1,
+                pre_revise_failure_signatures=[failure_signature(before)],
+            )
+        )
+
+        assert delta["last_cycle_improved"] is False
+
+    async def test_a_partial_fix_at_the_same_count_is_not_progress(
+        self, patched_loop
+    ):
+        character = FailureObject(
+            error_code="CONTRADICTS_CHARACTER",
+            offending_text="Mara lied about the letter.",
+            suggested_fix="Keep Mara from lying.",
+        )
+        prior_prose = FailureObject(
+            error_code="CONTRADICTS_PRIOR_PROSE",
+            offending_text="The sun stood at noon.",
+            suggested_fix="Match the earlier midnight.",
+        )
+        replacement = FailureObject(
+            error_code="CONTRADICTS_THREAD",
+            offending_text="The sun stood at noon.",
+            suggested_fix="Advance the open thread.",
+        )
+        patched_loop(critic_response(character, replacement))
+
+        delta = await adversarial_critics(
+            state_with(
+                pre_revise_failure_count=2,
+                pre_revise_failure_signatures=[
+                    failure_signature(character),
+                    failure_signature(prior_prose),
+                ],
+            )
+        )
+
+        assert delta["last_cycle_improved"] is False
+
+    async def test_a_count_drop_remains_progress_when_signatures_return(
+        self, patched_loop
+    ):
+        character = FailureObject(
+            error_code="CONTRADICTS_CHARACTER",
+            offending_text="Mara lied about the letter.",
+            suggested_fix="Keep Mara from lying.",
+        )
+        prior_prose = FailureObject(
+            error_code="CONTRADICTS_PRIOR_PROSE",
+            offending_text="The sun stood at noon.",
+            suggested_fix="Match the earlier midnight.",
+        )
+        # The list preserves all three handed findings, including a duplicate;
+        # both remaining identities still intersect it, but 3 -> 2 wins.
+        patched_loop(critic_response(character, prior_prose))
+
+        delta = await adversarial_critics(
+            state_with(
+                pre_revise_failure_count=3,
+                pre_revise_failure_signatures=[
+                    failure_signature(character),
+                    failure_signature(character),
+                    failure_signature(prior_prose),
+                ],
+            )
+        )
+
+        assert delta["last_cycle_improved"] is True
+
+    async def test_missing_pre_revise_signatures_does_not_imply_a_clear(
+        self, patched_loop
+    ):
+        patched_loop(ONE_FAILURE_RESPONSE)
+
+        delta = await adversarial_critics(
+            state_with(
+                pre_revise_failure_count=None,
+                pre_revise_failure_signatures=None,
+            )
+        )
+
+        assert delta["last_cycle_improved"] is True
 
 
 class TestEvents:

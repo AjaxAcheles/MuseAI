@@ -37,7 +37,7 @@ from museai.fsm.nodes.context_budget import window_budget
 from museai.fsm.nodes.deps import get_node_config
 from museai.fsm.nodes.audit import longest_shared_verbatim_word_run
 from museai.fsm.nodes.revise import locate
-from museai.fsm.state import FailureObject, OrchestratorState
+from museai.fsm.state import FailureObject, OrchestratorState, failure_signature
 from museai.fsm.tools.loop import AgentLoopError, run_agent_loop
 from museai.fsm.tools.registry import tool_impls_for, tool_specs_for
 from museai.llm.client import LLMCallError
@@ -584,8 +584,11 @@ async def adversarial_critics(state: OrchestratorState) -> dict:
     )
 
     # `audit`'s programmatic failures are already in state; the draft's true
-    # score is both sets together.
-    total = len(state["critic_failures"]) + len(failures)
+    # score is both sets together. Keep this exact list with the running-best
+    # prose: revision must never roll text back without also rolling back to the
+    # findings that actually describe it.
+    combined = [*state["critic_failures"], *failures]
+    total = len(combined)
     best_count = state["best_seen_failure_count"]
     improved = best_count is None or total < best_count
 
@@ -596,13 +599,25 @@ async def adversarial_critics(state: OrchestratorState) -> dict:
     # in between — would read the second reading as a regression and send a beat
     # to review with its revision budget untouched. `pre_revise_failure_count`
     # only moves when revise runs, so a re-score compares against the same
-    # baseline the first reading did.
+    # baseline the first reading did. The paired signatures catch ordinary
+    # iteration too: a rewrite that clears the finding it was handed has made
+    # progress even when the critic finds a different problem at the same count.
     pre_revise = state["pre_revise_failure_count"]
-    progressed = pre_revise is None or total < pre_revise
+    pre_revise_signatures = state["pre_revise_failure_signatures"]
+    current_signatures = {failure_signature(failure) for failure in combined}
+    progressed_by_signature = bool(pre_revise_signatures) and current_signatures.isdisjoint(
+        pre_revise_signatures
+    )
+    progressed = (
+        pre_revise is None
+        or total < pre_revise
+        or progressed_by_signature
+    )
 
     delta: dict = {
         "best_seen_draft": draft if improved else state["best_seen_draft"],
         "best_seen_failure_count": total if improved else best_count,
+        "best_seen_failures": combined if improved else state["best_seen_failures"],
         "last_cycle_improved": progressed,
         "critic_parse_failure_streak": streak,
         # Only an unreadable pass has a successor to hand this to: `retry_critic`
@@ -633,6 +648,7 @@ async def adversarial_critics(state: OrchestratorState) -> dict:
         best_seen_failure_count=delta["best_seen_failure_count"],
         improved=improved,
         pre_revise_failure_count=pre_revise,
+        progressed_by_signature=progressed_by_signature,
         progressed=progressed,
         summary=summary,
     )

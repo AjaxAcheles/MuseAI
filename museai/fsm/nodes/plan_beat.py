@@ -313,6 +313,19 @@ _INTENSITY_CORRECTION = (
     "array again."
 )
 
+# Sent when the planner has compressed a chapter into too few changes. The
+# retry preserves the chapter's work and obligations, but asks it to distribute
+# that work across actual dramatic units; a four-chapter run that returned 1/3/1/1
+# beats showed that a single beat is not a usable decomposition.
+_DECOMPOSITION_CORRECTION = (
+    "Your previous plan has {beats} beats, fewer than the configured minimum of "
+    "{minimum}. Break this chapter into more beats. Each beat must have its own "
+    "required_change and observable_event, while the chapter's obligations stay "
+    "fully covered and each remains assigned to at least one beat. A chapter "
+    "delivered as a single beat is not a decomposition. Return the full JSON "
+    "array again."
+)
+
 
 def _beat_arousal(item: dict) -> float:
     """A planned beat's target arousal, or 0.0 when it is missing or unreadable."""
@@ -556,6 +569,7 @@ async def plan_beat(state: OrchestratorState) -> dict:
                     characters=characters,
                     recent_prose=recent_prose,
                     research_mode=config.generation.research_mode,
+                    min_beats_per_chapter=config.generation.min_beats_per_chapter,
                 )
 
             # When the endpoint declares a context window, trim the prompt to
@@ -624,6 +638,53 @@ async def plan_beat(state: OrchestratorState) -> dict:
                 element_keys=("intent",),
                 item_validator=_validate_beat_item,
             )
+
+            # The arc check deliberately skips very short plans because they
+            # have no variation to judge. Decompose first, so the planner gets
+            # the chance to make an arc at all; after the bounded retry accepts
+            # whatever comes back, the intensity loop below retains its own
+            # independent, bounded correction.
+            for _ in range(config.generation.planner_decomposition_retries):
+                if len(planned) >= config.generation.min_beats_per_chapter:
+                    break
+                log_node_event(
+                    "plan_beat",
+                    level=logging.WARNING,
+                    event="decomposition_reprompt",
+                    chapter_id=chapter["id"],
+                    beats=len(planned),
+                )
+                await bus.publish(
+                    "planner_decomposition",
+                    {"chapter_id": chapter["id"], "beats": len(planned)},
+                )
+                messages = [
+                    *messages,
+                    {"role": "assistant", "content": json.dumps(planned, ensure_ascii=False)},
+                    {
+                        "role": "user",
+                        "content": _DECOMPOSITION_CORRECTION.format(
+                            beats=len(planned),
+                            minimum=config.generation.min_beats_per_chapter,
+                        ),
+                    },
+                ]
+                planned = await call_llm_for_json_array(
+                    config.endpoint_for("beat_planner"),
+                    messages,
+                    what="beats",
+                    agent="beat_planner",
+                    node="plan_beat",
+                    retries=config.generation.planner_parse_retries,
+                    tools=tool_specs_for("beat_planner"),
+                    tool_impls=tool_impls_for("beat_planner"),
+                    max_tool_iterations=config.generation.max_agent_iterations,
+                    on_tool_event=on_tool_call,
+                    tool_call_cap=config.generation.tool_call_cap,
+                    tool_timeout=config.generation.tool_timeout,
+                    element_keys=("intent",),
+                    item_validator=_validate_beat_item,
+                )
 
             # If the plan comes back with the emotional register pinned at
             # maximum, re-prompt once (bounded) for a varied arc, then accept
