@@ -78,6 +78,19 @@ _TRUNCATION_RETRY_MESSAGE = (
     "the output format, or [] if the draft is clean."
 )
 
+# The 2026-08-20 run changed the common truncation shape: with reasoning off,
+# five critics returned text and none returned an empty reply. Those were useful
+# multi-finding verdicts that simply ran past 4096 tokens, so claiming their
+# answer budget vanished into reasoning sends the next call after a false cause.
+# Keep this distinct from the empty-reply message above, which remains the
+# 2026-07-25 diagnosis; neither message offers [] because an unreadable verdict
+# must never be laundered into a clean pass.
+_TRUNCATION_WITH_TEXT_RETRY_MESSAGE = (
+    "Your previous verdict ran past the reply budget. Return only the most "
+    "important findings in a shorter fenced JSON array: report fewer findings "
+    "and keep each suggested_fix brief. Do not reuse the cut-off reply."
+)
+
 # The second truncation in a row. The message above is rebuilt from the same
 # two constants every time, so re-sending it would put a byte-identical request
 # on the wire — measured six times in a row on one live beat, ~62 s each, every
@@ -316,6 +329,7 @@ async def adversarial_critics(state: OrchestratorState) -> dict:
     last_truncated = False
     unlocatable_findings = False
     findings_dropped_by_code_cap = 0
+    lenient_used = False
 
     # Carries forward across parse retries so a bad reply doesn't discard the
     # tool results the previous attempt already paid for; run_agent_loop fills
@@ -457,12 +471,37 @@ async def adversarial_critics(state: OrchestratorState) -> dict:
             )
 
         try:
+            if last_truncated and last_text.strip():
+                try:
+                    parsed_failures = parse_failure_objects(last_text, lenient=True)
+                except StructuredOutputError:
+                    parsed_failures = []
+                else:
+                    failures = _locatable_findings(draft, parsed_failures, beat_id)
+                    failures = _sanitize_borrowed_fixes(
+                        failures,
+                        package["recent_prose"],
+                        beat_id,
+                        generation.critic_fix_max_borrowed_words,
+                    )
+                    failures, findings_dropped_by_code_cap = _cap_findings_per_code(
+                        failures, generation.critic_max_findings_per_code
+                    )
+                    if failures:
+                        lenient_used = True
+                        log_node_event(
+                            "critics",
+                            event="truncated_verdict_salvaged",
+                            beat_id=beat_id,
+                            attempt=attempt + 1,
+                            findings=len(failures),
+                        )
+                        unreadable = False
+                        break
             if last_truncated:
                 raise StructuredOutputError(
                     "critic reply was cut off (finish_reason='length'): "
-                    + response_truncation_remedy(
-                        response, config.endpoint_for("critic")
-                    )
+                    + response_truncation_remedy(response, endpoint, role="critic")
                 )
             parsed_failures = parse_failure_objects(response.text)
             failures = _locatable_findings(draft, parsed_failures, beat_id)
@@ -509,11 +548,13 @@ async def adversarial_critics(state: OrchestratorState) -> dict:
                 # first one byte for byte, so the endpoint was asked a question
                 # it had already answered — at full price, and always with the
                 # same non-answer.
-                ask = (
-                    _TRUNCATION_RETRY_MESSAGE
-                    if truncation_asks == 0
-                    else _TRUNCATION_FINAL_MESSAGE
-                )
+                ask = _TRUNCATION_FINAL_MESSAGE
+                if truncation_asks == 0:
+                    ask = (
+                        _TRUNCATION_WITH_TEXT_RETRY_MESSAGE
+                        if last_text.strip()
+                        else _TRUNCATION_RETRY_MESSAGE
+                    )
                 truncation_asks += 1
                 conversation = [*messages, {"role": "user", "content": ask}]
                 retry_bare = True
@@ -541,7 +582,6 @@ async def adversarial_critics(state: OrchestratorState) -> dict:
                         budget=window_budget(endpoint),
                     )
 
-    lenient_used = False
     if not unreadable:
         streak = 0
     else:

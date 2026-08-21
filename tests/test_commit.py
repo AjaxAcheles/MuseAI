@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import threading
 
 import pytest
 
@@ -252,3 +253,33 @@ async def test_word_count_event_uses_committed_beats_only(config_factory):
         "word_count": 14,
         "target": 100,
     }
+
+
+async def test_commit_persists_the_committed_prose_and_word_count(config_factory):
+    config = _config(config_factory)
+    _seed(config)
+
+    await commit_transaction(_state("The lamp turns twice at dawn."))
+
+    conn = db.connect_db(config.db_path)
+    beat = conn.execute("SELECT prose, word_count FROM Beats WHERE id=?", (BEAT_ID,)).fetchone()
+    conn.close()
+    assert dict(beat) == {"prose": "The lamp turns twice at dawn.", "word_count": 6}
+
+
+async def test_commit_database_work_runs_in_a_worker_thread(config_factory, monkeypatch):
+    config = _config(config_factory)
+    _seed(config)
+    observed = []
+    original_connect_db = commit_module.connect_db
+
+    def record_connection_thread(*args, **kwargs):
+        observed.append(threading.current_thread())
+        return original_connect_db(*args, **kwargs)
+
+    monkeypatch.setattr(commit_module, "connect_db", record_connection_thread)
+
+    await commit_transaction(_state())
+
+    assert observed
+    assert all(thread is not threading.main_thread() for thread in observed)

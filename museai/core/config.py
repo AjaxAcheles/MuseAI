@@ -563,6 +563,11 @@ class RevisionConfig(BaseModel):
     # around the span means the model echoed its context; the splice is rejected
     # and the beat falls back to a full rewrite.
     echo_min_words: int = 8
+    # One local correction lets a replacement that echoed its surrounding prose
+    # name the rejected run and try again before the more destructive full-beat
+    # rewrite. Seven of seven span rejections in the 2026-08-20 run were that
+    # exact echo guard, so the retry is bounded here beside the splice bounds.
+    span_rejection_retries: int = 1
 
     @field_validator("fuzzy_threshold")
     @classmethod
@@ -578,6 +583,13 @@ class RevisionConfig(BaseModel):
     def _positive(cls, value: int, info: ValidationInfo) -> int:
         if value < 1:
             raise ValueError(f"{info.field_name} must be >= 1, got {value}")
+        return value
+
+    @field_validator("span_rejection_retries")
+    @classmethod
+    def _non_negative_retries(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError(f"span_rejection_retries must be >= 0, got {value}")
         return value
 
     @field_validator("span_growth_limit")

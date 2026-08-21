@@ -24,6 +24,7 @@ dropped: a revision written without them fixes one problem and creates another.
 
 from __future__ import annotations
 
+import asyncio
 from difflib import SequenceMatcher
 
 from museai.core.logging_setup import get_fsm_logger, log_node_event
@@ -41,6 +42,18 @@ from museai.llm.structured import (
 )
 
 PHASE = "Drafting"
+
+# The splice guard caught seven rejected replacements in the 2026-08-20 run,
+# every one because the model pasted a phrase from the prose around its target.
+# The first answer still contains the requested local fix, so one bounded
+# correction is cheaper and less destructive than a complete beat rewrite. The
+# quoted guard reason stays verbatim: vague advice led the model to repeat the
+# same surrounding words on the next paid call.
+_SPAN_REJECTION_CORRECTION = (
+    "The replacement repeated prose from the surrounding beat: {reason}\n\n"
+    "Return a replacement for only the requested passage. Do not reuse the "
+    "surrounding wording quoted above."
+)
 
 
 def _word_starts(text: str) -> list[int]:
@@ -83,7 +96,12 @@ def fuzzy_find(
         if len(window) < min_span_chars:
             break
         matcher.set_seq1(window)
-        # quick_ratio is a cheap upper bound; skip windows that cannot win.
+        # quick_ratio() is a cheap upper bound on ratio(), so a window it
+        # rejects could never have won. real_quick_ratio() is not worth adding
+        # ahead of it here: it compares lengths only, and every window is cut as
+        # draft[start:start + len(needle)], so the lengths always match and it
+        # rejects nothing. Measured on the live 1,766-word beat it cost 0.04s at
+        # one failure and 0.11s at eight, all overhead.
         if matcher.quick_ratio() < best_ratio:
             continue
         ratio = matcher.ratio()
@@ -105,6 +123,13 @@ def locate(draft: str, offending_text: str) -> tuple[int, int] | None:
         return index, index + len(needle)
 
     return fuzzy_find(draft, needle)
+
+
+def _locate_all(
+    draft: str, failures: list[FailureObject]
+) -> list[tuple[FailureObject, tuple[int, int] | None]]:
+    """Locate every finding without holding the async server's event loop."""
+    return [(failure, locate(draft, failure.offending_text)) for failure in failures]
 
 
 def _overlapping(spans: list[tuple[int, int]]) -> bool:
@@ -229,7 +254,9 @@ async def _rewrite(config, messages: list[dict], what: str, beat_id: str) -> str
     if response.finish_reason == "length":
         raise DraftingError(
             f"the revision of {what} was cut off (finish_reason='length'): "
-            + response_truncation_remedy(response, config.endpoint_for("reviser"))
+            + response_truncation_remedy(
+                response, config.endpoint_for("reviser"), role="reviser"
+            )
         )
     try:
         revised = validate_plain_text_response(response.text, what=f"revision of {what}")
@@ -290,7 +317,7 @@ async def revise_prose(state: OrchestratorState) -> dict:
         retry_count=state["retry_count"],
     )
 
-    located = [(failure, locate(draft, failure.offending_text)) for failure in failures]
+    located = await asyncio.to_thread(_locate_all, draft, failures)
     spans = [span for _, span in located if span is not None]
     # A density breach is a measurement over the whole draft. Its
     # ``offending_text`` is only the first offending sentence, so it locates and
@@ -318,19 +345,40 @@ async def revise_prose(state: OrchestratorState) -> dict:
                 span_text=draft[start:end],
                 package=package,
             )
-            replacement = await _rewrite(config, messages, f"span {start}:{end}", beat_id)
-            rejection = replacement_rejection(draft, (start, end), replacement)
-            if rejection is not None:
-                # Splicing this would duplicate prose. The full rewrite below
-                # regenerates the beat against every failure instead.
+            for rejection_attempt in range(
+                config.revision.span_rejection_retries + 1
+            ):
+                replacement = await _rewrite(
+                    config, messages, f"span {start}:{end}", beat_id
+                )
+                rejection = replacement_rejection(draft, (start, end), replacement)
+                if rejection is None:
+                    break
+                # Splicing this would duplicate prose. After the bounded local
+                # correction, the full rewrite below regenerates the beat
+                # against every failure instead.
                 log_node_event(
                     "revise",
                     event="span_rejected",
                     beat_id=beat_id,
                     span=f"{start}:{end}",
+                    attempt=rejection_attempt + 1,
                     reason=rejection,
                 )
-                span_mode = False
+                if rejection_attempt == config.revision.span_rejection_retries:
+                    span_mode = False
+                    break
+                messages = [
+                    *messages,
+                    {"role": "assistant", "content": replacement},
+                    {
+                        "role": "user",
+                        "content": _SPAN_REJECTION_CORRECTION.format(
+                            reason=rejection
+                        ),
+                    },
+                ]
+            if not span_mode:
                 break
             revised = revised[:start] + replacement + revised[end:]
 

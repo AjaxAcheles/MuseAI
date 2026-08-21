@@ -1,7 +1,12 @@
 project_id: the-borrowed-ladder
 
 endpoint:
-  base_url: http://127.0.0.1:11434/v1
+  # 11435, not the default 11434. On 2026-08-21 the only server on 11434 was
+  # systemd's ollama.service, which runs as User=ollama and therefore reads the
+  # empty /usr/share/ollama/.ollama/models; the real 61 GB store lives under
+  # /home/imarg. A second server owned by imarg serves that store on 11435:
+  #   OLLAMA_HOST=127.0.0.1:11435 OLLAMA_CONTEXT_LENGTH=16384 ollama serve
+  base_url: http://127.0.0.1:11435/v1
   api_key: ollama
   # Chosen 2026-08-20 by A/B against hf.co/empero-ai/Qwythos-9B-Claude-Mythos-5-1M
   # -GGUF:Q4_K_M on the seed's own comprehension trap: who borrowed the ladder.
@@ -13,10 +18,25 @@ endpoint:
   # two (23.6 s vs 31.7 s on a fixed probe) and the only other 9B here that
   # returns valid planner JSON. It does run long — one sample reached 1,274
   # words against a 400-600 ask — so watch draft length in the run log.
-  model_name: qwen3.5:9b
+  # Switched from qwen3.5:9b on 2026-08-21. Probed on this host before the run:
+  # it emits valid planner JSON, it emits tool calls (unlike the Gemma-The-Writer
+  # 9B, which returns HTTP 400 "does not support tools"), and it honours
+  # `reasoning_effort: none` on /v1 — 0 hidden reasoning chars on a 683-word
+  # draft, so the empty-verdict stall the five roles were tuned against does not
+  # return with it. It is slower: 14.2 generated tok/s against a realistic
+  # 9,370-token prompt, ~46 s per drafting call, because at IQ2_XXS the 9.9 GB of
+  # weights do not quite fit the 9.6 GB this 12 GB card leaves free and ~11% of
+  # the layers run on CPU. That is the price of the extra capability, and there
+  # is no quantisation of it that fits fully on this card.
+  model_name: hf.co/unsloth/Qwen3.8-27B-GGUF:UD-IQ2_XXS
   tokenizer_family: char_heuristic
   request_timeout: 60
-  stream_read_timeout: 300
+  # Raised from 300 for the 27B on 2026-08-21. This is the gap allowed between
+  # streamed chunks, and the first chunk of a run waits on a cold load of 9.9 GB
+  # of weights plus the prefill of a ~9k-token prompt. 300 s was never observed
+  # to bind, but the margin over a cold load is much thinner than it was for a
+  # 6.6 GB model, and the cost of the extra headroom is nil.
+  stream_read_timeout: 600
   # Fallback only: every one of the five agent roles overrides this below.
   temperature: 0.8
   # Also a fallback, but it must be set here as well as on the five roles. The
@@ -32,22 +52,21 @@ endpoint:
   # if there are more retries than entries.
   max_attempts: 3
   retry_backoff_seconds: [5.0, 15.0]
-  # The configured 9B GGUF is architecturally a long-context model, but Ollama
-  # serves its own small default (a few thousand tokens) unless told otherwise, and it
-  # discards the overflow from the LEFT — taking the system message with it.
-  # 20000 is what this host's Ollama actually serves: measured 2026-08-20 by
-  # reading `context_length` from /api/ps for every installed model, all of
-  # which reported 20000. It was declared as 16384 before that check, which
-  # silently wasted 3,616 tokens of window on every prompt — the trim reserved
-  # room the server was never going to withhold. Sized for a 12 GB card: ~6.6 GB
-  # weights (Q4_K_M) plus KV cache still fits on the GPU, and spilling KV to
-  # system RAM would cost far more speed than the extra context is worth.
+  # Ollama serves its own small default (a few thousand tokens) unless told
+  # otherwise, and it discards the overflow from the LEFT — taking the system
+  # message with it. So this must match what the server actually serves.
   #
-  # This value must match what the server actually serves. Set it there too:
-  #   setx OLLAMA_CONTEXT_LENGTH 20000
-  # then fully quit and relaunch Ollama (setx only reaches processes started
-  # after it runs), and CONFIRM with `ollama ps` that the CONTEXT column reads
-  # 20000 and PROCESSOR still says 100% GPU.
+  # Lowered from 20000 to 16384 for the 27B on 2026-08-21. Under 20000 this model
+  # ran 87% on GPU; under 16384 it runs 89%, and on the SAME 9,370-token prompt
+  # that is 45.7 s against 54.0 s — an 18% speedup. The window that was given up
+  # is window this project never uses: across the 135 LLM calls of the 2026-08-20
+  # run, the largest prompt any of the five roles built was 9,559 tokens, with a
+  # median of 6,220. 16384 clears the observed maximum with room for the critic's
+  # 6144-token reservation on top of it.
+  #
+  # Set it on the server too — the run script does this:
+  #   OLLAMA_HOST=127.0.0.1:11435 OLLAMA_CONTEXT_LENGTH=16384 ollama serve
+  # and CONFIRM with `ollama ps` that the CONTEXT column reads 16384.
   #
   # Do not treat extra_body as a fallback: verified against Ollama 0.32.1, the
   # /v1 compatibility endpoint discards the `options` block silently, so num_ctx
@@ -57,10 +76,10 @@ endpoint:
   # while the server quietly served 4096 against this declared 16384, which
   # starved every role of output room. `generation.served_window_mismatch_fraction`
   # now catches that gap and names both numbers.
-  context_window: 20000
+  context_window: 16384
   extra_body:
     options:
-      num_ctx: 20000
+      num_ctx: 16384
   # Tokens kept free for generation. Prompts are trimmed to leave at least this
   # much room. Raised from the 1024 default because a prose beat needs more
   # headroom than a JSON verdict; per-agent values are set under `agents:`.
@@ -75,12 +94,15 @@ generation:
   max_agent_iterations: 8
   recent_prose_beats: 4
   # Soft ceiling on the assembled drafting context. Must leave room under
-  # context_window for output: 14000 + the reviser's 4096 reservation (the
-  # largest of the five roles) still fits inside 20000 with slack for tokenizer
-  # drift (char_heuristic is an estimate, not an exact count). Raised with
-  # context_window on 2026-08-20; the extra 2,000 tokens go to recent committed
-  # prose, which is what holds the seam between beats.
-  context_token_budget: 14000
+  # context_window for output: 10000 + the critic's 6144 reservation (now the
+  # largest of the five roles) fits inside 16384 with slack for tokenizer drift
+  # (char_heuristic is an estimate, not an exact count).
+  #
+  # Lowered from 14000 with context_window on 2026-08-21, and it costs nothing:
+  # the largest prompt actually assembled across the 135 calls of the 2026-08-20
+  # run was 9,559 tokens and the median was 6,220, so 14000 was a ceiling this
+  # project never reached. 10000 still clears that observed maximum.
+  context_token_budget: 10000
   # Raised from 0.25 on 2026-08-19. In the 2026-08-18 full run, 13 of 18 audits
   # breached 0.25 — against this model's prose it was not a defect detector, it
   # was the default state, and it generated parks on marginal readings (one beat
@@ -415,6 +437,10 @@ revision:
   span_growth_limit: 3.0
   span_growth_slack_chars: 400
   echo_min_words: 8
+  # Seven of seven span rejections in the 2026-08-20 run echoed surrounding
+  # prose. Give that local rewrite one bounded correction before regenerating
+  # the entire beat, which would discard the paid span result and invite drift.
+  span_rejection_retries: 1
 
 # Retrieval budgets for the agents' read-only story tools. Each trades context
 # spend against how much true story an agent can see.
@@ -521,8 +547,8 @@ agents:
     # needs no second wire adapter and no /api/chat support. In a live run it
     # took `empty_reply` from 2 per beat to 0 and the beat from 209 s to 32 s.
     #
-    # max_output_tokens stays at 4096: with reasoning off, observed verdicts run
-    # 55-600 tokens, so it is no longer the binding constraint and costs nothing
+    # Five legitimate multi-finding verdicts hit 4096 in the 2026-08-20 run,
+    # while empty_reply stayed at zero. The older 55-600-token sample must not be read
     # as headroom. Watch `empty_reply` in fsm.log if the model is ever changed —
     # this finding is model-specific and was false for qwen3.5:9b.
     #
@@ -534,8 +560,11 @@ agents:
     # doesn't read that key). 12288 still comfortably covers observed critic
     # prompts (~6.4k tokens), but a beat with heavier tool use than any seen so
     # far could now hit `retry_context_dropped` where it never has.
-    output_reservation: 4096
-    max_output_tokens: 4096
+    # Five legitimate multi-finding verdicts hit 4096 in the 2026-08-20 run,
+    # with zero empty replies. Reasoning was already off, so the cap bound real
+    # answers rather than runaway reasoning; keep these two values together.
+    output_reservation: 6144
+    max_output_tokens: 6144
 
 log_level: INFO
 host: 127.0.0.1

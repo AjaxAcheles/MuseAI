@@ -7,11 +7,14 @@ mode choice, the splice guard, and the budget tiers all run for real.
 from __future__ import annotations
 
 import logging
+import threading
 
 import pytest
 
+from museai.core.config import RevisionConfig
 from museai.core.stream_bus import bus
 from museai.fsm.nodes.audit import ERROR_CODE, POV_ERROR_CODE
+from museai.fsm.nodes import revise as revise_module
 from museai.fsm.tools import loop as loop_module
 from museai.fsm.nodes.deps import DraftingError, set_node_config
 from museai.fsm.nodes.revise import (
@@ -144,6 +147,32 @@ class TestLocate:
         start, end = span
         assert DRAFT[start:end].startswith("Mara lied")
 
+    def test_fuzzy_find_regressions_keep_the_selected_span(self):
+        exact = "Mara lied about the letter."
+        near_match = "Mara lied about the letter!"
+        exact_start = DRAFT.index(exact)
+
+        assert fuzzy_find(DRAFT, exact) == (exact_start, exact_start + len(exact))
+        assert fuzzy_find(DRAFT, near_match) == (exact_start, exact_start + len(near_match))
+        assert fuzzy_find(DRAFT, "nope") is None
+        assert fuzzy_find("", exact) is None
+        assert fuzzy_find(DRAFT, "A passage absent from this draft entirely.") is None
+
+    async def test_location_work_runs_in_a_worker_thread(self, monkeypatch, patched_llm):
+        observed = []
+
+        def record_location_thread(draft, failures):
+            observed.append(threading.current_thread())
+            return [(item, locate(draft, item.offending_text)) for item in failures]
+
+        patched_llm(REPLACEMENT)
+        monkeypatch.setattr(revise_module, "_locate_all", record_location_thread)
+
+        await revise_prose(state_with([failure()]))
+
+        assert observed
+        assert all(thread is not threading.main_thread() for thread in observed)
+
 
 class TestSpanMode:
     async def test_a_located_span_is_replaced_in_place(self, patched_llm):
@@ -269,26 +298,73 @@ class TestSpliceGuard:
     async def test_an_oversized_span_rewrite_falls_back_to_a_full_rewrite(
         self, patched_llm
     ):
-        calls = patched_llm("word " * 200, "A wholly rewritten beat.")
+        calls = patched_llm(
+            "word " * 200,
+            "word " * 200,
+            "A wholly rewritten beat.",
+        )
 
         delta = await revise_prose(state_with([failure()]))
 
-        # First call was the span attempt; the second is the full rewrite.
-        assert len(calls) == 2
+        # Two bounded span attempts are rejected; the third call is full mode.
+        assert len(calls) == 3
         assert "<passage_to_rewrite>" in calls[0][1]["content"]
-        assert "<passage_to_rewrite>" not in calls[1][1]["content"]
+        assert "<passage_to_rewrite>" in calls[1][1]["content"]
+        assert "<passage_to_rewrite>" not in calls[2][1]["content"]
         assert delta["current_draft_text"] == "A wholly rewritten beat."
 
     async def test_an_echoing_span_rewrite_falls_back_to_a_full_rewrite(
         self, patched_llm
     ):
         echoing = f"{REPLACEMENT} The lamp turned through the fog. She climbed"
-        patched_llm(echoing, "A wholly rewritten beat.")
+        patched_llm(echoing, echoing, "A wholly rewritten beat.")
 
         delta = await revise_prose(state_with([failure()]))
 
         assert delta["current_draft_text"] == "A wholly rewritten beat."
         assert echoing not in delta["current_draft_text"]
+
+    async def test_a_corrected_span_rewrite_stays_in_span_mode(self, patched_llm):
+        echoing = f"{REPLACEMENT} The lamp turned through the fog. She climbed"
+        calls = patched_llm(echoing, REPLACEMENT)
+
+        delta = await revise_prose(state_with([failure()]))
+
+        assert len(calls) == 2
+        assert all("<passage_to_rewrite>" in call[1]["content"] for call in calls)
+        assert delta["current_draft_text"] == DRAFT.replace(OFFENDING, REPLACEMENT)
+
+    async def test_zero_span_rejection_retries_falls_back_immediately(
+        self, patched_llm, config_factory
+    ):
+        set_node_config(
+            config_factory(
+                context_token_budget=8000,
+                revision=RevisionConfig(span_rejection_retries=0),
+            )
+        )
+        echoing = f"{REPLACEMENT} The lamp turned through the fog. She climbed"
+        calls = patched_llm(echoing, "A wholly rewritten beat.")
+
+        delta = await revise_prose(state_with([failure()]))
+
+        assert len(calls) == 2
+        assert "<passage_to_rewrite>" in calls[0][1]["content"]
+        assert "<passage_to_rewrite>" not in calls[1][1]["content"]
+        assert delta["current_draft_text"] == "A wholly rewritten beat."
+
+    async def test_a_span_rejection_correction_quotes_the_guarded_echo(
+        self, patched_llm
+    ):
+        echoed = "The lamp turned through the fog. She climbed"
+        echoing = f"{REPLACEMENT} {echoed}"
+        calls = patched_llm(echoing, REPLACEMENT)
+
+        await revise_prose(state_with([failure()]))
+
+        correction = calls[1][-1]["content"]
+        assert echoed in correction
+        assert "repeated prose from the surrounding beat" in correction
 
 
 class TestFullMode:

@@ -11,6 +11,7 @@ the intent.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -233,45 +234,25 @@ def _project_total_words(conn: sqlite3.Connection, project_id: str) -> int:
     return int(row["total"] or 0)
 
 
-async def commit_transaction(state: OrchestratorState) -> dict:
-    """Commit the current draft at the active beat boundary.
+def _commit_database_work(
+    db_path,
+    event_log_path,
+    project_id: str,
+    pointer,
+    pointer_payload: dict[str, Any],
+    prose: str,
+    count: int,
+    committed_at: str,
+    withheld_reason: str,
+    unfulfilled_findings: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Commit one beat with one thread-owned SQLite connection.
 
-    Story-state advancement is gated on the beat having earned it. The prose
-    itself always commits — a multi-hour run must not die at the boundary —
-    but the beat's planned ``thread_updates`` are applied only when the critic
-    neither reported an unfulfilled obligation against this draft nor was
-    itself unreliable (its output unreadable after every retry). A withheld
-    advance is recorded in the durable event, so canon never claims a change
-    the prose did not deliver.
+    The intent, canonical rows, durable event, and intent flip must retain their
+    original order. Keeping that entire sequence in one worker also prevents a
+    SQLite connection from ever crossing back to the async event-loop thread.
     """
-    config = get_node_config()
-    pointer = state["fsm_pointer"]
-    project_id = state["project_id"]
-    prose = state["current_draft_text"]
-    count = _word_count(prose)
-    committed_at = _utc_now()
-
-    unfulfilled = [
-        failure
-        for failure in state["critic_failures"]
-        if failure.error_code == UNFULFILLED_OBLIGATION
-    ]
-    critic_unreliable = state["critic_parse_failure_streak"] > 0
-    withheld_reason = ""
-    if unfulfilled:
-        withheld_reason = "unfulfilled_obligation"
-    elif critic_unreliable:
-        withheld_reason = "critic_unreliable"
-
-    log_node_event(
-        "commit_transaction",
-        event="start",
-        arc_id=pointer.arc_id,
-        chapter_id=pointer.chapter_id,
-        beat_index=pointer.beat_index,
-    )
-
-    conn = connect_db(config.db_path)
+    conn = connect_db(db_path)
     try:
         project = get_project(conn, project_id)
         if project is None:
@@ -337,33 +318,97 @@ async def commit_transaction(state: OrchestratorState) -> dict:
         event = {
             "type": "beat_commit",
             "beat_id": beat["id"],
-            "fsm_pointer": _pointer_payload(state),
+            "fsm_pointer": pointer_payload,
             "prose_delta": prose,
             "thread_updates": thread_updates,
             "pad_states": pad_states,
             "word_count": count,
         }
         if withheld_reason:
-            # The advance the plan requested but the prose did not earn. Kept
-            # out of "thread_updates" so a reconcile replay stays honest.
             event["thread_updates_withheld"] = {
                 "reason": withheld_reason,
                 "requested": withheld_updates,
-                "unfulfilled_findings": [f.model_dump() for f in unfulfilled],
+                "unfulfilled_findings": unfulfilled_findings,
             }
-        append_event(config.event_log_path, event)
+        append_event(event_log_path, event)
 
         with conn:
             mark_commit_committed(conn, intent_id, completed_at=_utc_now())
 
-        total_words = _project_total_words(conn, project_id)
+        return {
+            "beat_id": beat["id"],
+            "intent_id": intent_id,
+            "total_words": _project_total_words(conn, project_id),
+            "project_word_count_target": project["word_count_target"],
+            "thread_updates": thread_updates,
+            "withheld_updates": withheld_updates,
+            "pad_states": pad_states,
+        }
     finally:
         conn.close()
+
+
+async def commit_transaction(state: OrchestratorState) -> dict:
+    """Commit the current draft at the active beat boundary.
+
+    Story-state advancement is gated on the beat having earned it. The prose
+    itself always commits — a multi-hour run must not die at the boundary —
+    but the beat's planned ``thread_updates`` are applied only when the critic
+    neither reported an unfulfilled obligation against this draft nor was
+    itself unreliable (its output unreadable after every retry). A withheld
+    advance is recorded in the durable event, so canon never claims a change
+    the prose did not deliver.
+    """
+    config = get_node_config()
+    pointer = state["fsm_pointer"]
+    project_id = state["project_id"]
+    prose = state["current_draft_text"]
+    count = _word_count(prose)
+    committed_at = _utc_now()
+
+    unfulfilled = [
+        failure
+        for failure in state["critic_failures"]
+        if failure.error_code == UNFULFILLED_OBLIGATION
+    ]
+    critic_unreliable = state["critic_parse_failure_streak"] > 0
+    withheld_reason = ""
+    if unfulfilled:
+        withheld_reason = "unfulfilled_obligation"
+    elif critic_unreliable:
+        withheld_reason = "critic_unreliable"
+
+    log_node_event(
+        "commit_transaction",
+        event="start",
+        arc_id=pointer.arc_id,
+        chapter_id=pointer.chapter_id,
+        beat_index=pointer.beat_index,
+    )
+
+    result = await asyncio.to_thread(
+        _commit_database_work,
+        config.db_path,
+        config.event_log_path,
+        project_id,
+        pointer,
+        _pointer_payload(state),
+        prose,
+        count,
+        committed_at,
+        withheld_reason,
+        [failure.model_dump() for failure in unfulfilled],
+    )
+    beat_id = result["beat_id"]
+    intent_id = result["intent_id"]
+    total_words = result["total_words"]
+    thread_updates = result["thread_updates"]
+    withheld_updates = result["withheld_updates"]
 
     log_node_event(
         "commit_transaction",
         event="committed",
-        beat_id=beat["id"],
+        beat_id=beat_id,
         intent_id=intent_id,
         word_count=count,
         project_total=total_words,
@@ -375,7 +420,7 @@ async def commit_transaction(state: OrchestratorState) -> dict:
             "commit_transaction",
             level=logging.WARNING,
             event="thread_updates_withheld",
-            beat_id=beat["id"],
+            beat_id=beat_id,
             reason=withheld_reason,
             requested=len(withheld_updates),
             unfulfilled=len(unfulfilled),
@@ -383,7 +428,7 @@ async def commit_transaction(state: OrchestratorState) -> dict:
         await bus.publish(
             "commit_gate",
             {
-                "beat_id": beat["id"],
+                "beat_id": beat_id,
                 "reason": withheld_reason,
                 "requested": withheld_updates,
                 "unfulfilled_findings": [f.model_dump() for f in unfulfilled],
@@ -399,12 +444,12 @@ async def commit_transaction(state: OrchestratorState) -> dict:
         {
             "project_id": project_id,
             "word_count": total_words,
-            "target": project["word_count_target"],
+            "target": result["project_word_count_target"],
         },
     )
     await bus.publish(
         "pointer_update",
-        {"project_id": project_id, "beat_id": beat["id"], "fsm_pointer": _pointer_payload(state)},
+        {"project_id": project_id, "beat_id": beat_id, "fsm_pointer": _pointer_payload(state)},
     )
 
     return {

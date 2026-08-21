@@ -24,6 +24,7 @@ that budget, and a plan truncated mid-array parses to nothing.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import math
@@ -501,6 +502,51 @@ def _first_unfinished(rows: list[sqlite3.Row]) -> int:
     return len(rows) - 1
 
 
+def _read_beat_plan_context(
+    db_path, project_id: str, pointer: FSM_Pointer, recent_prose_beats: int
+) -> dict:
+    """Read beat-planner inputs with a connection owned by this worker thread."""
+    conn = connect_db(db_path)
+    try:
+        chapter = dict(_resolve_chapter(conn, pointer))
+        existing = [dict(row) for row in get_beats_for_chapter(conn, chapter["id"])]
+        context = {"chapter": chapter, "existing": existing}
+        if existing:
+            return context
+
+        all_chapters = [dict(row) for row in get_chapters_for_arc(conn, chapter["arc_id"])]
+        recent = get_recent_committed_beats(conn, project_id, recent_prose_beats)
+        context.update(
+            characters=_character_context(conn, project_id),
+            recent_prose=[row["prose"] for row in recent],
+            siblings=_sibling_chapters(all_chapters, chapter["id"]),
+            dramatized=_already_dramatized(conn, all_chapters, chapter["id"]),
+            threads=_thread_context(get_threads_for_project(conn, project_id)),
+            obligations=_chapter_obligations(chapter["obligations"]),
+            arc_description=_arc_description(conn, chapter["arc_id"]),
+            chapter_count=len(all_chapters),
+        )
+        return context
+    finally:
+        conn.close()
+
+
+def _write_beat_plan(
+    db_path, beats: list[dict], active: dict, reused: bool, chapter_done: bool
+) -> None:
+    """Persist one beat plan without moving its write transaction onto the loop."""
+    conn = connect_db(db_path)
+    try:
+        with conn:
+            if not reused:
+                for beat in beats:
+                    upsert_beat(conn, status="planned", **_row(beat))
+            if not chapter_done:
+                upsert_beat(conn, status="active", **_row(active))
+    finally:
+        conn.close()
+
+
 async def plan_beat(state: OrchestratorState) -> dict:
     """Plan the beats of the active chapter and activate the first one.
 
@@ -514,10 +560,16 @@ async def plan_beat(state: OrchestratorState) -> dict:
     log_node_event("plan_beat", event="start", arc_id=pointer.arc_id,
                    chapter_id=pointer.chapter_id or "(active)")
 
-    conn = connect_db(config.db_path)
+    context = await asyncio.to_thread(
+        _read_beat_plan_context,
+        config.db_path,
+        project_id,
+        pointer,
+        config.generation.recent_prose_beats,
+    )
     try:
-        chapter = _resolve_chapter(conn, pointer)
-        existing = get_beats_for_chapter(conn, chapter["id"])
+        chapter = context["chapter"]
+        existing = context["existing"]
         reused = bool(existing)
 
         if reused:
@@ -528,28 +580,24 @@ async def plan_beat(state: OrchestratorState) -> dict:
         else:
             active_index = 0
             chapter_done = False
-            characters = _character_context(conn, project_id)
-            recent = get_recent_committed_beats(
-                conn, project_id, config.generation.recent_prose_beats
-            )
-            all_chapters = get_chapters_for_arc(conn, chapter["arc_id"])
-            siblings = _sibling_chapters(all_chapters, chapter["id"])
-            dramatized = _already_dramatized(conn, all_chapters, chapter["id"])
-            threads = _thread_context(get_threads_for_project(conn, project_id))
+            characters = context["characters"]
+            recent_prose = context["recent_prose"]
+            siblings = context["siblings"]
+            dramatized = context["dramatized"]
+            threads = context["threads"]
             log_node_event(
                 "plan_beat",
                 event="context_assembled",
                 chapter_id=chapter["id"],
                 characters=len(characters),
-                recent_prose_beats=len(recent),
+                recent_prose_beats=len(recent_prose),
                 sibling_chapters=len(siblings),
                 dramatized_chapters=len(dramatized),
                 threads=len(threads),
             )
 
-            obligations = _chapter_obligations(chapter["obligations"])
-            arc_description = _arc_description(conn, chapter["arc_id"])
-            recent_prose = [row["prose"] for row in recent]
+            obligations = context["obligations"]
+            arc_description = context["arc_description"]
 
             def _render() -> list[dict]:
                 return render_messages(
@@ -561,7 +609,7 @@ async def plan_beat(state: OrchestratorState) -> dict:
                     story_position={
                         "arc_description": arc_description,
                         "chapter_ordering": chapter["ordering"],
-                        "chapter_count": len(all_chapters),
+                        "chapter_count": context["chapter_count"],
                     },
                     sibling_chapters=siblings,
                     already_dramatized=dramatized,
@@ -832,14 +880,16 @@ async def plan_beat(state: OrchestratorState) -> dict:
                 )
             active = beats[0]
 
-        with conn:
-            if not reused:
-                for beat in beats:
-                    upsert_beat(conn, status="planned", **_row(beat))
-            if not chapter_done:
-                upsert_beat(conn, status="active", **_row(active))
+        await asyncio.to_thread(
+            _write_beat_plan,
+            config.db_path,
+            beats,
+            active,
+            reused,
+            chapter_done,
+        )
     finally:
-        conn.close()
+        pass
 
     log_node_event(
         "plan_beat",

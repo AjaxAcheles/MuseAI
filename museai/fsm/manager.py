@@ -220,8 +220,12 @@ class GenerationManager:
                 # Export the project this run generated, never the configured
                 # one: a stale config.project_id must not name (or empty) the file.
                 run_project_id = self.state["project_id"]
-                manuscript_path = export_manuscript(self.config, project_id=run_project_id)
-                final_word_count = committed_word_count(self.config, project_id=run_project_id)
+                manuscript_path = await asyncio.to_thread(
+                    export_manuscript, self.config, project_id=run_project_id
+                )
+                final_word_count = await asyncio.to_thread(
+                    committed_word_count, self.config, project_id=run_project_id
+                )
                 await bus.publish(
                     "manuscript_ready",
                     {"path": str(manuscript_path), "word_count": final_word_count},

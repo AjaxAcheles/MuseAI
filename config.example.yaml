@@ -156,8 +156,11 @@ agents:
     # a runaway reply fail fast instead of after two minutes. The cap must be
     # <= output_reservation, so the two move together.
     reasoning_effort: none
-    max_output_tokens: 4096
-    output_reservation: 4096
+    # Five legitimate multi-finding verdicts hit the 4096 ceiling in the
+    # 2026-08-20 run with zero empty replies, so the cap bound real answers
+    # rather than runaway reasoning. The two values must move together.
+    max_output_tokens: 6144
+    output_reservation: 6144
   critic:
     temperature: 0.2
     # A reasoning model that returns finish_reason='length' with an empty verdict
@@ -188,6 +191,9 @@ revision:
   span_growth_limit: 3.0         # a replacement may not exceed this multiple of the span it replaces...
   span_growth_slack_chars: 400   # ...or the span's length plus this; the larger allowance wins
   echo_min_words: 8              # a verbatim run this long from the surrounding prose rejects the splice
+  # Seven of seven 2026-08-20 rejections echoed surrounding prose, so one
+  # bounded correction tries a fresh local replacement before a full rewrite.
+  span_rejection_retries: 1
 
 # Retrieval budgets for the agents' read-only story tools. Each one trades
 # context spend against how much true story an agent can see. Every key is

@@ -170,6 +170,24 @@ class TestTruncationRemedy:
         assert "2048" in remedy
 
 
+    def test_a_role_names_the_per_agent_cap_that_bound_the_call(self):
+        class _Response:
+            text = "partial verdict"
+
+        remedy = response_truncation_remedy(_Response(), object(), role="critic")
+        assert "agents.critic.max_output_tokens" in remedy
+        assert "endpoint.max_output_tokens" not in remedy
+
+    def test_an_unspecified_role_keeps_the_existing_wording_byte_for_byte(self):
+        class _Response:
+            text = "partial verdict"
+
+        assert response_truncation_remedy(_Response(), object()) == (
+            "raise endpoint.max_output_tokens (or leave it unset to omit the cap) "
+            "or ask for a shorter answer"
+        )
+
+
 class TestElementKeysGuard:
     # A beat reply cut off at the token limit: the outer array never closes,
     # so the only balanced array is the inner thread_updates fragment.

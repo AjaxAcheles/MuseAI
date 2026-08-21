@@ -118,6 +118,7 @@ def truncation_remedy(
     max_output_tokens: int | None = None,
     thinking: str | None = None,
     mismatch_fraction: float | None = None,
+    role: str | None = None,
 ) -> str:
     """Remediation clause for a ``finish_reason == "length"`` failure.
 
@@ -157,9 +158,16 @@ def truncation_remedy(
     caller (or a test) can pin it explicitly. The import is deferred so this
     module stays free of an ``fsm`` import at load time.
     """
+    config_prefix = f"agents.{role}" if role is not None else "endpoint"
+    reasoning_scope = (
+        f"under {config_prefix}"
+        if role is not None
+        else "for the affected agent under agents.<role>"
+    )
+
     if not empty:
         return (
-            "raise endpoint.max_output_tokens (or leave it unset to omit the cap) "
+            f"raise {config_prefix}.max_output_tokens (or leave it unset to omit the cap) "
             "or ask for a shorter answer"
         )
 
@@ -171,21 +179,21 @@ def truncation_remedy(
         if thinking and thinking.strip():
             return (
                 f"the reply used its full output budget ({served_completion_tokens} "
-                f"completion tokens against endpoint.max_output_tokens="
+                f"completion tokens against {config_prefix}.max_output_tokens="
                 f"{max_output_tokens}) before producing any answer text. The model "
                 "spent the whole grant on internal reasoning (a non-empty <think> "
                 "block was returned as `thinking`) and never got to an answer. Set "
-                "reasoning_effort: none for the affected agent under agents.<role> "
+                f"reasoning_effort: none {reasoning_scope} "
                 "in config.yaml; this is the primary remedy. If the requested answer "
                 "is still too long after reasoning is disabled, ask for a shorter answer"
             )
         return (
             f"the reply used its full output budget ({served_completion_tokens} "
-            f"completion tokens against endpoint.max_output_tokens="
+            f"completion tokens against {config_prefix}.max_output_tokens="
             f"{max_output_tokens}) before producing any answer text."
             " This is a completion-length cap, not a context-"
-            f"window problem: raise endpoint.max_output_tokens (and "
-            f"output_reservation to match) or ask for a shorter answer"
+            f"window problem: raise {config_prefix}.max_output_tokens (and "
+            f"{config_prefix}.output_reservation to match) or ask for a shorter answer"
         )
 
     if context_window is not None and served_prompt_tokens is not None:
@@ -200,7 +208,7 @@ def truncation_remedy(
             return (
                 f"the endpoint stopped after {served_total} tokens "
                 f"({served_prompt_tokens} of them prompt), far short of the "
-                f"declared endpoint.context_window of {context_window}. The "
+                f"declared {config_prefix}.context_window of {context_window}. The "
                 f"server is serving a smaller window than the config believes, "
                 f"so every prompt budget derived from {context_window} is too "
                 f"large. Fix the server rather than the prompt: for Ollama set "
@@ -208,7 +216,7 @@ def truncation_remedy(
                 f"'ollama ps' that the CONTEXT column reads {context_window} "
                 f"(note that 'options.num_ctx' in extra_body is silently ignored "
                 f"by Ollama's /v1 endpoint). Otherwise lower "
-                f"endpoint.context_window to what the server really serves"
+                f"{config_prefix}.context_window to what the server really serves"
             )
 
     return (
@@ -221,7 +229,9 @@ def truncation_remedy(
     )
 
 
-def response_truncation_remedy(response: Any, endpoint: Any = None) -> str:
+def response_truncation_remedy(
+    response: Any, endpoint: Any = None, role: str | None = None
+) -> str:
     """:func:`truncation_remedy` filled in from an ``LLMResponse`` and its endpoint.
 
     Every caller that inspects ``finish_reason == "length"`` already holds both
@@ -239,7 +249,10 @@ def response_truncation_remedy(response: Any, endpoint: Any = None) -> str:
     ``endpoint.max_output_tokens`` for a response shape that predates that field.
     ``response.thinking`` is threaded through the same way. Without either, a
     truncation with an empty ``text`` looked identical to a context-window
-    overrun regardless of which cap actually bound.
+    overrun regardless of which cap actually bound. When the caller knows its
+    agent role, the advice names the sparse per-agent override that actually
+    won during endpoint inheritance; the default retains endpoint wording for
+    older callers.
     """
     max_output_tokens = getattr(response, "effective_max_tokens", None)
     if max_output_tokens is None:
@@ -251,6 +264,7 @@ def response_truncation_remedy(response: Any, endpoint: Any = None) -> str:
         served_completion_tokens=getattr(response, "served_completion_tokens", None),
         max_output_tokens=max_output_tokens,
         thinking=getattr(response, "thinking", None),
+        role=role,
     )
 
 
@@ -566,10 +580,13 @@ def parse_failure_objects(raw_text: str, *, lenient: bool = False) -> list[Failu
     (see ``fsm/nodes/critics.py``), which is why no retry budget is threaded
     through here.
 
-    ``lenient`` relaxes *element* validation only: unknown keys are ignored and
-    an element that still will not validate is skipped rather than failing the
-    response. Extraction itself stays strict, so unparseable text raises either
-    way. Reserved for a run that has already degraded.
+    ``lenient`` relaxes element validation: unknown keys are ignored and an
+    element that still will not validate is skipped rather than failing the
+    response. It also recovers the complete top-level objects before an
+    unfinished outer array's cut-off tail, using the same balanced-span
+    extractor as the normal path. That narrow recovery is reserved for callers
+    that have already observed a truncated reply; arbitrary JSON-ish prose still
+    raises rather than becoming findings.
 
     The raised :class:`StructuredOutputError` carries the underlying validation
     detail, because that text is what gets fed back to the model on a re-prompt.
@@ -610,6 +627,27 @@ def parse_failure_objects(raw_text: str, *, lenient: bool = False) -> list[Failu
         )
     if valid:
         return valid[0]
+
+    # A partial critic array is different from a partial plan: every completed
+    # object is an independently actionable finding, while a plan's omitted
+    # entries can change its entire structure. On 2026-08-20 five critic replies
+    # contained real verdict text but ran past 4096 tokens partway through their
+    # last finding. Reuse the balanced-object scanner here instead of inventing
+    # a second parser; it stops at the first unfinished object, so nothing from
+    # the cut-off tail can reach the reviser. Restrict this to an array at the
+    # start of the reply so a prose preamble's incidental object is not promoted
+    # into a verdict during degraded parsing.
+    if lenient and raw_text.lstrip().startswith("["):
+        complete_objects: list[dict[str, Any]] = []
+        for candidate in _balanced_spans_with_opener(raw_text, "{"):
+            try:
+                value = strict_json_loads(candidate)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(value, dict):
+                complete_objects.append(value)
+        if complete_objects:
+            return _validate(complete_objects, lenient=True)
 
     # A reply that carried JSON-ish spans was talking findings, however badly;
     # is_clean_verdict rejects any text containing a bracket, so these two

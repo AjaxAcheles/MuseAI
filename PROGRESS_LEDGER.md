@@ -26,6 +26,24 @@ session ritual.
 
 Next up: v1 complete
 
+## 2026-08-21 - Task F critic and span-rewrite resilience: done
+
+- A critic verdict truncated after complete JSON findings now salvages those
+  findings through the normal locatability, borrowed-fix, and per-code guards;
+  an empty truncation keeps the existing retry diagnosis. The log records each
+  successful recovery as `event=truncated_verdict_salvaged`.
+- Truncation guidance now names the effective per-agent override whenever the
+  caller knows its role, while role-less callers retain the endpoint wording.
+  The critic reservation and cap rose together to 6144 after five real,
+  multi-finding verdicts hit 4096 with zero empty replies.
+- A rejected span replacement gets one configured correction that quotes the
+  echoed surrounding run before the existing full-beat fallback; zero retries
+  keeps the prior immediate fallback.
+
+**Done-check** - WSL `uv run pytest -q` -> `944 passed`. Both shipped configs
+loaded with a disposable `MUSEAI_API_KEY`; `git diff --check` was clean; and
+`graphify update .` completed.
+
 ## 2026-08-20 - Task D revision-progress identity: done
 
 - Revision now records stable error-code/offending-text signatures for the
@@ -37,6 +55,22 @@ Next up: v1 complete
 **Done-check** - WSL `uv run pytest -q` -> `930 passed`. Both shipped configs
 loaded successfully with a disposable `MUSEAI_API_KEY` supplied for the
 documented environment reference. `graphify update .` completed.
+
+## 2026-08-20 - Task E blocking CPU and SQLite moved off async nodes: done
+
+- Revision span location now runs as one worker-thread batch, while the pure
+  synchronous locator remains directly testable. Its fuzzy scan tests the
+  length-only `real_quick_ratio()` upper bound before the existing
+  `quick_ratio()` bound, preserving every selected span.
+- The context, chapter-plan, beat-plan, and commit nodes now give each SQLite
+  read/write helper sole ownership of its connection. Commit retains its intent
+  -> canonical writes -> durable event -> intent-flip ordering and transactions.
+- The async manager exports and counts the completed manuscript in worker
+  threads. The LangGraph conditional-edge commit router remains synchronous.
+
+**Done-check** - WSL `uv run pytest -q` -> `934 passed`. Both shipped configs
+loaded successfully with a disposable `MUSEAI_API_KEY`; `git diff --check` was
+clean; `graphify update .` completed.
 
 ## 2026-08-20 — Task A maintenance fixes: done
 

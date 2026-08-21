@@ -199,7 +199,7 @@ async def call_llm_for_json_array(
             empty = not last_text.strip()
             last_error = (
                 f"the {what} reply was cut off (finish_reason='length'): "
-                + response_truncation_remedy(response, endpoint)
+                + response_truncation_remedy(response, endpoint, role=agent)
             )
             log_node_event(
                 node,
@@ -276,7 +276,7 @@ async def call_llm_for_json_array(
         # Repairing half a written array is nonsense; name the actual cause.
         raise TruncatedResponseError(
             f"every {what} reply was cut off (finish_reason='length'): "
-            + response_truncation_remedy(last_response, endpoint)
+            + response_truncation_remedy(last_response, endpoint, role=agent)
         )
 
     # Last rung: the model will not fix its own quoting, so we do — and say so.

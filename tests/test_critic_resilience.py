@@ -205,19 +205,85 @@ async def test_the_production_payload_no_longer_kills_the_run(configure, scripte
     assert health_events[-1]["degraded"] is False
 
 
-async def test_a_truncated_balanced_array_is_never_accepted_as_complete(
-    configure, monkeypatch
+async def test_a_truncated_verdict_salvages_complete_findings(
+    configure, monkeypatch, health_events, caplog
 ):
     configure(critic_parse_retries=0, critic_degrade_threshold=1)
 
     async def truncated(*args, **kwargs):
-        return _Response(CORRECTED, finish_reason="length")
+        return _Response(
+            """[
+            {"error_code": "CONTRADICTS_PRIOR_PROSE", "offending_text": "The sun stood at noon.", "suggested_fix": "Keep the time of day consistent."},
+            {"error_code": "CONTRADICTS_CHARACTER", "offending_text": "Mara lied about the letter.", "suggested_fix": "Have Mara stay silent."},
+            {"error_code": "CONTRADICTS_PRIOR_PROSE", "offending_text": "The sun
+            """,
+            finish_reason="length",
+        )
+
+    monkeypatch.setattr(critics_module, "run_agent_loop", truncated)
+    with caplog.at_level(logging.INFO, logger="museai"):
+        delta = await adversarial_critics(state_with())
+
+    assert [finding.offending_text for finding in delta["critic_failures"]] == [
+        "The sun stood at noon.",
+        "Mara lied about the letter.",
+    ]
+    assert delta["critic_parse_failure_streak"] == 0
+    assert health_events[-1]["lenient_used"] is True
+    salvaged = [
+        record for record in caplog.records
+        if "event=truncated_verdict_salvaged" in record.getMessage()
+    ]
+    assert len(salvaged) == 1
+    assert "findings=2" in salvaged[0].getMessage()
+
+
+async def test_a_truncated_verdict_keeps_the_per_code_cap(configure, monkeypatch):
+    configure(
+        critic_parse_retries=0,
+        critic_degrade_threshold=3,
+        critic_max_findings_per_code=2,
+    )
+    same_code = """{
+        "error_code": "CONTRADICTS_CHARACTER",
+        "offending_text": "Mara lied about the letter.",
+        "suggested_fix": "Have Mara stay silent."
+    }"""
+
+    async def truncated(*args, **kwargs):
+        return _Response(
+            "[" + ",".join([same_code, same_code, same_code])
+            + ",{\"error_code\": \"CONTRADICTS_CHARACTER\"",
+            finish_reason="length",
+        )
 
     monkeypatch.setattr(critics_module, "run_agent_loop", truncated)
     delta = await adversarial_critics(state_with())
 
-    assert delta["critic_parse_failure_streak"] == 1
-    assert "critic_failures" not in delta
+    assert len(delta["critic_failures"]) == 2
+
+
+async def test_a_truncated_verdict_drops_unlocatable_findings(configure, monkeypatch, caplog):
+    configure(critic_parse_retries=0, critic_degrade_threshold=3)
+
+    async def truncated(*args, **kwargs):
+        return _Response(
+            """[
+            {"error_code": "CONTRADICTS_PRIOR_PROSE", "offending_text": "A sentence from another beat.", "suggested_fix": "Do not borrow it."},
+            {"error_code": "CONTRADICTS_CHARACTER", "offending_text": "Mara lied about the letter.", "suggested_fix": "Have Mara stay silent."},
+            {"error_code": "CONTRADICTS_PRIOR_PROSE", "offending_text": "The sun
+            """,
+            finish_reason="length",
+        )
+
+    monkeypatch.setattr(critics_module, "run_agent_loop", truncated)
+    with caplog.at_level(logging.WARNING, logger="museai"):
+        delta = await adversarial_critics(state_with())
+
+    assert [finding.offending_text for finding in delta["critic_failures"]] == [
+        "Mara lied about the letter."
+    ]
+    assert any("event=finding_discarded" in r.getMessage() for r in caplog.records)
 
 
 # ----------------------------------------------------------------- re-prompting
@@ -285,6 +351,71 @@ async def test_a_truncation_retry_gets_a_short_ask_not_operator_advice(
     joined = " ".join(str(m.get("content", "")) for m in retry["messages"])
     assert "OLLAMA_CONTEXT_LENGTH" not in joined
     assert len(delta["critic_failures"]) == 1
+
+
+async def test_empty_truncation_retries_and_keeps_its_historic_diagnosis(
+    configure, monkeypatch, caplog
+):
+    configure(critic_parse_retries=1, critic_degrade_threshold=3)
+    calls: list[list[dict]] = []
+
+    async def fake_loop(
+        endpoint, messages, tools, tool_impls, max_iterations, on_event=None, **kwargs
+    ):
+        calls.append(list(messages))
+        if len(calls) == 1:
+            return _Response("", finish_reason="length")
+        return _Response(CORRECTED)
+
+    monkeypatch.setattr(critics_module, "run_agent_loop", fake_loop)
+    with caplog.at_level(logging.WARNING, logger="museai"):
+        delta = await adversarial_critics(state_with())
+
+    assert len(calls) == 2
+    retry = calls[1][-1]["content"]
+    assert "the whole reply went to reasoning" in retry
+    assert any("event=empty_reply" in r.getMessage() for r in caplog.records)
+    assert len(delta["critic_failures"]) == 1
+
+
+async def test_a_truncated_text_retry_asks_for_fewer_shorter_findings(
+    configure, monkeypatch
+):
+    configure(critic_parse_retries=1, critic_degrade_threshold=3)
+    calls: list[list[dict]] = []
+
+    async def fake_loop(
+        endpoint, messages, tools, tool_impls, max_iterations, on_event=None, **kwargs
+    ):
+        calls.append(list(messages))
+        if len(calls) == 1:
+            return _Response("The verdict was cut off before its JSON began", finish_reason="length")
+        return _Response(CORRECTED)
+
+    monkeypatch.setattr(critics_module, "run_agent_loop", fake_loop)
+    delta = await adversarial_critics(state_with())
+
+    retry = calls[1][-1]["content"]
+    assert "ran past the reply budget" in retry
+    assert "fewer findings" in retry
+    assert "suggested_fix brief" in retry
+    assert "or []" not in retry
+    assert len(delta["critic_failures"]) == 1
+
+
+async def test_a_critic_truncation_error_names_its_effective_agent_cap(
+    configure, monkeypatch, health_events
+):
+    configure(critic_parse_retries=0, critic_degrade_threshold=3)
+
+    async def truncated(*args, **kwargs):
+        return _Response("A cut-off verdict with no recoverable JSON", finish_reason="length")
+
+    monkeypatch.setattr(critics_module, "run_agent_loop", truncated)
+    await adversarial_critics(state_with())
+
+    assert "agents.critic.max_output_tokens" in health_events[-1]["error"]
+    assert "endpoint.max_output_tokens" not in health_events[-1]["error"]
 
 
 async def test_a_prose_clean_verdict_is_read_as_clean_without_retries(

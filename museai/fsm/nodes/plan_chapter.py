@@ -16,6 +16,7 @@ reasoning against that budget, and a plan truncated mid-array parses to nothing.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import sqlite3
@@ -85,6 +86,60 @@ def _first_unfinished(rows: list[sqlite3.Row]) -> int:
     return len(rows) - 1
 
 
+def _read_chapter_plan_context(db_path, project_id: str, pointer: FSM_Pointer) -> dict:
+    """Read planner inputs with a connection owned by this worker thread."""
+    conn = connect_db(db_path)
+    try:
+        project = get_project(conn, project_id)
+        if project is None:
+            raise PlanningError(f"project {project_id!r} is not in the database")
+        arc = next(
+            (row for row in get_arcs(conn, project_id) if row["id"] == pointer.arc_id),
+            None,
+        )
+        if arc is None:
+            raise PlanningError(
+                f"arc {pointer.arc_id!r} is not an arc of project {project_id!r}"
+            )
+        return {
+            "project": dict(project),
+            "arc": dict(arc),
+            "existing": [dict(row) for row in get_chapters_for_arc(conn, arc["id"])],
+            "threads": _thread_context(get_open_threads(conn, project_id)),
+            "characters": _character_context(get_characters(conn, project_id)),
+        }
+    finally:
+        conn.close()
+
+
+def _write_chapter_plan(
+    db_path, project_id: str, arc: dict, chapters: list[dict], active: dict,
+    reused: bool, arc_done: bool,
+) -> None:
+    """Persist a chapter plan without moving its transaction onto the event loop."""
+    conn = connect_db(db_path)
+    try:
+        with conn:
+            if not reused:
+                for chapter in chapters:
+                    upsert_chapter(conn, status="planned", **chapter)
+            # On the reuse path only the active chapter is touched, and only when
+            # there is still one to write. Marking a finished chapter 'active'
+            # would walk the graph back over prose it already committed.
+            if not arc_done:
+                upsert_chapter(conn, status="active", **active)
+            upsert_arc(
+                conn,
+                id=arc["id"],
+                project_id=project_id,
+                ordering=arc["ordering"],
+                description=arc["description"],
+                status="completed" if arc_done else "active",
+            )
+    finally:
+        conn.close()
+
+
 def _normalise_obligations(value: object, ordering: int) -> list[str]:
     """Normalize a chapter's already-validated concrete obligations."""
     if value is None:
@@ -151,22 +206,13 @@ async def plan_chapter(state: OrchestratorState) -> dict:
     log_node_event("plan_chapter", event="start", project_id=project_id,
                    arc_id=pointer.arc_id)
 
-    conn = connect_db(config.db_path)
+    context = await asyncio.to_thread(
+        _read_chapter_plan_context, config.db_path, project_id, pointer
+    )
     try:
-        project = get_project(conn, project_id)
-        if project is None:
-            raise PlanningError(f"project {project_id!r} is not in the database")
-
-        arc = next(
-            (row for row in get_arcs(conn, project_id) if row["id"] == pointer.arc_id),
-            None,
-        )
-        if arc is None:
-            raise PlanningError(
-                f"arc {pointer.arc_id!r} is not an arc of project {project_id!r}"
-            )
-
-        existing = get_chapters_for_arc(conn, arc["id"])
+        project = context["project"]
+        arc = context["arc"]
+        existing = context["existing"]
         reused = bool(existing)
 
         if reused:
@@ -175,8 +221,8 @@ async def plan_chapter(state: OrchestratorState) -> dict:
             active = chapters[index]
             arc_done = existing[index]["status"] == "completed"
         else:
-            threads = get_open_threads(conn, project_id)
-            characters = get_characters(conn, project_id)
+            threads = context["threads"]
+            characters = context["characters"]
             log_node_event(
                 "plan_chapter",
                 event="context_assembled",
@@ -185,8 +231,8 @@ async def plan_chapter(state: OrchestratorState) -> dict:
                 characters=len(characters),
             )
 
-            thread_ctx = _thread_context(threads)
-            character_ctx = _character_context(characters)
+            thread_ctx = threads
+            character_ctx = characters
 
             def _render() -> list[dict]:
                 return render_messages(
@@ -279,25 +325,18 @@ async def plan_chapter(state: OrchestratorState) -> dict:
             active = chapters[0]
             arc_done = False
 
-        with conn:
-            if not reused:
-                for chapter in chapters:
-                    upsert_chapter(conn, status="planned", **chapter)
-            # On the reuse path only the active chapter is touched, and only when
-            # there is still one to write. Marking a finished chapter 'active'
-            # would walk the graph back over prose it already committed.
-            if not arc_done:
-                upsert_chapter(conn, status="active", **active)
-            upsert_arc(
-                conn,
-                id=arc["id"],
-                project_id=project_id,
-                ordering=arc["ordering"],
-                description=arc["description"],
-                status="completed" if arc_done else "active",
-            )
+        await asyncio.to_thread(
+            _write_chapter_plan,
+            config.db_path,
+            project_id,
+            arc,
+            chapters,
+            active,
+            reused,
+            arc_done,
+        )
     finally:
-        conn.close()
+        pass
 
     log_node_event(
         "plan_chapter",

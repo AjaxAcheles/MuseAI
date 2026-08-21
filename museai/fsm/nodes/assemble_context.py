@@ -20,6 +20,7 @@ mutilating the prompt.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sqlite3
 
@@ -164,6 +165,35 @@ def _characters(conn: sqlite3.Connection, project_id: str) -> list[dict]:
     return characters
 
 
+def _read_context_rows(
+    db_path, project_id: str, pointer: FSM_Pointer, recent_prose_beats: int
+) -> dict:
+    """Read the package inputs with a connection owned by this worker thread."""
+    conn = connect_db(db_path)
+    try:
+        project = get_project(conn, project_id)
+        chapter = _resolve_chapter(conn, pointer)
+        beat = _resolve_beat(conn, chapter["id"], pointer.beat_index)
+        return {
+            "project": dict(project) if project is not None else None,
+            "chapter": dict(chapter),
+            "beat": dict(beat),
+            "threads": [dict(row) for row in get_open_threads(conn, project_id)],
+            "characters": _characters(conn, project_id),
+            "recent_prose": [
+                row["prose"]
+                for row in get_recent_committed_beats(
+                    conn, project_id, recent_prose_beats
+                )
+            ],
+            "committed_prose": [
+                row["prose"] for row in get_committed_beats(conn, project_id)
+            ],
+        }
+    finally:
+        conn.close()
+
+
 def _prune_to_budget(package: dict, config) -> dict:
     """Drop context until the rendered drafter prompt fits the budget.
 
@@ -222,19 +252,24 @@ async def assemble_context(state: OrchestratorState) -> dict:
         beat_index=pointer.beat_index,
     )
 
-    conn = connect_db(config.db_path)
-    try:
-        project = get_project(conn, project_id)
-        chapter = _resolve_chapter(conn, pointer)
-        beat = _resolve_beat(conn, chapter["id"], pointer.beat_index)
-        spec = json.loads(beat["beat_spec"]) if beat["beat_spec"] else {}
+    rows = await asyncio.to_thread(
+        _read_context_rows,
+        config.db_path,
+        project_id,
+        pointer,
+        config.generation.recent_prose_beats,
+    )
+    project = rows["project"]
+    chapter = rows["chapter"]
+    beat = rows["beat"]
+    spec = json.loads(beat["beat_spec"]) if beat["beat_spec"] else {}
 
-        if not beat["pad_constraint"]:
-            raise PlanningError(
-                f"beat {beat['id']!r} has no pad_constraint; it was never planned"
-            )
+    if not beat["pad_constraint"]:
+        raise PlanningError(
+            f"beat {beat['id']!r} has no pad_constraint; it was never planned"
+        )
 
-        package = {
+    package = {
             "beat": {
                 "id": beat["id"],
                 "ordering": beat["ordering"],
@@ -277,25 +312,16 @@ async def assemble_context(state: OrchestratorState) -> dict:
                 {"id": row["id"], "status": row["status"],
                  "description": row["description"],
                  "priority_score": row["priority_score"]}
-                for row in get_open_threads(conn, project_id)
+                for row in rows["threads"]
             ],
-            "characters": _characters(conn, project_id),
-            "recent_prose": [
-                row["prose"]
-                for row in get_recent_committed_beats(
-                    conn, project_id, config.generation.recent_prose_beats
-                )
-            ],
+            "characters": rows["characters"],
+            "recent_prose": rows["recent_prose"],
             # The whole committed manuscript, for the audit's repetition guard.
             # Never rendered into a prompt and never pruned: it costs no tokens,
             # and it lets the guard catch a beat that copies a distant chapter,
             # not just one inside the drafter's recent-prose window.
-            "committed_prose": [
-                row["prose"] for row in get_committed_beats(conn, project_id)
-            ],
+            "committed_prose": rows["committed_prose"],
         }
-    finally:
-        conn.close()
 
     package["budget"] = _prune_to_budget(package, config)
 
