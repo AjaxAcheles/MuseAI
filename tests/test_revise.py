@@ -37,6 +37,10 @@ DRAFT = (
 )
 OFFENDING = "Mara lied about the letter."
 REPLACEMENT = "Mara said nothing about the letter."
+FULL_REWRITE = (
+    "Mara steadied the lamp, read the letter twice, and climbed the stair "
+    "before dawn found her finally asleep."
+)
 
 PACKAGE = {
     "beat": {
@@ -245,7 +249,7 @@ class TestSpanMode:
         )
 
     async def test_overlapping_spans_fall_back_to_a_full_rewrite(self, patched_llm):
-        calls = patched_llm("A wholly rewritten beat.")
+        calls = patched_llm(FULL_REWRITE)
         failures = [
             failure("Mara lied about the letter."),
             failure("lied about the letter. She climbed"),
@@ -255,7 +259,7 @@ class TestSpanMode:
 
         assert len(calls) == 1
         assert "<passage_to_rewrite>" not in calls[0][1]["content"]
-        assert delta["current_draft_text"] == "A wholly rewritten beat."
+        assert delta["current_draft_text"] == FULL_REWRITE
 
     async def test_identical_pov_quotes_fall_back_to_full_mode(self, patched_llm):
         sentence = "I waited by the gate."
@@ -264,7 +268,7 @@ class TestSpanMode:
             failure(sentence, POV_ERROR_CODE),
             failure(sentence, POV_ERROR_CODE),
         ]
-        calls = patched_llm("A wholly rewritten beat.")
+        calls = patched_llm(FULL_REWRITE)
 
         delta = await revise_prose(state_with(failures, draft=draft))
 
@@ -274,7 +278,7 @@ class TestSpanMode:
         ]
         assert len(calls) == 1
         assert "<passage_to_rewrite>" not in calls[0][1]["content"]
-        assert delta["current_draft_text"] == "A wholly rewritten beat."
+        assert delta["current_draft_text"] == FULL_REWRITE
 
 
 class TestSpliceGuard:
@@ -301,7 +305,7 @@ class TestSpliceGuard:
         calls = patched_llm(
             "word " * 200,
             "word " * 200,
-            "A wholly rewritten beat.",
+            FULL_REWRITE,
         )
 
         delta = await revise_prose(state_with([failure()]))
@@ -311,17 +315,17 @@ class TestSpliceGuard:
         assert "<passage_to_rewrite>" in calls[0][1]["content"]
         assert "<passage_to_rewrite>" in calls[1][1]["content"]
         assert "<passage_to_rewrite>" not in calls[2][1]["content"]
-        assert delta["current_draft_text"] == "A wholly rewritten beat."
+        assert delta["current_draft_text"] == FULL_REWRITE
 
     async def test_an_echoing_span_rewrite_falls_back_to_a_full_rewrite(
         self, patched_llm
     ):
         echoing = f"{REPLACEMENT} The lamp turned through the fog. She climbed"
-        patched_llm(echoing, echoing, "A wholly rewritten beat.")
+        patched_llm(echoing, echoing, FULL_REWRITE)
 
         delta = await revise_prose(state_with([failure()]))
 
-        assert delta["current_draft_text"] == "A wholly rewritten beat."
+        assert delta["current_draft_text"] == FULL_REWRITE
         assert echoing not in delta["current_draft_text"]
 
     async def test_a_corrected_span_rewrite_stays_in_span_mode(self, patched_llm):
@@ -344,14 +348,14 @@ class TestSpliceGuard:
             )
         )
         echoing = f"{REPLACEMENT} The lamp turned through the fog. She climbed"
-        calls = patched_llm(echoing, "A wholly rewritten beat.")
+        calls = patched_llm(echoing, FULL_REWRITE)
 
         delta = await revise_prose(state_with([failure()]))
 
         assert len(calls) == 2
         assert "<passage_to_rewrite>" in calls[0][1]["content"]
         assert "<passage_to_rewrite>" not in calls[1][1]["content"]
-        assert delta["current_draft_text"] == "A wholly rewritten beat."
+        assert delta["current_draft_text"] == FULL_REWRITE
 
     async def test_a_span_rejection_correction_quotes_the_guarded_echo(
         self, patched_llm
@@ -371,7 +375,7 @@ class TestFullMode:
     async def test_a_locatable_density_failure_uses_full_mode(
         self, patched_llm, caplog, monkeypatch
     ):
-        calls = patched_llm("A wholly rewritten beat.")
+        calls = patched_llm(FULL_REWRITE)
         monkeypatch.setattr(logging.getLogger("museai"), "propagate", True)
         with caplog.at_level(logging.INFO, logger="museai.fsm"):
             await revise_prose(state_with([failure(OFFENDING, ERROR_CODE, True)]))
@@ -387,19 +391,92 @@ class TestFullMode:
         assert "whole_draft_failures=1" in revised
 
     async def test_a_missing_span_falls_back_to_a_full_rewrite(self, patched_llm):
-        calls = patched_llm("A wholly rewritten beat.")
+        calls = patched_llm(FULL_REWRITE)
         failures = [failure("She was dishonest concerning the correspondence")]
 
         delta = await revise_prose(state_with(failures))
 
-        assert delta["current_draft_text"] == "A wholly rewritten beat."
+        assert delta["current_draft_text"] == FULL_REWRITE
         assert len(calls) == 1
         body = calls[0][1]["content"]
         assert "<passage_to_rewrite>" not in body
         assert "<draft_beat>" in body
 
+    async def test_a_short_full_rewrite_is_corrected_before_it_is_accepted(
+        self, patched_llm, config_factory
+    ):
+        set_node_config(
+            config_factory(
+                context_token_budget=8000,
+                revision=RevisionConfig(
+                    full_rewrite_min_word_ratio=0.6,
+                    full_rewrite_retries=1,
+                ),
+            )
+        )
+        draft = "baseline " * 100
+        calls = patched_llm("stub " * 20, "corrected " * 70)
+
+        delta = await revise_prose(
+            state_with([failure("not found in this draft")], draft=draft)
+        )
+
+        assert len(calls) == 2
+        assert "dropped from 100 words to 20 words" in calls[1][-1]["content"]
+        assert delta["current_draft_text"] == ("corrected " * 70).strip()
+
+    async def test_exhausted_short_full_rewrites_keep_the_original_draft(
+        self, patched_llm, config_factory, caplog, monkeypatch
+    ):
+        set_node_config(
+            config_factory(
+                context_token_budget=8000,
+                revision=RevisionConfig(
+                    full_rewrite_min_word_ratio=0.6,
+                    full_rewrite_retries=1,
+                ),
+            )
+        )
+        draft = "baseline " * 100
+        calls = patched_llm("stub " * 20, "still " * 30)
+        monkeypatch.setattr(logging.getLogger("museai"), "propagate", True)
+
+        with caplog.at_level(logging.INFO, logger="museai.fsm"):
+            delta = await revise_prose(
+                state_with([failure("not found in this draft")], draft=draft)
+            )
+
+        assert len(calls) == 2
+        assert delta["current_draft_text"] == draft
+        assert any(
+            "node=revise event=rewrite_collapse_abandoned" in record.getMessage()
+            for record in caplog.records
+        )
+
+    async def test_a_comparable_full_rewrite_needs_no_correction(
+        self, patched_llm, config_factory
+    ):
+        set_node_config(
+            config_factory(
+                context_token_budget=8000,
+                revision=RevisionConfig(
+                    full_rewrite_min_word_ratio=0.6,
+                    full_rewrite_retries=1,
+                ),
+            )
+        )
+        draft = "baseline " * 100
+        calls = patched_llm("revised " * 80)
+
+        delta = await revise_prose(
+            state_with([failure("not found in this draft")], draft=draft)
+        )
+
+        assert len(calls) == 1
+        assert delta["current_draft_text"] == ("revised " * 80).strip()
+
     async def test_the_full_prompt_carries_every_failure(self, patched_llm):
-        calls = patched_llm("rewritten")
+        calls = patched_llm(FULL_REWRITE)
         failures = [
             failure("nowhere in the draft at all, truly"),
             failure("also absent from the draft entirely"),

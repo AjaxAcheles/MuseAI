@@ -55,6 +55,15 @@ _SPAN_REJECTION_CORRECTION = (
     "surrounding wording quoted above."
 )
 
+# The first full rewrite of the 2026-08-21 beat dropped 988 words to 150. A
+# critic then found less to fault and promoted the stub as the running best, so
+# the correction must name the lost scope before another paid call can help.
+_SHORT_REWRITE_CORRECTION = (
+    "The rewrite dropped from {baseline_words} words to {words} words.\n\n"
+    "Fix the named failures without cutting the beat's events, scenes, or "
+    "dialogue. Return prose of comparable length."
+)
+
 
 def _word_starts(text: str) -> list[int]:
     """Offsets of every word start in ``text`` — the candidate span origins."""
@@ -391,7 +400,43 @@ async def revise_prose(state: OrchestratorState) -> dict:
             span_text="",
             package=package,
         )
-        revised = await _rewrite(config, messages, f"beat {beat_id!r}", beat_id)
+        baseline_words = len(draft.split())
+        floor = config.revision.full_rewrite_min_word_ratio * baseline_words
+        for rejection_attempt in range(config.revision.full_rewrite_retries + 1):
+            revised = await _rewrite(config, messages, f"beat {beat_id!r}", beat_id)
+            words = len(revised.split())
+            if words >= floor:
+                break
+            log_node_event(
+                "revise",
+                event="rewrite_too_short",
+                beat_id=beat_id,
+                attempt=rejection_attempt + 1,
+                words=words,
+                baseline_words=baseline_words,
+                floor=floor,
+            )
+            if rejection_attempt == config.revision.full_rewrite_retries:
+                revised = draft
+                log_node_event(
+                    "revise",
+                    event="rewrite_collapse_abandoned",
+                    beat_id=beat_id,
+                    words=words,
+                    baseline_words=baseline_words,
+                )
+                break
+            messages = [
+                *messages,
+                {"role": "assistant", "content": revised},
+                {
+                    "role": "user",
+                    "content": _SHORT_REWRITE_CORRECTION.format(
+                        baseline_words=baseline_words,
+                        words=words,
+                    ),
+                },
+            ]
 
     retry_count = state["retry_count"] + 1
     mode = "span" if span_mode else "full"

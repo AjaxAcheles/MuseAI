@@ -630,7 +630,15 @@ async def adversarial_critics(state: OrchestratorState) -> dict:
     combined = [*state["critic_failures"], *failures]
     total = len(combined)
     best_count = state["best_seen_failure_count"]
-    improved = best_count is None or total < best_count
+    best_draft = state["best_seen_draft"]
+    best_seen_rejected_short = (
+        best_draft is not None
+        and len(draft.split())
+        < config.revision.best_seen_min_word_ratio * len(best_draft.split())
+    )
+    improved = not best_seen_rejected_short and (
+        best_count is None or total < best_count
+    )
 
     # "Is this the best draft so far" and "did the last revise help" are
     # different questions and need different baselines. `best_seen_failure_count`
@@ -687,6 +695,7 @@ async def adversarial_critics(state: OrchestratorState) -> dict:
         total_failures=total,
         best_seen_failure_count=delta["best_seen_failure_count"],
         improved=improved,
+        best_seen_rejected_short=best_seen_rejected_short,
         pre_revise_failure_count=pre_revise,
         progressed_by_signature=progressed_by_signature,
         progressed=progressed,

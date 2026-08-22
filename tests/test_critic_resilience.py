@@ -122,11 +122,12 @@ class _Response:
 
 
 def state_with(**overrides):
+    draft = overrides.pop("current_draft_text", DRAFT)
     return make_initial_state(
         "test-project",
         FSM_Pointer(arc_id="arc-1", chapter_id="arc-1-c01", beat_index=0),
         active_context_package=PACKAGE,
-        current_draft_text=DRAFT,
+        current_draft_text=draft,
         **overrides,
     )
 
@@ -1149,6 +1150,50 @@ async def test_the_first_cycle_has_no_baseline_to_fail_against(configure, script
     delta = await adversarial_critics(state_with())
 
     assert delta["last_cycle_improved"] is True
+
+
+async def test_a_shorter_draft_cannot_replace_the_running_best(
+    configure, scripted_loop
+):
+    configure(critic_parse_retries=0, critic_degrade_threshold=3)
+    scripted_loop(CLEAN)
+    best_draft = "best " * 100
+    short_draft = "short " * 50
+
+    delta = await adversarial_critics(
+        state_with(
+            current_draft_text=short_draft,
+            best_seen_draft=best_draft,
+            best_seen_failure_count=1,
+            best_seen_failures=[],
+        )
+    )
+
+    assert delta["best_seen_draft"] == best_draft
+    assert delta["best_seen_failure_count"] == 1
+    assert delta["best_seen_failures"] == []
+
+
+async def test_a_comparable_draft_can_replace_the_running_best(
+    configure, scripted_loop
+):
+    configure(critic_parse_retries=0, critic_degrade_threshold=3)
+    scripted_loop(CLEAN)
+    best_draft = "best " * 100
+    comparable_draft = "comparable " * 80
+
+    delta = await adversarial_critics(
+        state_with(
+            current_draft_text=comparable_draft,
+            best_seen_draft=best_draft,
+            best_seen_failure_count=1,
+            best_seen_failures=[],
+        )
+    )
+
+    assert delta["best_seen_draft"] == comparable_draft
+    assert delta["best_seen_failure_count"] == 0
+    assert delta["best_seen_failures"] == []
 
 
 # ------------------------------------------------------------ audit interaction

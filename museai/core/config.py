@@ -568,8 +568,21 @@ class RevisionConfig(BaseModel):
     # rewrite. Seven of seven span rejections in the 2026-08-20 run were that
     # exact echo guard, so the retry is bounded here beside the splice bounds.
     span_rejection_retries: int = 1
+    # The 2026-08-21 full rewrite collapsed a 988-word beat to 150 words. Keep
+    # a regenerated beat above this share of its source so fewer critic findings
+    # cannot win merely by deleting the events, scenes, and dialogue to inspect.
+    full_rewrite_min_word_ratio: float = 0.6
+    # The same 988 -> 150 collapse became the running-best draft because its
+    # shorter surface had fewer findings. A candidate this far below the best
+    # cannot replace that best on finding count alone.
+    best_seen_min_word_ratio: float = 0.75
+    # One correction gives a short full rewrite a chance to restore its lost
+    # scope before the original draft is kept instead of accepting a stub.
+    full_rewrite_retries: int = 1
 
-    @field_validator("fuzzy_threshold")
+    @field_validator(
+        "fuzzy_threshold", "full_rewrite_min_word_ratio", "best_seen_min_word_ratio"
+    )
     @classmethod
     def _proportion(cls, value: float, info: ValidationInfo) -> float:
         if not 0.0 <= value <= 1.0:
@@ -585,11 +598,11 @@ class RevisionConfig(BaseModel):
             raise ValueError(f"{info.field_name} must be >= 1, got {value}")
         return value
 
-    @field_validator("span_rejection_retries")
+    @field_validator("span_rejection_retries", "full_rewrite_retries")
     @classmethod
-    def _non_negative_retries(cls, value: int) -> int:
+    def _non_negative_retries(cls, value: int, info: ValidationInfo) -> int:
         if value < 0:
-            raise ValueError(f"span_rejection_retries must be >= 0, got {value}")
+            raise ValueError(f"{info.field_name} must be >= 0, got {value}")
         return value
 
     @field_validator("span_growth_limit")

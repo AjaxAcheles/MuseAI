@@ -26,6 +26,22 @@ session ritual.
 
 Next up: v1 complete
 
+## 2026-08-21 - Task G rewrite-collapse scoring: done
+
+- Full-beat rewrites now reject prose below a configured share of their input,
+  give the reviser one correction naming the lost word count, and retain the
+  original beat if that correction still collapses it. The revision event and
+  stream payload always carry the prose actually retained.
+- Running-best scoring now refuses to promote a substantially shorter draft on
+  a lower finding count alone, while ordinary same-length improvements continue
+  to replace the best. The critic event records that suppression for diagnosis.
+- The three revision controls are strict configuration keys in both shipped
+  YAML files: full-rewrite floor, best-seen floor, and full-rewrite retries.
+
+**Done-check** - WSL `uv run pytest -q` -> `949 passed`. Both shipped configs
+loaded with a disposable `MUSEAI_API_KEY`; `git diff --check` was clean; and
+`graphify update .` completed.
+
 ## 2026-08-21 - Task F critic and span-rewrite resilience: done
 
 - A critic verdict truncated after complete JSON findings now salvages those

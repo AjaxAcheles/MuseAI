@@ -441,6 +441,16 @@ revision:
   # prose. Give that local rewrite one bounded correction before regenerating
   # the entire beat, which would discard the paid span result and invite drift.
   span_rejection_retries: 1
+  # A 2026-08-21 full rewrite collapsed 988 words to 150. Reject a regenerated
+  # beat below this share of its source: fewer findings cannot pay for deleted
+  # events, scenes, or dialogue.
+  full_rewrite_min_word_ratio: 0.6
+  # The same collapse briefly became the running best on finding count alone.
+  # A substantially shorter candidate cannot replace that best for that reason.
+  best_seen_min_word_ratio: 0.75
+  # Let a rejected short rewrite correct its lost scope once before keeping the
+  # original beat instead of committing a collapsed stub.
+  full_rewrite_retries: 1
 
 # Retrieval budgets for the agents' read-only story tools. Each trades context
 # spend against how much true story an agent can see.
